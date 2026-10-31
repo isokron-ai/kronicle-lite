@@ -1,0 +1,40 @@
+{
+  "name": "kronicle-lite",
+  "version": "0.1.0",
+  "description": "Local-first MCP server: hash-chained document store with signed retrieval receipts and an agent orient (staleness/drift) protocol.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": { "kronicle-lite": "./dist/cli.js" },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["dist", "docs", "skills", "examples", "LICENSE", "NOTICE", "README.md", "CHANGELOG.md"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "lint": "eslint src test",
+    "typecheck": "tsc --noEmit",
+    "serve": "node dist/cli.js serve"
+  },
+  "keywords": ["mcp", "model-context-protocol", "sqlite", "hash-chain", "tamper-evident", "receipts", "ed25519", "agent-memory", "staleness"],
+  "author": "Joshua Bryan",
+  "repository": { "type": "git", "url": "https://github.com/rafe-walker/kronicle-lite" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@noble/hashes": "^2.0.1",
+    "better-sqlite3": "^12.6.0",
+    "canonicalize": "^2.1.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.19.0",
+    "eslint": "^9.39.0",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.0",
+    "vitest": "^3.2.4"
+  }
+}
