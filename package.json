@@ -4,12 +4,30 @@
   "description": "Local-first MCP server: hash-chained document store with signed retrieval receipts and an agent orient (staleness/drift) protocol.",
   "license": "Apache-2.0",
   "type": "module",
-  "bin": { "kronicle-lite": "./dist/cli.js" },
+  "bin": {
+    "kronicle-lite": "dist/cli.js"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
-  "files": ["dist", "docs", "skills", "examples", "LICENSE", "NOTICE", "README.md", "CHANGELOG.md"],
-  "engines": { "node": ">=20" },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "docs",
+    "skills",
+    "examples",
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "tsup",
     "pretest": "npm run build",
@@ -19,9 +37,22 @@
     "prepublishOnly": "npm run build",
     "serve": "node dist/cli.js serve"
   },
-  "keywords": ["mcp", "model-context-protocol", "sqlite", "hash-chain", "tamper-evident", "receipts", "ed25519", "agent-memory", "staleness"],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "sqlite",
+    "hash-chain",
+    "tamper-evident",
+    "receipts",
+    "ed25519",
+    "agent-memory",
+    "staleness"
+  ],
   "author": "Joshua Bryan",
-  "repository": { "type": "git", "url": "https://github.com/rafe-walker/kronicle-lite" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rafe-walker/kronicle-lite.git"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@noble/hashes": "^2.0.1",

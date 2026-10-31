@@ -153,6 +153,14 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) (DCO sign-off required) and
 [`ROADMAP.md`](ROADMAP.md) for what is deliberately not here yet: chain-backed
 tickets, HTTP transport, remote checkpoint anchoring, semantic recall.
 
+## Beyond one agent
+
+kronicle-lite is one actor, one process, one trust domain, on purpose.
+**IsoKron** is the platform growing out of the same ideas — a typed graph
+shared by many agents, claim fencing so parallel agents don't collide, and
+per-tenant chains. It is in development and not self-serve;
+https://isokron.ai explains what exists today and what doesn't.
+
 ## License
 
 Apache-2.0. See `LICENSE` and `NOTICE`.

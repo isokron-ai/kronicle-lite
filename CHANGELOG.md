@@ -4,6 +4,13 @@ All notable changes to kronicle-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
+## [Unreleased]
+
+### Changed
+
+- README: "Beyond one agent" section pointing at IsoKron (isokron.ai).
+- package.json normalized by `npm pkg fix` (bin path, repository URL).
+
 ## [0.1.0] — 2026-10-31
 
 First public release.
