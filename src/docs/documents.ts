@@ -1,0 +1,621 @@
+/**
+ * Documents → revisions → blocks, as a projection of chain events.
+ *
+ * Every write builds its events, appends them to the chain and applies the
+ * same `applyEvent` projection that `import` uses to rebuild the tables from
+ * a JSONL export. The chain is the source of truth; these tables are a
+ * derived index.
+ *
+ * Event vocabulary (payloads are documented in docs/FORMAT.md):
+ *   document.put       new document or new full revision (carries markdown)
+ *   document.revised   revision bump caused by supersede_block / tombstone_block
+ *   block.created      one new block (carries content)
+ *   block.superseded   old block → successor block
+ *   block.tombstoned   block retired with a reason, no successor
+ */
+
+import { randomUUID } from 'node:crypto';
+
+import type { Chain, ChainEvent, ChainHead } from '../chain/index.js';
+import { blake3Hex } from '../crypto/hash.js';
+import type { Db } from '../db/open.js';
+import { normalizeMarkdown, parseMarkdown, renderBlocks, type BlockKind, type ParsedBlock } from './parser.js';
+
+export interface BlockRow {
+  block_id: string;
+  doc_id: string;
+  revision: number;
+  ordinal: number;
+  kind: BlockKind;
+  level: number;
+  heading_path: string; // " > " joined
+  content: string;
+  content_hash: string;
+  chain_seq: number;
+  valid_from: string;
+  valid_to: string | null;
+  superseded_by: string | null;
+  tombstoned_at: string | null;
+  tombstone_reason: string | null;
+}
+
+export interface DocumentRow {
+  doc_id: string;
+  slug: string;
+  title: string;
+  current_revision: number;
+  created_at: string;
+  updated_at: string;
+  tombstoned_at: string | null;
+}
+
+export interface BlockSummary {
+  block_id: string;
+  ordinal: number;
+  kind: BlockKind;
+  heading_path: string[];
+  content_hash: string;
+  status: 'created' | 'unchanged' | 'superseded' | 'tombstoned';
+  supersedes?: string;
+}
+
+export interface PutDocumentResult {
+  doc_id: string;
+  slug: string;
+  title: string;
+  revision: number;
+  chain_seq: number;
+  head: ChainHead;
+  blocks: BlockSummary[];
+  events: number;
+}
+
+export interface SupersedeBlockResult {
+  old_block_id: string;
+  new_block_id: string;
+  content_hash: string;
+  doc_slug: string;
+  revision: number;
+  head: ChainHead;
+}
+
+export interface TombstoneBlockResult {
+  block_id: string;
+  doc_slug: string;
+  revision: number;
+  head: ChainHead;
+}
+
+export class DocumentError extends Error {
+  override readonly name = 'DocumentError';
+  constructor(
+    readonly code: 'unknown_block' | 'block_not_live' | 'unknown_document' | 'invalid_slug' | 'empty_content',
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+export const SLUG_RE = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+export const HP_SEP = ' > ';
+
+export function joinHeadingPath(p: readonly string[]): string {
+  return p.join(HP_SEP);
+}
+export function splitHeadingPath(s: string): string[] {
+  return s.length === 0 ? [] : s.split(HP_SEP);
+}
+
+type Pending = { event_type: string; payload: Record<string, unknown> };
+
+export class DocumentStore {
+  constructor(
+    private readonly db: Db,
+    private readonly chain: Chain,
+  ) {}
+
+  // ───────────────────────────── reads ─────────────────────────────
+
+  getDocument(slug: string): DocumentRow | null {
+    return (this.db.prepare(`SELECT * FROM documents WHERE slug = ?`).get(slug) as DocumentRow | undefined) ?? null;
+  }
+
+  getDocumentById(doc_id: string): DocumentRow | null {
+    return (
+      (this.db.prepare(`SELECT * FROM documents WHERE doc_id = ?`).get(doc_id) as DocumentRow | undefined) ?? null
+    );
+  }
+
+  listDocuments(limit = 50): DocumentRow[] {
+    return this.db
+      .prepare(`SELECT * FROM documents WHERE tombstoned_at IS NULL ORDER BY updated_at DESC LIMIT ?`)
+      .all(limit) as DocumentRow[];
+  }
+
+  countDocuments(): number {
+    return (this.db.prepare(`SELECT COUNT(*) n FROM documents WHERE tombstoned_at IS NULL`).get() as { n: number }).n;
+  }
+
+  countLiveBlocks(): number {
+    return (
+      this.db.prepare(`SELECT COUNT(*) n FROM blocks WHERE valid_to IS NULL AND tombstoned_at IS NULL`).get() as {
+        n: number;
+      }
+    ).n;
+  }
+
+  getBlock(block_id: string): BlockRow | null {
+    return (this.db.prepare(`SELECT * FROM blocks WHERE block_id = ?`).get(block_id) as BlockRow | undefined) ?? null;
+  }
+
+  liveBlocks(doc_id: string): BlockRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM blocks WHERE doc_id = ? AND valid_to IS NULL AND tombstoned_at IS NULL ORDER BY ordinal ASC`,
+      )
+      .all(doc_id) as BlockRow[];
+  }
+
+  getRevisionMarkdown(doc_id: string, revision: number): string | null {
+    const r = this.db
+      .prepare(`SELECT markdown FROM document_revisions WHERE doc_id = ? AND revision = ?`)
+      .get(doc_id, revision) as { markdown: string } | undefined;
+    return r?.markdown ?? null;
+  }
+
+  /**
+   * Follow superseded_by from `block_id` to the chain's end. Returns the
+   * walk (first = the block itself, last = the current head of the lineage).
+   */
+  supersessionWalk(block_id: string): BlockRow[] {
+    return this.db
+      .prepare(
+        `WITH RECURSIVE lineage(block_id, depth) AS (
+           SELECT ?, 0
+           UNION ALL
+           SELECT b.superseded_by, l.depth + 1
+             FROM blocks b JOIN lineage l ON b.block_id = l.block_id
+            WHERE b.superseded_by IS NOT NULL AND l.depth < 10000
+         )
+         SELECT b.* FROM lineage l JOIN blocks b ON b.block_id = l.block_id ORDER BY l.depth ASC`,
+      )
+      .all(block_id) as BlockRow[];
+  }
+
+  // ───────────────────────────── writes ─────────────────────────────
+
+  putDocument(args: {
+    slug: string;
+    title: string;
+    markdown: string;
+    actor_id: string;
+    idempotency_key?: string;
+  }): PutDocumentResult {
+    if (!SLUG_RE.test(args.slug)) {
+      throw new DocumentError('invalid_slug', `slug must match ${SLUG_RE}`);
+    }
+    const parsed = parseMarkdown(args.markdown);
+    const markdown = normalizeMarkdown(args.markdown);
+    const markdown_hash = blake3Hex(markdown);
+
+    const run = this.db.transaction((): PutDocumentResult => {
+      const existing = this.getDocument(args.slug);
+      const doc_id = existing?.doc_id ?? randomUUID();
+      const revision = (existing?.current_revision ?? 0) + 1;
+      const oldLive = existing ? this.liveBlocks(doc_id) : [];
+
+      const plan = planRevision(oldLive, parsed);
+      const summaries: BlockSummary[] = [];
+      const pending: Pending[] = [];
+
+      const carried = plan.carried.map((c) => ({
+        block_id: c.old.block_id,
+        ordinal: c.next.ordinal,
+        heading_path: c.next.heading_path,
+      }));
+      const created = plan.created.map((p) => ({ block_id: randomUUID(), parsed: p }));
+      const replaced = plan.replaced.map((r) => ({
+        old_block_id: r.old.block_id,
+        new_block_id: randomUUID(),
+        parsed: r.next,
+      }));
+
+      const liveBlockIds: string[] = [];
+      const byOrdinal = new Map<number, string>();
+      for (const c of carried) byOrdinal.set(c.ordinal, c.block_id);
+      for (const c of created) byOrdinal.set(c.parsed.ordinal, c.block_id);
+      for (const r of replaced) byOrdinal.set(r.parsed.ordinal, r.new_block_id);
+      for (const p of parsed) liveBlockIds.push(byOrdinal.get(p.ordinal)!);
+
+      pending.push({
+        event_type: 'document.put',
+        payload: {
+          doc_id,
+          slug: args.slug,
+          title: args.title,
+          revision,
+          markdown,
+          markdown_hash,
+          block_ids: liveBlockIds,
+          carried,
+        },
+      });
+      for (const c of [...created, ...replaced]) {
+        const p = c.parsed;
+        const block_id = 'new_block_id' in c ? c.new_block_id : c.block_id;
+        pending.push({
+          event_type: 'block.created',
+          payload: {
+            block_id,
+            doc_id,
+            doc_slug: args.slug,
+            revision,
+            ordinal: p.ordinal,
+            kind: p.kind,
+            level: p.level,
+            heading_path: p.heading_path,
+            content: p.content,
+            content_hash: p.content_hash,
+          },
+        });
+      }
+      for (const r of replaced) {
+        pending.push({
+          event_type: 'block.superseded',
+          payload: {
+            block_id: r.old_block_id,
+            successor_block_id: r.new_block_id,
+            doc_id,
+            doc_slug: args.slug,
+            revision,
+            reason: `replaced in revision ${revision}`,
+          },
+        });
+      }
+      for (const t of plan.tombstoned) {
+        pending.push({
+          event_type: 'block.tombstoned',
+          payload: {
+            block_id: t.block_id,
+            doc_id,
+            doc_slug: args.slug,
+            revision,
+            reason: `removed in revision ${revision}`,
+          },
+        });
+      }
+
+      // Idempotency: key only the first event; if it replays, the whole put
+      // already happened and we return the current state.
+      const first = this.chain.append({
+        event_type: pending[0]!.event_type,
+        payload: pending[0]!.payload,
+        actor_id: args.actor_id,
+        ...(args.idempotency_key !== undefined ? { idempotency_key: args.idempotency_key } : {}),
+      });
+      if (first.replayed) {
+        return this.describePut(first.event);
+      }
+      this.applyEvent(first.event);
+      let head = first.head;
+      for (const ev of pending.slice(1)) {
+        const r = this.chain.append({ event_type: ev.event_type, payload: ev.payload, actor_id: args.actor_id });
+        this.applyEvent(r.event);
+        head = r.head;
+      }
+
+      for (const c of carried) {
+        const next = parsed[c.ordinal]!;
+        summaries.push({
+          block_id: c.block_id,
+          ordinal: c.ordinal,
+          kind: next.kind,
+          heading_path: next.heading_path,
+          content_hash: next.content_hash,
+          status: 'unchanged',
+        });
+      }
+      for (const c of created) {
+        summaries.push({
+          block_id: c.block_id,
+          ordinal: c.parsed.ordinal,
+          kind: c.parsed.kind,
+          heading_path: c.parsed.heading_path,
+          content_hash: c.parsed.content_hash,
+          status: 'created',
+        });
+      }
+      for (const r of replaced) {
+        summaries.push({
+          block_id: r.new_block_id,
+          ordinal: r.parsed.ordinal,
+          kind: r.parsed.kind,
+          heading_path: r.parsed.heading_path,
+          content_hash: r.parsed.content_hash,
+          status: 'created',
+          supersedes: r.old_block_id,
+        });
+      }
+      for (const t of plan.tombstoned) {
+        summaries.push({
+          block_id: t.block_id,
+          ordinal: t.ordinal,
+          kind: t.kind,
+          heading_path: splitHeadingPath(t.heading_path),
+          content_hash: t.content_hash,
+          status: 'tombstoned',
+        });
+      }
+      summaries.sort((a, b) => a.ordinal - b.ordinal || a.status.localeCompare(b.status));
+
+      return {
+        doc_id,
+        slug: args.slug,
+        title: args.title,
+        revision,
+        chain_seq: first.event.seq,
+        head,
+        blocks: summaries,
+        events: pending.length,
+      };
+    });
+    return run.immediate();
+  }
+
+  private describePut(putEvent: ChainEvent): PutDocumentResult {
+    const p = putEvent.payload as { doc_id: string; slug: string; title: string; revision: number };
+    const live = this.liveBlocks(p.doc_id);
+    return {
+      doc_id: p.doc_id,
+      slug: p.slug,
+      title: p.title,
+      revision: p.revision,
+      chain_seq: putEvent.seq,
+      head: this.chain.head(),
+      blocks: live.map((b) => ({
+        block_id: b.block_id,
+        ordinal: b.ordinal,
+        kind: b.kind,
+        heading_path: splitHeadingPath(b.heading_path),
+        content_hash: b.content_hash,
+        status: 'unchanged' as const,
+      })),
+      events: 0,
+    };
+  }
+
+  supersedeBlock(args: {
+    block_id: string;
+    new_content: string;
+    reason: string;
+    actor_id: string;
+  }): SupersedeBlockResult {
+    const content = normalizeMarkdown(args.new_content).trim();
+    if (content.length === 0) throw new DocumentError('empty_content', 'new_content is empty');
+    const run = this.db.transaction((): SupersedeBlockResult => {
+      const old = this.requireLive(args.block_id);
+      const doc = this.getDocumentById(old.doc_id)!;
+      const revision = doc.current_revision + 1;
+      const new_block_id = randomUUID();
+      const content_hash = blake3Hex(content);
+      const level = old.kind === 'heading' ? headingLevelOf(old) : 0;
+
+      const r1 = this.chain.append({
+        event_type: 'block.created',
+        actor_id: args.actor_id,
+        payload: {
+          block_id: new_block_id,
+          doc_id: old.doc_id,
+          doc_slug: doc.slug,
+          revision,
+          ordinal: old.ordinal,
+          kind: old.kind,
+          level,
+          heading_path: splitHeadingPath(old.heading_path),
+          content,
+          content_hash,
+        },
+      });
+      this.applyEvent(r1.event);
+      const r2 = this.chain.append({
+        event_type: 'block.superseded',
+        actor_id: args.actor_id,
+        payload: {
+          block_id: old.block_id,
+          successor_block_id: new_block_id,
+          doc_id: old.doc_id,
+          doc_slug: doc.slug,
+          revision,
+          reason: args.reason,
+        },
+      });
+      this.applyEvent(r2.event);
+      const head = this.emitRevised(doc, revision, args.actor_id, 'supersede_block');
+      return { old_block_id: old.block_id, new_block_id, content_hash, doc_slug: doc.slug, revision, head };
+    });
+    return run.immediate();
+  }
+
+  tombstoneBlock(args: { block_id: string; reason: string; actor_id: string }): TombstoneBlockResult {
+    const run = this.db.transaction((): TombstoneBlockResult => {
+      const old = this.requireLive(args.block_id);
+      const doc = this.getDocumentById(old.doc_id)!;
+      const revision = doc.current_revision + 1;
+      const r = this.chain.append({
+        event_type: 'block.tombstoned',
+        actor_id: args.actor_id,
+        payload: {
+          block_id: old.block_id,
+          doc_id: old.doc_id,
+          doc_slug: doc.slug,
+          revision,
+          reason: args.reason,
+        },
+      });
+      this.applyEvent(r.event);
+      const head = this.emitRevised(doc, revision, args.actor_id, 'tombstone_block');
+      return { block_id: old.block_id, doc_slug: doc.slug, revision, head };
+    });
+    return run.immediate();
+  }
+
+  private emitRevised(doc: DocumentRow, revision: number, actor_id: string, cause: string): ChainHead {
+    const live = this.liveBlocks(doc.doc_id).map((b) => ({
+      kind: b.kind,
+      level: b.kind === 'heading' ? headingLevelOf(b) : 0,
+      content: b.content,
+    }));
+    const markdown = renderBlocks(live);
+    const r = this.chain.append({
+      event_type: 'document.revised',
+      actor_id,
+      payload: {
+        doc_id: doc.doc_id,
+        slug: doc.slug,
+        title: doc.title,
+        revision,
+        markdown,
+        markdown_hash: blake3Hex(markdown),
+        cause,
+      },
+    });
+    this.applyEvent(r.event);
+    return r.head;
+  }
+
+  private requireLive(block_id: string): BlockRow {
+    const b = this.getBlock(block_id);
+    if (!b) throw new DocumentError('unknown_block', `no block ${block_id}`);
+    if (b.tombstoned_at !== null) {
+      throw new DocumentError('block_not_live', `block ${block_id} is tombstoned (${b.tombstone_reason ?? 'no reason'})`);
+    }
+    if (b.valid_to !== null) {
+      throw new DocumentError(
+        'block_not_live',
+        `block ${block_id} is superseded by ${b.superseded_by ?? 'unknown'}; operate on the current head`,
+      );
+    }
+    return b;
+  }
+
+  // ───────────────────────────── projection ─────────────────────────────
+
+  /** Apply one chain event to the derived tables. Idempotent per event. */
+  applyEvent(ev: ChainEvent): void {
+    const p = ev.payload as Record<string, unknown>;
+    switch (ev.event_type) {
+      case 'document.put':
+      case 'document.revised': {
+        const doc_id = p['doc_id'] as string;
+        const slug = p['slug'] as string;
+        const title = p['title'] as string;
+        const revision = p['revision'] as number;
+        const markdown = p['markdown'] as string;
+        const markdown_hash = p['markdown_hash'] as string;
+        this.db
+          .prepare(
+            `INSERT INTO documents (doc_id, slug, title, current_revision, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(doc_id) DO UPDATE SET title = excluded.title,
+               current_revision = excluded.current_revision, updated_at = excluded.updated_at`,
+          )
+          .run(doc_id, slug, title, revision, ev.occurred_at, ev.occurred_at);
+        this.db
+          .prepare(
+            `INSERT OR IGNORE INTO document_revisions (doc_id, revision, markdown, content_hash, chain_seq, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+          )
+          .run(doc_id, revision, markdown, markdown_hash, ev.seq, ev.occurred_at);
+        const carried = (p['carried'] as { block_id: string; ordinal: number; heading_path: string[] }[] | undefined) ?? [];
+        const upd = this.db.prepare(`UPDATE blocks SET ordinal = ?, heading_path = ? WHERE block_id = ?`);
+        for (const c of carried) upd.run(c.ordinal, joinHeadingPath(c.heading_path), c.block_id);
+        return;
+      }
+      case 'block.created': {
+        this.db
+          .prepare(
+            `INSERT OR IGNORE INTO blocks (block_id, doc_id, revision, ordinal, kind, level, heading_path, content,
+               content_hash, chain_seq, valid_from)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            p['block_id'],
+            p['doc_id'],
+            p['revision'],
+            p['ordinal'],
+            p['kind'],
+            (p['level'] as number | undefined) ?? 0,
+            joinHeadingPath(p['heading_path'] as string[]),
+            p['content'],
+            p['content_hash'],
+            ev.seq,
+            ev.occurred_at,
+          );
+        return;
+      }
+      case 'block.superseded': {
+        this.db
+          .prepare(`UPDATE blocks SET valid_to = ?, superseded_by = ? WHERE block_id = ? AND valid_to IS NULL`)
+          .run(ev.occurred_at, p['successor_block_id'], p['block_id']);
+        return;
+      }
+      case 'block.tombstoned': {
+        this.db
+          .prepare(
+            `UPDATE blocks SET tombstoned_at = ?, tombstone_reason = ?, valid_to = COALESCE(valid_to, ?)
+              WHERE block_id = ? AND tombstoned_at IS NULL`,
+          )
+          .run(ev.occurred_at, p['reason'] ?? null, ev.occurred_at, p['block_id']);
+        return;
+      }
+      default:
+        return; // unknown types (checkpoints, future vocab) have no projection
+    }
+  }
+}
+
+function headingLevelOf(b: BlockRow): number {
+  return Math.max(1, Math.min(6, b.level || 1));
+}
+
+interface RevisionPlan {
+  carried: { old: BlockRow; next: ParsedBlock }[];
+  replaced: { old: BlockRow; next: ParsedBlock }[];
+  created: ParsedBlock[];
+  tombstoned: BlockRow[];
+}
+
+/**
+ * Deterministic diff between the live blocks and a freshly parsed revision.
+ *   1. Same content_hash → carried (block id preserved, position updated).
+ *   2. Remaining old/new paired in order within the same (kind, heading_path).
+ *   3. Leftover old → tombstoned; leftover new → created.
+ */
+export function planRevision(oldLive: readonly BlockRow[], next: readonly ParsedBlock[]): RevisionPlan {
+  const plan: RevisionPlan = { carried: [], replaced: [], created: [], tombstoned: [] };
+  const oldUnmatched = [...oldLive];
+  const newUnmatched: ParsedBlock[] = [];
+
+  for (const n of next) {
+    const i = oldUnmatched.findIndex((o) => o.content_hash === n.content_hash && o.kind === n.kind);
+    if (i >= 0) {
+      plan.carried.push({ old: oldUnmatched[i]!, next: n });
+      oldUnmatched.splice(i, 1);
+    } else {
+      newUnmatched.push(n);
+    }
+  }
+
+  for (const n of newUnmatched) {
+    const key = joinHeadingPath(n.heading_path);
+    const i = oldUnmatched.findIndex((o) => o.kind === n.kind && o.heading_path === key);
+    if (i >= 0) {
+      plan.replaced.push({ old: oldUnmatched[i]!, next: n });
+      oldUnmatched.splice(i, 1);
+    } else {
+      plan.created.push(n);
+    }
+  }
+  plan.tombstoned = oldUnmatched;
+  return plan;
+}

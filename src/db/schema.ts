@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS blocks (
   revision         INTEGER NOT NULL,
   ordinal          INTEGER NOT NULL,
   kind             TEXT NOT NULL,
+  level            INTEGER NOT NULL DEFAULT 0,
   heading_path     TEXT NOT NULL,
   content          TEXT NOT NULL,
   content_hash     TEXT NOT NULL,
@@ -105,6 +106,10 @@ CREATE TRIGGER IF NOT EXISTS blocks_ai AFTER INSERT ON blocks BEGIN
 END;
 CREATE TRIGGER IF NOT EXISTS blocks_ad AFTER DELETE ON blocks BEGIN
   INSERT INTO blocks_fts(blocks_fts, rowid, content, heading_path) VALUES ('delete', old.rowid, old.content, old.heading_path);
+END;
+CREATE TRIGGER IF NOT EXISTS blocks_au AFTER UPDATE OF content, heading_path ON blocks BEGIN
+  INSERT INTO blocks_fts(blocks_fts, rowid, content, heading_path) VALUES ('delete', old.rowid, old.content, old.heading_path);
+  INSERT INTO blocks_fts(rowid, content, heading_path) VALUES (new.rowid, new.content, new.heading_path);
 END;
 
 CREATE TABLE IF NOT EXISTS receipts (
