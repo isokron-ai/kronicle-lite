@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.rafe-walker/kronicle-lite",
-  "description": "Local-first hash-chained document store with signed retrieval receipts and an orient protocol that tells an agent when its beliefs went stale.",
+  "description": "Hash-chained local document store with signed receipts and an orient protocol for stale agent memory",
   "repository": {
     "url": "https://github.com/rafe-walker/kronicle-lite",
     "source": "github"
@@ -13,14 +13,32 @@
       "registryType": "npm",
       "identifier": "kronicle-lite",
       "version": "0.1.1",
-      "transport": { "type": "stdio" },
+      "transport": {
+        "type": "stdio"
+      },
       "runtimeHint": "npx",
       "packageArguments": [
-        { "type": "positional", "value": "serve", "description": "Run the stdio MCP server" }
+        {
+          "type": "positional",
+          "value": "serve",
+          "description": "Run the stdio MCP server"
+        }
       ],
       "environmentVariables": [
-        { "name": "KRONICLE_LITE_DATA_DIR", "description": "Directory for the SQLite store and keys (default ~/.kronicle-lite)", "isRequired": false, "format": "string", "isSecret": false },
-        { "name": "KRONICLE_LITE_ACTOR", "description": "Actor id label used on cursors and writes (default local-agent)", "isRequired": false, "format": "string", "isSecret": false }
+        {
+          "name": "KRONICLE_LITE_DATA_DIR",
+          "description": "Directory for the SQLite store and keys (default ~/.kronicle-lite)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
+        },
+        {
+          "name": "KRONICLE_LITE_ACTOR",
+          "description": "Actor id label used on cursors and writes (default local-agent)",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
+        }
       ]
     }
   ]
