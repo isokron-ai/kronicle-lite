@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "kronicle-lite": {
+      "command": "npx",
+      "args": ["-y", "kronicle-lite", "serve", "--data-dir", "./.kronicle-lite", "--actor", "claude-code"]
+    }
+  }
+}

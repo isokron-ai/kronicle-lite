@@ -1,0 +1,295 @@
+# kronicle-lite data format (v1)
+
+This document is the product. Everything a verifier needs to re-derive every
+hash and signature in a kronicle-lite database is specified here, with worked
+examples you can reproduce in any language. The format is kronicle-lite's own;
+it is not compatible with any other chain or receipt format.
+
+Conventions:
+
+- **Canonical JSON** = RFC 8785 (JSON Canonicalization Scheme). Object keys
+  sorted by UTF-16 code units, no whitespace, numbers in ECMAScript shortest
+  form, strings escaped per JCS. We use the `canonicalize` npm package.
+- **Hex** is lowercase. **Timestamps** are ISO 8601 UTC with milliseconds
+  (`2026-01-01T00:00:00.000Z`).
+- `||` is byte concatenation of UTF-8 strings unless stated otherwise.
+
+## 1. Chain events
+
+One SQLite row per event in `events`:
+
+| column | meaning |
+|---|---|
+| `seq` | 1-based position; dense, no gaps |
+| `event_id` | UUID (v4), unique |
+| `event_type` | dotted name, e.g. `block.created` |
+| `payload_canonical` | the payload, stored in canonical JSON |
+| `actor_id` | who appended |
+| `occurred_at` | timestamp |
+| `nonce` | 16 random bytes, hex (32 chars) |
+| `prev_hash` | `this_hash` of `seq - 1`, or the genesis hash for `seq = 1` |
+| `this_hash` | the event hash (below) |
+| `idempotency_key` | optional caller key, unique when present |
+
+`chain_head` holds one row `(seq, hash)` mirroring the last event. It is
+written in the same transaction as the insert (`BEGIN IMMEDIATE`), which is the
+single-writer discipline: SQLite serializes writers across processes.
+
+### 1.1 Genesis
+
+```
+GENESIS_STRING = "kronicle-lite-genesis-v1"
+GENESIS_HASH   = sha256(GENESIS_STRING)
+               = 82e2f801fe92b883565ca82840049af743d916682007b0345395f067266e0382
+```
+
+The genesis hash is public. Anyone holding a copy of the database can verify
+the chain from `seq = 1` without any secret or key.
+
+### 1.2 Event hash
+
+```
+envelope = canonicalize({
+  event_id, event_type, actor_id, occurred_at,
+  payload                 // the JSON object, nested allowed
+})
+preimage  = envelope || "|" || decimal(seq) || "|" || prev_hash || "|" || nonce
+this_hash = hex( sha256( utf8(preimage) ) )
+```
+
+Design notes:
+
+- The envelope binds `event_type`, `actor_id`, `occurred_at` and `event_id`
+  into the hash. A hash over the payload alone would let someone flip
+  `block.tombstoned` to `block.noop` undetected.
+- `seq` and `prev_hash` bind position and linkage; the `nonce` makes two
+  otherwise identical events hash differently and frustrates precomputation.
+- The payload is hashed in canonical form, so key order in the caller's object
+  is irrelevant.
+
+### 1.3 Worked example
+
+Event 1 (prev = genesis):
+
+```
+event_id    = 6f1c2a3e-8b4d-4c5e-9f60-1a2b3c4d5e6f
+event_type  = note.added
+actor_id    = alice
+occurred_at = 2026-01-01T00:00:00.000Z
+payload     = { "b": 2, "a": "x", "nested": { "z": [1, 2], "y": null } }
+nonce       = 000102030405060708090a0b0c0d0e0f
+
+envelope  = {"actor_id":"alice","event_id":"6f1c2a3e-8b4d-4c5e-9f60-1a2b3c4d5e6f","event_type":"note.added","occurred_at":"2026-01-01T00:00:00.000Z","payload":{"a":"x","b":2,"nested":{"y":null,"z":[1,2]}}}
+preimage  = <envelope>|1|82e2f801fe92b883565ca82840049af743d916682007b0345395f067266e0382|000102030405060708090a0b0c0d0e0f
+this_hash = 7433c20300c2d4754590bc84201e59784ab5d32601a0ffdf8805519729fb7d7b
+```
+
+Event 2 (prev = event 1):
+
+```
+event_id    = 7a2d3b4f-9c5e-4d6f-a071-2b3c4d5e6f70
+payload     = { "a": "y" }            (other fields as above)
+nonce       = 101112131415161718191a1b1c1d1e1f
+
+envelope  = {"actor_id":"alice","event_id":"7a2d3b4f-9c5e-4d6f-a071-2b3c4d5e6f70","event_type":"note.added","occurred_at":"2026-01-01T00:00:00.000Z","payload":{"a":"y"}}
+this_hash = a271676cbace94eb0aef27889573fb0629afb55127d32c830cc27066c65007fb
+```
+
+Shell check for event 1:
+
+```sh
+printf '%s' '{"actor_id":"alice","event_id":"6f1c2a3e-8b4d-4c5e-9f60-1a2b3c4d5e6f","event_type":"note.added","occurred_at":"2026-01-01T00:00:00.000Z","payload":{"a":"x","b":2,"nested":{"y":null,"z":[1,2]}}}|1|82e2f801fe92b883565ca82840049af743d916682007b0345395f067266e0382|000102030405060708090a0b0c0d0e0f' | sha256sum
+# 7433c20300c2d4754590bc84201e59784ab5d32601a0ffdf8805519729fb7d7b
+```
+
+### 1.4 Verification (`verify_chain`)
+
+Walk `seq` ascending from `from_seq`:
+
+1. `seq` must equal the previous `seq + 1` (else `seq_gap`).
+2. `prev_hash` must equal the previous event's `this_hash`, or genesis at
+   `seq = 1` (else `link_broken`).
+3. Recompute `this_hash` per §1.2; it must match (else `hash_mismatch`).
+4. After the last event, `chain_head` must equal `(seq, this_hash)` of the
+   last event (else `head_mismatch`).
+
+The first failure is reported with its `seq`. Then every stored checkpoint
+whose range lies inside the verified prefix is checked (§2).
+
+## 2. Checkpoints
+
+A checkpoint is a signed Merkle root over the event hashes in `[from_seq, to_seq]`.
+
+```
+leaf_i = sha256( utf8( canonicalize({ seq: seq_i, this_hash: hash_i }) ) )   // 32 bytes
+node   = sha256( left_bytes || right_bytes )                                  // 32 bytes
+```
+
+Leaves are in ascending `seq`. At each level, pairs are hashed left-to-right;
+an odd trailing node is promoted unchanged. The root of a single leaf is that
+leaf. `root` is the root as hex.
+
+Signing payload and signature:
+
+```
+payload   = canonicalize({ v: 1, from_seq, to_seq, leaf_count, root })
+signature = base64( Ed25519_sign( utf8(payload) ) )
+```
+
+Stored in `checkpoints` with `key_id`. Worked example over events 1–2 above:
+
+```
+leaf_1 input = {"seq":1,"this_hash":"7433c20300c2d4754590bc84201e59784ab5d32601a0ffdf8805519729fb7d7b"}
+root         = cb7ed764916eb3bbfaa78d0856c79c68841dc2a8163c8d011fd7b74756b4700b
+payload      = {"from_seq":1,"leaf_count":2,"root":"cb7ed764916eb3bbfaa78d0856c79c68841dc2a8163c8d011fd7b74756b4700b","to_seq":2,"v":1}
+```
+
+A checkpoint verifies when (a) `key_id` is in `signing_keys` and not revoked,
+(b) the signature checks over the payload, and (c) the recomputed root over
+the current rows equals `root` with the same `leaf_count`.
+
+## 3. Documents and blocks
+
+`put_document(slug, title, markdown)` normalizes line endings to `\n`, trims
+trailing whitespace per line, and splits into blocks:
+
+- an ATX heading line (`#`..`######`) is a `heading` block and pushes/pops the
+  heading path;
+- a fenced code block (``` or ~~~, fence included) is a `code` block;
+- any other run of non-blank lines is a `paragraph` block.
+
+```
+content_hash = hex( BLAKE3-256( utf8(block_content) ) )
+```
+
+Example: `BLAKE3("Use blue/green for the API.") =
+22dc95c8312b3e93aa2a15d4be929b7fbabb3a5e0a624a94196e6355557507f0`.
+
+The heading path is not part of the content hash: the same paragraph under a
+renamed heading keeps its address.
+
+### 3.1 Event vocabulary
+
+| event_type | payload fields |
+|---|---|
+| `document.put` | `doc_id, slug, title, revision, markdown, markdown_hash (BLAKE3), block_ids[], carried[{block_id, ordinal, heading_path}]` |
+| `document.revised` | `doc_id, slug, title, revision, markdown, markdown_hash, cause` |
+| `block.created` | `block_id, doc_id, doc_slug, revision, ordinal, kind, level, heading_path[], content, content_hash` |
+| `block.superseded` | `block_id, successor_block_id, doc_id, doc_slug, revision, reason` |
+| `block.tombstoned` | `block_id, doc_id, doc_slug, revision, reason` |
+
+Block content and document markdown live in the chain, so the chain alone
+rebuilds the tables (`kronicle-lite import`).
+
+### 3.2 Revision diff
+
+On a re-put, live blocks are compared to the freshly parsed set:
+
+1. same `(kind, content_hash)` → **carried** (block id kept, position updated);
+2. remaining old/new paired in order within the same `(kind, heading_path)` →
+   old is **superseded** by new;
+3. leftover old → **tombstoned** (`removed in revision N`); leftover new →
+   **created**.
+
+`supersede_block` and `tombstone_block` act on one live block and append a
+`document.revised` event carrying the re-rendered markdown.
+
+### 3.3 Lineage
+
+`blocks.superseded_by` forms a chain. `verify()` follows it with a recursive
+query to the lineage head. A block is **live** when `valid_to IS NULL AND
+tombstoned_at IS NULL`.
+
+## 4. Receipts (v2)
+
+A receipt is issued for each `recall()` hit:
+
+```json
+{
+  "v": 2,
+  "receipt_id": "<uuid>",
+  "workspace": "local",
+  "block_id": "<uuid>",
+  "content_hash": "<blake3 hex>",
+  "doc_slug": "deploy",
+  "revision": 1,
+  "chain_seq": 2,
+  "chain_head_hash": "<this_hash of event chain_seq>",
+  "query_hash": "<sha256 hex of the query string>",
+  "issued_at": "2026-01-01T00:00:05.000Z",
+  "key_id": "ed25519-…",
+  "signature": "<base64>"
+}
+```
+
+```
+payload   = canonicalize( receipt without "signature" )
+signature = base64( Ed25519_sign( utf8(payload) ) )
+```
+
+Worked example (with `chain_seq = 2`, `chain_head_hash` = event 2's hash above,
+query `"blue green"` → `query_hash = a8036affb32fc5b1c4ddebd055b5cd471de0f4a6566579b6bef9a988b9c1f38c`):
+
+```
+payload = {"block_id":"9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d","chain_head_hash":"a271676cbace94eb0aef27889573fb0629afb55127d32c830cc27066c65007fb","chain_seq":2,"content_hash":"22dc95c8312b3e93aa2a15d4be929b7fbabb3a5e0a624a94196e6355557507f0","doc_slug":"deploy","issued_at":"2026-01-01T00:00:05.000Z","key_id":"ed25519-0123456789abcdef","query_hash":"a8036affb32fc5b1c4ddebd055b5cd471de0f4a6566579b6bef9a988b9c1f38c","receipt_id":"2d1e0f9a-8b7c-4d6e-9f50-0a1b2c3d4e5f","revision":1,"v":2,"workspace":"local"}
+```
+
+`key_id` is `"ed25519-" + first 16 hex chars of sha256(SPKI DER of the public key)`.
+
+### 4.1 Verification (`verify`)
+
+Fail-closed, in order:
+
+| step | failure → status / reason |
+|---|---|
+| parse against the schema | `UNVERIFIED / malformed_receipt` |
+| `signature` present | `UNVERIFIED / unsigned_receipt` |
+| `key_id` known / not revoked | `UNVERIFIED / unknown_key` or `key_revoked` |
+| Ed25519 verifies over payload | `UNVERIFIED / signature_invalid` |
+| block row exists | `UNVERIFIED / unknown_block` |
+| stored `content_hash` matches | `UNVERIFIED / content_hash_mismatch` |
+| `events[chain_seq].this_hash == chain_head_hash` (seq 0 ⇒ genesis) | `UNVERIFIED / chain_seq_unknown` or `chain_head_mismatch` |
+| lineage head tombstoned | `TOMBSTONED / tombstoned` |
+| lineage head is a different block | `SUPERSEDED / superseded_by_newer_head` (+ `current_block_id`, `current_content_hash`) |
+| otherwise | `VERIFIED / verified` |
+
+## 5. Cursors
+
+```
+full:    sxt1.<base64url(canonicalize(body))>.<base64url(HMAC-SHA256(secret, canonical_body))>
+compact: sxt1c.<chain_seq>.<first 8 chars of base64url(HMAC-SHA256(secret, actor_id || "|" || chain_seq))>
+body = { actor_id, chain_seq, chain_hash, issued_at }
+```
+
+The secret is `cursor-secret` in the data dir (32 random bytes, hex). Cursors
+are an optimization, not a credential: a bad cursor makes the server recover
+the actor's position from the flight recorder (or genesis). Nothing is granted
+by holding one.
+
+## 6. Keys and files
+
+```
+<data-dir>/kronicle-lite.db    SQLite (WAL)
+<data-dir>/signing-key.pem     Ed25519 private key, PKCS#8 PEM, mode 0600
+<data-dir>/cursor-secret       64 hex chars, mode 0600
+```
+
+`signing_keys(key_id, public_key_pem, algorithm, created_at, revoked_at)`
+holds the public half so a copied database verifies on its own. Setting
+`revoked_at` downgrades every receipt and checkpoint signed by that key to
+`UNVERIFIED` / `unknown_key`.
+
+## 7. Export
+
+`kronicle-lite export` writes JSONL: a header line
+`{"kronicle_lite_export":1, head, key_id, public_key_pem, exported_at}` then
+one event object per line, ascending `seq`, with all columns from §1
+(`payload` as an object). `import` re-verifies every hash and link while
+loading and rebuilds documents and blocks from the events.
+
+## 8. Versioning
+
+Any change to §1.2, §2, §3 content hashing, §4 payloads or §5 token layout is
+a format change and must bump the genesis string, the receipt `v`, the
+checkpoint `v` or the cursor prefix respectively. Old data must still verify
+under its original rules.
