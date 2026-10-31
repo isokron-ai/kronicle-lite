@@ -12,6 +12,7 @@
   "engines": { "node": ">=20" },
   "scripts": {
     "build": "tsup",
+    "pretest": "npm run build",
     "test": "vitest run",
     "lint": "eslint src test",
     "typecheck": "tsc --noEmit",

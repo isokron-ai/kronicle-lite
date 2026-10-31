@@ -38,8 +38,7 @@ export const ReceiptSchema = z
     signature: z.string().min(1).optional(),
   })
   .strict();
-export type Receipt = z.infer<typeof Receipt>;
-const Receipt = ReceiptSchema;
+export type Receipt = z.infer<typeof ReceiptSchema>;
 export type UnsignedReceipt = Omit<Receipt, 'signature'>;
 
 export function receiptSigningPayload(receipt: Receipt | UnsignedReceipt): string {
