@@ -16,6 +16,7 @@
     "test": "vitest run",
     "lint": "eslint src test",
     "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build",
     "serve": "node dist/cli.js serve"
   },
   "keywords": ["mcp", "model-context-protocol", "sqlite", "hash-chain", "tamper-evident", "receipts", "ed25519", "agent-memory", "staleness"],
