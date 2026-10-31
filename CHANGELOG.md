@@ -4,7 +4,11 @@ All notable changes to kronicle-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
-## [Unreleased]
+## [0.1.1] — 2026-10-31
+
+### Added
+
+- `mcpName` in package.json and `server.json` for the official MCP Registry.
 
 ### Changed
 

@@ -1,6 +1,6 @@
 {
   "name": "kronicle-lite",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local-first MCP server: hash-chained document store with signed retrieval receipts and an agent orient (staleness/drift) protocol.",
   "license": "Apache-2.0",
   "type": "module",
@@ -69,5 +69,6 @@
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.46.0",
     "vitest": "^3.2.4"
-  }
+  },
+  "mcpName": "io.github.rafe-walker/kronicle-lite"
 }
