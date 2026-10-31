@@ -9,7 +9,7 @@ export * from './chain/index.js';
 export { canonicalize, type JsonValue } from './crypto/canonical.js';
 export { sha256Hex, blake3Hex } from './crypto/hash.js';
 export { verifyEd25519, type Signer, type ServerIdentity } from './crypto/keys.js';
-export { openDatabase, defaultDataDir, type OpenOptions } from './db/open.js';
+export { openDatabase, defaultDataDir, type Db, type OpenOptions, type Opened } from './db/open.js';
 export { SCHEMA_SQL, SCHEMA_VERSION } from './db/schema.js';
 export {
   DocumentStore,

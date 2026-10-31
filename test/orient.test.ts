@@ -77,6 +77,12 @@ describe('delta fold', () => {
   it('enumerates by default, rolls up block.created, keeps chain order', () => {
     expect(resolveRenderPolicy('block.created')).toBe('volume-rollup');
     expect(resolveRenderPolicy('block.tombstoned')).toBe('enumerate');
+    // Companion work-queue claim churn rolls up by default; force-releases do not.
+    expect(resolveRenderPolicy('sea_ticket.claimed')).toBe('volume-rollup');
+    expect(resolveRenderPolicy('sea_ticket.claim_released')).toBe('volume-rollup');
+    expect(resolveRenderPolicy('sea_ticket.claim_expired')).toBe('volume-rollup');
+    expect(resolveRenderPolicy('sea_ticket.claim_force_released')).toBe('enumerate');
+    expect(resolveRenderPolicy('sea_ticket.created')).toBe('enumerate');
     expect(resolveRenderPolicy('block.created', { never_rollup_event_types: ['block.created'] })).toBe('enumerate');
     expect(resolveRenderPolicy('x.y', { overrides: { 'x.y': 'volume-rollup' } })).toBe('volume-rollup');
     const events = [ev(1, 'document.put'), ev(2, 'block.created'), ev(3, 'block.created'), ev(4, 'block.tombstoned')];

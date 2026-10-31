@@ -85,6 +85,13 @@ describe('Chain.append', () => {
     expect(chain.head().seq).toBe(1);
   });
 
+  it('findByIdempotencyKey returns the prior event or null', () => {
+    const { chain } = fresh();
+    expect(chain.findByIdempotencyKey('sea:nope')).toBeNull();
+    const a = chain.append({ event_type: 't', payload: { x: 1 }, actor_id: 'a', idempotency_key: 'sea:k1' });
+    expect(chain.findByIdempotencyKey('sea:k1')).toEqual(a.event);
+  });
+
   it('rejects non-object payloads', () => {
     const { chain } = fresh();
     expect(() =>

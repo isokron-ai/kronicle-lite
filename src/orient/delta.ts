@@ -21,8 +21,20 @@ import type { ChainEvent } from '../chain/index.js';
 export const RenderPolicy = z.enum(['enumerate', 'volume-rollup']);
 export type RenderPolicy = z.infer<typeof RenderPolicy>;
 
-/** block.created is the firehose in a document store; everything else enumerates by default. */
-export const DEFAULT_VOLUME_ROLLUP_PREFIXES: readonly string[] = Object.freeze(['block.created']);
+/**
+ * block.created is the firehose in a document store; everything else
+ * enumerates by default. Companion projections that share the file (sea-lite's
+ * work queue) register their own high-volume types here so routine claim
+ * churn does not crowd a briefing: a claim, a release or a lazily noticed
+ * expiry is news only in aggregate. Force-releases stay enumerated — an
+ * operator overriding a holder is something the holder must see.
+ */
+export const DEFAULT_VOLUME_ROLLUP_PREFIXES: readonly string[] = Object.freeze([
+  'block.created',
+  'sea_ticket.claimed',
+  'sea_ticket.claim_released',
+  'sea_ticket.claim_expired',
+]);
 
 export interface PolicyOptions {
   readonly volume_rollup_prefixes?: readonly string[];

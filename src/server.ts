@@ -67,7 +67,7 @@ function errorResult(err: unknown): ToolText {
 export function createServer(store: KronicleLite, opts: ServerOptions = {}): McpServer {
   const defaultActor = opts.defaultActorId ?? process.env['KRONICLE_LITE_ACTOR'] ?? 'local-agent';
   const server = new McpServer(
-    { name: 'kronicle-lite', version: opts.version ?? '0.1.0' },
+    { name: 'kronicle-lite', version: opts.version ?? '0.2.0' },
     {
       instructions:
         'kronicle-lite is a hash-chained document store with signed retrieval receipts and an orient protocol. ' +

@@ -280,6 +280,19 @@ export class Chain {
     return row ? rowToEvent(row) : null;
   }
 
+  /**
+   * The event previously appended under this idempotency key, or null. Lets a
+   * caller that does row work BEFORE its append (a projection sharing the
+   * file) detect a replay up front instead of discovering it from
+   * `append().replayed` after it has already mutated rows.
+   */
+  findByIdempotencyKey(idempotency_key: string): ChainEvent | null {
+    const row = this.db.prepare(`SELECT * FROM events WHERE idempotency_key = ?`).get(idempotency_key) as
+      | EventRow
+      | undefined;
+    return row ? rowToEvent(row) : null;
+  }
+
   /** Events with from_seq <= seq <= to_seq, ascending. */
   range(from_seq: number, to_seq: number, limit?: number): ChainEvent[] {
     const sql = `SELECT * FROM events WHERE seq >= ? AND seq <= ? ORDER BY seq ASC${limit !== undefined ? ' LIMIT ?' : ''}`;

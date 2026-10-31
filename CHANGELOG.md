@@ -4,6 +4,26 @@ All notable changes to kronicle-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
+## [0.2.0] — 2026-10-31
+
+Small additive release so a companion projection ([sea-lite](https://github.com/rafe-walker/sea-lite),
+a fenced work queue) can share the same SQLite file and chain cleanly.
+
+### Added
+
+- `Chain.findByIdempotencyKey(key)`: look up the event previously appended
+  under an idempotency key, so a caller that mutates projection rows before
+  its append can detect a replay up front.
+- `Db` and `Opened` types exported from the package root.
+
+### Changed
+
+- Default volume-rollup set now also covers `sea_ticket.claimed`,
+  `sea_ticket.claim_released` and `sea_ticket.claim_expired`, so claim churn
+  from a shared work queue does not dominate `get_system_state` deltas.
+  `sea_ticket.claim_force_released` stays enumerated.
+- CLI and server now report 0.2.0.
+
 ## [0.1.1] — 2026-10-31
 
 ### Added
