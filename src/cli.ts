@@ -21,7 +21,7 @@ import { createServer, renderSystemStateMarkdown } from './server.js';
 import { KronicleLite } from './store.js';
 import { FOCUSES, type Focus } from './orient/orient.js';
 
-const VERSION = '0.2.0';
+import { VERSION } from './version.js';
 
 interface Args {
   cmd: string;
