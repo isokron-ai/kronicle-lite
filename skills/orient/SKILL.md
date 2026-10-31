@@ -58,6 +58,9 @@ your beliefs aligned with what the store actually says now.
    - If you hold a receipt for the old block, call `verify(receipt)` and
      expect `SUPERSEDED` or `TOMBSTONED`; fetch the successor with
      `recall()` before using the content again.
+   - When you are unsure which of your beliefs are affected, pass them to
+     `audit_assumptions` as `{symbol, value}` claims and act on the
+     verdicts (`stale`, `contradicted`, `retracted`) it returns.
 
 5. **Carry the new cursor.** Pass it as `since_cursor` next time and as
    `cursor` on every write tool so the stale-write advisory can be computed.

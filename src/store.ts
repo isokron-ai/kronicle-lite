@@ -11,6 +11,7 @@ import { Chain, ChainEventSchema, type ChainEvent } from './chain/index.js';
 import type { ServerIdentity } from './crypto/keys.js';
 import { openDatabase, type Db, type OpenOptions } from './db/open.js';
 import { DocumentStore } from './docs/documents.js';
+import { AssumptionAuditor } from './orient/audit.js';
 import { Orient, type OrientOptions } from './orient/orient.js';
 import { Recall } from './recall/recall.js';
 import { ReceiptVerifier } from './recall/verify-receipt.js';
@@ -29,6 +30,7 @@ export class KronicleLite {
   readonly recall: Recall;
   readonly verifier: ReceiptVerifier;
   readonly orient: Orient;
+  readonly auditor: AssumptionAuditor;
 
   constructor(opts: KronicleLiteOptions = {}) {
     const opened = openDatabase(opts);
@@ -40,6 +42,7 @@ export class KronicleLite {
     this.recall = new Recall(this.db, this.chain, this.identity.signer, opts.workspace ?? 'local');
     this.verifier = new ReceiptVerifier(this.db, this.chain, this.docs);
     this.orient = new Orient(this.db, this.chain, this.docs, this.identity.cursor_secret, opts.orient);
+    this.auditor = new AssumptionAuditor(this.chain, this.docs);
   }
 
   close(): void {

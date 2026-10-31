@@ -55,6 +55,7 @@ describe('MCP server (in-process transport)', () => {
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(
       [
+        'audit_assumptions',
         'checkpoint_chain',
         'get_system_state',
         'put_document',

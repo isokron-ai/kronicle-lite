@@ -119,6 +119,27 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     },
   );
 
+  server.registerTool(
+    'audit_assumptions',
+    {
+      title: 'Grade beliefs against the chain',
+      description:
+        'The reconciliation surface. Pass the facts you are about to act on as claims {symbol, value}: symbol is a block ' +
+        'id (value = its content or content_hash), a document slug (value = revision number, markdown hash, or markdown), ' +
+        'or "head" (value = chain seq or hash). Each claim is graded current | stale (a newer version exists) | ' +
+        'contradicted (the live value differs) | retracted (tombstoned) | unknown, with the current truth and a reconcile ' +
+        'line. Use it after a drift banner or retraction list, before writing.',
+      inputSchema: {
+        claims: z
+          .array(z.object({ symbol: z.string().min(1).max(300), value: z.union([z.string().max(200_000), z.number()]) }).strict())
+          .min(1)
+          .max(100),
+      },
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    (args) => json(store.auditor.audit(args.claims)),
+  );
+
   // ───────────────────────────── recall / verify ─────────────────────────────
 
   server.registerTool(

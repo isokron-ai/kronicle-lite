@@ -5,10 +5,9 @@ to land. Open an issue if one matters to you.
 
 ## Next
 
-- **`audit_assumptions {claims:[{symbol, value}]}`** — grade a list of beliefs
-  against the chain (`current | stale | contradicted | unknown`) and return
-  the reconciliation line for each. The orient skill already describes the
-  discipline; this makes it a tool call. Stub only in v0.1.
+- **Richer `audit_assumptions` symbols** — v0.1 grades block ids, document
+  slugs and the chain head. Next: `slug#heading` paths and free-text claims
+  matched through recall.
 - **HTTP transport** — Streamable HTTP alongside stdio, for clients that
   cannot spawn a process, with a bearer token read from the data dir.
 - **Remote checkpoint anchoring** — push signed Merkle roots to somewhere

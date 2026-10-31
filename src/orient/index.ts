@@ -1,3 +1,4 @@
+export * from './audit.js';
 export * from './cursor.js';
 export * from './delta.js';
 export * from './drift.js';

@@ -48,6 +48,6 @@ and add the line from `examples/.claude/CLAUDE.md` to your `CLAUDE.md`.
 
 ## Any MCP client
 
-The server speaks MCP over stdio. `tools/list` returns eight tools; the
+The server speaks MCP over stdio. `tools/list` returns nine tools; the
 `kronicle://docs/{slug}` resource template exposes current document
 revisions as Markdown. See the README for the tool reference.

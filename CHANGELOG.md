@@ -24,7 +24,9 @@ First public release.
 - Orient protocol: HMAC cursors (full and compact), typed delta fold with
   budget demotion, retraction classifier, drift banner (≥100 events or ≥4h),
   stale-write advisory, flight recorder, cursor recovery ladder.
-- MCP server over stdio (`@modelcontextprotocol/sdk`) with eight tools and a
+- `audit_assumptions`: grade claims about blocks, documents and the chain
+  head as `current | stale | contradicted | retracted | unknown`.
+- MCP server over stdio (`@modelcontextprotocol/sdk`) with nine tools and a
   `kronicle://docs/{slug}` resource template.
 - CLI: `serve`, `verify-chain`, `checkpoint`, `export`, `import`, `keys`,
   `put`, `orient`.

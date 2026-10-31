@@ -92,6 +92,7 @@ the receipts) → `verify` before building on an old receipt → write with your
 | tool | what it does | writes chain |
 |---|---|---|
 | `get_system_state` | Orient. `since_cursor` → delta since then; drift banner; retractions; new cursor. `focus`: `orientation` (default), `recent_changes`, `retractions`, `pulse` (~50 tokens). `response_format`: `markdown` (default) or `json`. | no |
+| `audit_assumptions` | Grade claims `{symbol, value}` (block id, doc slug, or `head`) → `current \| stale \| contradicted \| retracted \| unknown` with the current truth and a reconcile line. | no |
 | `recall` | FTS5 bm25 search over live blocks; each hit carries a receipt v2 bound to the chain head. `top_k`, `include_tombstoned`, `include_receipts`. | no (stores receipts) |
 | `verify` | Re-derive a receipt against the live store: signature, block existence, content hash, chain binding, supersession walk → `VERIFIED \| SUPERSEDED \| TOMBSTONED \| UNVERIFIED` + reason. | no |
 | `verify_chain` | Recompute every hash and link in a range; first mismatch; checkpoint results. | no |
@@ -150,7 +151,7 @@ npm run lint
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) (DCO sign-off required) and
 [`ROADMAP.md`](ROADMAP.md) for what is deliberately not here yet: chain-backed
-tickets, HTTP transport, `audit_assumptions`, remote checkpoint anchoring.
+tickets, HTTP transport, remote checkpoint anchoring, semantic recall.
 
 ## License
 
