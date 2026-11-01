@@ -41,8 +41,17 @@ your beliefs aligned with what the store actually says now.
       treat anything you "remembered" as unconfirmed.
    2. `drift_banner` — if `surfaced`, you have been operating on stale
       ground; the delta below IS the catch-up.
+   0. `integrity` — if `ok` is false (the Markdown starts with
+      `INTEGRITY FAILURE`), the store was edited outside kronicle-lite.
+      Stop, tell the operator to run `kronicle-lite verify-chain`, and do
+      not rely on recalled text until it passes.
    3. `retractions` — things you may have relied on that are now wrong.
-      Reconcile EACH before acting on the touched documents (step 4).
+      Each carries `old_text`, `new_text` (null when removed) and a word
+      `diff` (`[-old-]{+new+}`), so you usually do not need another call
+      to learn the current truth. Reconcile EACH before acting on the
+      touched documents (step 4). Instruction retractions from other
+      projects are hidden (`scope.hidden_retractions`); pass
+      `all_projects: true` only when the operator asks.
    4. `delta.entries` — what changed since your cursor, oldest first.
       Rollups (`volume_rollup`) carry a count and the most recent sample;
       nothing has been dropped, only folded.
@@ -95,13 +104,49 @@ in the session — and always before writing — call `verify(receipt)`:
 - `SUPERSEDED` — fetch `current_block_id`; the content you remember is old.
 - `TOMBSTONED` — the block was retired; drop the claim.
 - `UNVERIFIED` — the receipt, block or chain does not check out; say so
-  and re-read from scratch.
+  and re-read from scratch. `content_tampered` / `projection_mismatch`
+  mean the stored text no longer matches the chain: treat it as an
+  integrity failure, not as news.
+
+`recall` never serves text that fails its integrity check; such hits are
+listed under `withheld` instead. A non-empty `withheld` is an integrity
+failure too.
 
 ## Stale-write advisory
 
 Write tools return `stale_write_advisory`. It never blocks the write. If
 `advisory: true`, you wrote without having oriented recently (or ever).
 Orient before the next write and re-check anything the delta touched.
+
+## Tool notes (moved out of the tool descriptions to keep tools/list small)
+
+- `get_system_state`: `focus` = `orientation` (digest + delta +
+  retractions; default) | `recent_changes` (delta + retractions) |
+  `retractions` (only retractions) | `pulse` (head + drift banner; call it
+  before every write and escalate when the banner surfaces).
+  `budget_tokens` (200–64000, default 3000) bounds the delta; folded
+  entries are rolled up, never dropped. `response_format` = `markdown`
+  (default) or `json` for the text block; `structuredContent` always has
+  the JSON. An invalid or missing cursor never fails: `recovery.method`
+  says how your position was recovered (`presented`, `presented_compact`,
+  `presented_stale`, `flight_recorder`, `genesis`).
+- `recall`: bm25 over live blocks; superseded blocks are never returned,
+  tombstoned only with `include_tombstoned`; `include_receipts: false`
+  for a lean result.
+- `verify`: malformed input yields `UNVERIFIED / malformed_receipt`, never
+  a tool error. `SUPERSEDED` carries `current_block_id` and
+  `current_content_hash`; `STALE_SOURCE` carries `source_drift`.
+- `put_document`: unchanged blocks keep their ids; `idempotency_key`
+  replays return the first result; `bind_git` needs `source_path` and
+  only warns outside git.
+- `supersede_block` / `tombstone_block`: refused on a block that is not
+  live; operate on the current head.
+- `checkpoint_chain {push: true}` sends the signed root, range,
+  signature and public key (never events) to the anchor service; the
+  local checkpoint is stored either way.
+- Every write tool takes your `cursor` and answers with a
+  `stale_write_advisory` (never blocks).
+- Full result schemas: the `kronicle://schemas/tools` resource.
 
 ## What this skill does NOT do
 

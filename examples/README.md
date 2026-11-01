@@ -66,8 +66,9 @@ Client config (any client that speaks MCP 2026-07-28 over HTTP):
 
 ## Any MCP client
 
-The server speaks MCP 2026-07-28 over stdio (dual-era: 2025 `initialize`
-clients are served too) and over HTTP (2026-07-28 only). `tools/list`
-returns nine tools, each with an `outputSchema`; the `kronicle://docs/{slug}`
-resource template exposes current document revisions as Markdown. See the
-README for the tool reference.
+The server speaks MCP 2026-07-28 over stdio and HTTP, and serves 2025
+`initialize` clients on both (HTTP since 0.5.0; `--modern-only` refuses
+them there). `tools/list` returns ten tools, each with a compact
+`outputSchema` (the full ones are in the `kronicle://schemas/tools`
+resource); the `kronicle://docs/{slug}` resource template exposes current
+document revisions as Markdown. See the README for the tool reference.
