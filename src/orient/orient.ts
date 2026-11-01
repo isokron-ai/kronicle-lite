@@ -725,12 +725,25 @@ function nextSteps(args: {
     steps.push('Your since_cursor was rejected; position was recovered server-side. Replace it with the new cursor below.');
   }
   if (args.focus === 'pulse') {
-    if (pendingStep) steps.push(pendingStep);
-    steps.push(
-      args.drift_banner.surfaced
-        ? 'Drift threshold crossed: call get_system_state with focus=recent_changes to read what changed.'
-        : 'Within threshold; proceed. Carry the new cursor.',
-    );
+    // A pulse never lists retractions, so it must never read as a clean bill
+    // when something changed: "proceed" only when nothing changed and nothing
+    // is pending (stress/bench finding: agents deployed on "within threshold").
+    const integrityBad = !!args.integrity && !args.integrity.ok;
+    const changed = (args.drift_banner.events_since_last_orient ?? 0) > 0;
+    if (pendingStep) {
+      steps.push(pendingStep);
+      steps.push('Do NOT run deploy/migrate/publish/push until every pending item is re-read. Carry the new cursor.');
+    } else if (integrityBad) {
+      steps.push('Do NOT act on recalled text until the integrity failure is resolved.');
+    } else if (args.drift_banner.surfaced) {
+      steps.push('Drift threshold crossed: call get_system_state with focus=retractions (or recent_changes) to read what changed before acting.');
+    } else if (changed) {
+      steps.push(
+        `${args.drift_banner.events_since_last_orient} change(s) since your last look; a pulse does not list retractions. Before a world-changing action (deploy, migrate, publish, push) call get_system_state with focus=retractions. Carry the new cursor.`,
+      );
+    } else {
+      steps.push('No changes since your last look; proceed. Carry the new cursor.');
+    }
     return steps;
   }
   const safety = args.retractions?.filter((r) => r.severity === 'safety').length ?? 0;

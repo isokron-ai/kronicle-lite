@@ -6,6 +6,18 @@ uses semantic versioning once past 0.x.
 
 ## [0.8.0] — 2026-11-01
 
+### Fixed — a pulse never reads as a clean bill
+
+- `get_system_state` / `orient` with `focus: "pulse"` used to end with
+  "Within threshold; proceed" whenever fewer changes than the drift threshold
+  had landed — even when one of them changed a runbook the agent relied on
+  (a pulse lists no retractions). In the release re-run of agent-memory-bench
+  every pull-only agent failure (2 in T1, 1 in T7) came from trusting that line.
+  A pulse now says "proceed" only when nothing changed and nothing is pending;
+  otherwise it tells the agent to re-read pending items or call
+  `focus=retractions` before a world-changing command. The orient skill says
+  the same. Affects 0.5.0–0.7.0.
+
 ### Added — derived-note lineage (Track A S1 "next-session stale copy")
 
 - A note an agent writes from what it read now records which exact block

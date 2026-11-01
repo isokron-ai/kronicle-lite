@@ -36,8 +36,10 @@ your beliefs aligned with what the store actually says now.
 
 2. **Call `get_system_state`** with `since_cursor=<your cursor>` and the
    default budget. Use `focus=pulse` when you only need to know *whether*
-   anything changed (about 50 tokens); escalate to `recent_changes` or
-   `orientation` when the pulse surfaces the drift banner.
+   anything changed (about 50 tokens). A pulse does not list retractions:
+   if it reports any change or anything pending, call `focus=retractions`
+   before acting, and before a world-changing command never treat a pulse
+   alone as clearance — use `focus=retractions`.
 
 3. **Read the response in this order:**
    1. `recovery.method` — `presented`/`presented_compact` means your cursor
