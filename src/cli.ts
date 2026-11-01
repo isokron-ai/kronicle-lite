@@ -19,22 +19,16 @@
  *   kronicle-lite verify-chain [--full] | rebuild | demo [--dir D] [--keep]
  */
 
-import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { createReadStream, createWriteStream, existsSync, readFileSync } from 'node:fs';
 import { text as readStreamText } from 'node:stream/consumers';
 import { basename } from 'node:path';
 
-import { anchorStatus, tryPushCheckpoint, verifyRemote, type AnchorCallOptions } from './anchor/anchor.js';
-import { AnchorApiError, AnchorUnreachableError } from './anchor/client.js';
-import { AnchorConfigError } from './anchor/config.js';
+import type { AnchorCallOptions } from './anchor/anchor.js';
 import { defaultDataDir } from './db/open.js';
 import { isValidSlug, type DocumentSource } from './docs/documents.js';
 import { describeProjection } from './docs/integrity.js';
-import { runDemo } from './demo.js';
-import { runDoctor, renderDoctor } from './doctor.js';
 import { bindGit } from './git/binding.js';
-import { DEFAULT_HTTP_PORT, loadOrCreateBearer, readBearerFile, serveHttp } from './http.js';
-import { createServerFactory, renderSystemStateMarkdown } from './server.js';
+import { renderSystemStateMarkdown } from './orient/render.js';
 import { KronicleLite } from './store.js';
 import { FOCUSES, type Focus } from './orient/orient.js';
 import { entryFor, projectScopeFor, resolveContext } from './instructions/paths.js';
@@ -42,6 +36,10 @@ import { describeSync, syncInstructionFile, type SyncResult } from './instructio
 import { InstructionWatcher, resolveWatchSet, syncInstructionSet } from './instructions/watch.js';
 
 import { VERSION } from './version.js';
+
+// Heavy modules (MCP SDK, HTTP, anchor client, doctor) load only for the
+// commands that use them: `orient` and the hooks stay cheap to start.
+const DEFAULT_HTTP_PORT = 7417; // = http.ts DEFAULT_HTTP_PORT (guarded by test)
 
 interface Args {
   cmd: string;
@@ -179,7 +177,7 @@ function anchorOpts(flags: Record<string, string | true>): AnchorCallOptions {
 }
 
 function isAnchorIoError(err: unknown): boolean {
-  return err instanceof AnchorUnreachableError || err instanceof AnchorApiError || err instanceof AnchorConfigError;
+  return err instanceof Error && ['AnchorUnreachableError', 'AnchorApiError', 'AnchorConfigError'].includes(err.name);
 }
 
 async function main(argv: string[]): Promise<number> {
@@ -196,6 +194,7 @@ async function main(argv: string[]): Promise<number> {
 
   switch (cmd) {
     case 'serve': {
+      const { createServerFactory } = await import('./server.js');
       const store = new KronicleLite({ dataDir });
       const factory = createServerFactory(store, {
         version: VERSION,
@@ -206,6 +205,7 @@ async function main(argv: string[]): Promise<number> {
         project: flags['all-projects'] === true ? null : projectScopeFor(instructionCtx(flags)),
       });
       if (flags['http']) {
+        const { loadOrCreateBearer, readBearerFile, serveHttp } = await import('./http.js');
         let bearer: string;
         let bearerNote: string;
         if (str(flags['bearer']) !== undefined) {
@@ -245,6 +245,7 @@ async function main(argv: string[]): Promise<number> {
         return 0;
       }
       process.stderr.write(`kronicle-lite ${VERSION} serving on stdio; data dir ${dataDir}; key ${store.identity.signer.key_id}\n`);
+      const { serveStdio } = await import('@modelcontextprotocol/server/stdio');
       const handle = serveStdio(factory, { onerror: (err) => process.stderr.write(`stdio: ${err.message}\n`) });
       // Keep the process alive until stdin closes, then release the store.
       await new Promise<void>((resolve) => {
@@ -275,12 +276,14 @@ async function main(argv: string[]): Promise<number> {
         store.close();
       }
     }
-    case 'demo':
+    case 'demo': {
+      const { runDemo } = await import('./demo.js');
       return runDemo({
         out: process.stdout,
         ...(str(flags['dir']) !== undefined ? { dir: str(flags['dir'])! } : {}),
         keep: flags['keep'] === true,
       });
+    }
     case 'checkpoint': {
       const store = new KronicleLite({ dataDir });
       const cp = store.chain.checkpoint(num(flags['from']) ?? 1, num(flags['to']));
@@ -291,6 +294,7 @@ async function main(argv: string[]): Promise<number> {
       }
       // The checkpoint is stored locally before anything leaves the box; a
       // failed push never undoes it.
+      const { tryPushCheckpoint } = await import('./anchor/anchor.js');
       const anchor = await tryPushCheckpoint(store, { ...anchorOpts(flags), checkpointId: cp.checkpoint_id });
       process.stdout.write(JSON.stringify({ checkpoint: cp, anchor }, null, 2) + '\n');
       store.close();
@@ -312,6 +316,7 @@ async function main(argv: string[]): Promise<number> {
       try {
         // Local verification; identical to verify-chain.
         if (flags['remote'] !== true) return printVerifyAll(store, flags);
+        const { verifyRemote } = await import('./anchor/anchor.js');
         const r = await verifyRemote(store, { ...anchorOpts(flags), offline: flags['offline'] === true });
         if (flags['json']) {
           process.stdout.write(JSON.stringify(r, null, 2) + '\n');
@@ -343,6 +348,7 @@ async function main(argv: string[]): Promise<number> {
       }
       const store = new KronicleLite({ dataDir });
       try {
+        const { anchorStatus } = await import('./anchor/anchor.js');
         const r = anchorStatus(store, anchorOpts(flags));
         if (flags['json']) {
           process.stdout.write(JSON.stringify(r, null, 2) + '\n');
@@ -468,6 +474,7 @@ async function main(argv: string[]): Promise<number> {
     case 'watch':
       return watchCommand(dataDir, positional, flags);
     case 'doctor': {
+      const { runDoctor, renderDoctor } = await import('./doctor.js');
       const report = await runDoctor({
         dataDir,
         ...(str(flags['cwd']) !== undefined ? { cwd: str(flags['cwd'])! } : {}),

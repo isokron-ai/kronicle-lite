@@ -398,15 +398,19 @@ export class Orient {
    * newest live blocks against their chained block.created events. Cheap
    * enough for every orient; `verify-chain` / `doctor` do the full pass.
    */
-  quickIntegrity(from_seq: number, head: ChainHead): IntegritySummary {
+  quickIntegrity(from_seq: number, head: ChainHead, opts: { windowOnly?: boolean } = {}): IntegritySummary {
     let problem: string | null = null;
     let events_checked = 0;
-    if (head.seq > 0) {
-      const from = Math.max(1, Math.min(from_seq + 1, head.seq - 999));
+    // windowOnly (focus=retractions, the per-tool-call push path): re-hash just
+    // the events since the cursor instead of the last 1000. Full briefings keep
+    // the wider event pass.
+    if (head.seq > 0 && (!opts.windowOnly || from_seq < head.seq)) {
+      const from = opts.windowOnly ? Math.max(1, from_seq + 1) : Math.max(1, Math.min(from_seq + 1, head.seq - 999));
       const r = this.chain.verify(from);
       events_checked = r.events_checked;
       if (!r.ok && r.first_mismatch) problem = `chain ${r.first_mismatch.kind} at seq ${r.first_mismatch.seq}`;
     }
+    // Live blocks are always re-hashed (a tampered row must surface on every path, the push hook's too).
     const blocks = this.docs.liveBlockRows(2000);
     if (!problem) {
       for (const b of blocks) {
@@ -500,7 +504,7 @@ export class Orient {
       if (focus === 'orientation' || recovery.method === 'genesis') digest = scrubDeep(this.digest(keys ? [...keys] : null)).value;
       // The retractions focus is the per-tool-call push contract (docs/PUSH.md): no git calls (null = not checked).
       source_drift = focus === 'retractions' ? null : this.docs.listSourceDrift();
-      integrity = this.quickIntegrity(recovery.from_seq, head);
+      integrity = this.quickIntegrity(recovery.from_seq, head, { windowOnly: focus === 'retractions' });
     }
 
     const next_steps = nextSteps({ focus, recovery, drift_banner, retractions, source_drift, integrity, scope });

@@ -1,6 +1,6 @@
 ---
 name: orient
-description: Re-ground the agent against the kronicle-lite chain. Invoke at session start, before write-class tools, after a context compaction, when the operator types the bare word "orient", or whenever you suspect your notes are stale. Presents your previous cursor to get_system_state as since_cursor, surfaces the delta, drift banner and retraction list, and walks the reconciliation discipline. Call this INSTEAD of trying to recall facts from memory.
+description: Re-ground the agent against the kronicle-lite chain. Invoke at session start, before write-class tools, before world-changing commands (deploy, migrate, publish, git push), after a context compaction, when the operator types the bare word "orient", or whenever you suspect your notes are stale. Presents your previous cursor to get_system_state as since_cursor, surfaces the delta, drift banner and retraction list, and walks the reconciliation discipline. Call this INSTEAD of trying to recall facts from memory.
 ---
 
 # orient — the wake protocol
@@ -15,6 +15,11 @@ your beliefs aligned with what the store actually says now.
 - **Session start** — every cold start, resume or clear.
 - **Before write-class work** — `put_document`, `supersede_block`,
   `tombstone_block`, or any action that depends on a block you read earlier.
+- **Before every world-changing command** — deploy, migrate, publish,
+  `git push`, anything that sends, pays or deletes, even mid-task and even
+  when you oriented a few steps ago: the runbook can change while you work.
+  When nothing changed the answer is one line; if it lists retractions,
+  reconcile them before you run the command.
 - **After a compaction** — the compact summary is the least trustworthy
   belief source you have; it was written from a position that may be stale.
 - **Operator types `orient`** — a bare word, no slash. The operator is a drift
@@ -49,15 +54,22 @@ your beliefs aligned with what the store actually says now.
       Each carries `old_text`, `new_text` (null when removed) and a word
       `diff` (`[-old-]{+new+}`), so you usually do not need another call
       to learn the current truth. Reconcile EACH before acting on the
-      touched documents (step 4). Instruction retractions from other
-      projects are hidden (`scope.hidden_retractions`); pass
-      `all_projects: true` only when the operator asks. When
+      touched documents (step 4). Retractions about other projects'
+      documents are hidden (`scope.hidden_retractions`); pass
+      `all_projects: true` only when the operator asks. Formatting-only
+      edits (whitespace, quotes, punctuation, a typo fix, a "Last reviewed"
+      date) are not retractions: they are listed under `cosmetic_edits`
+      and need no action. When
       `scope.verdict` is `partial`, "no retractions" covers this project
       only: the hidden ones were not reviewed, not cleared.
    4. `delta.entries` — what changed since your cursor, oldest first.
       Rollups (`volume_rollup`) carry a count and the most recent sample;
       nothing has been dropped, only folded.
-   5. `digest` (cold start) — document list and counts. Follow the
+   5. `carried_notes` / "Your notes since seq N" — notes you wrote since
+      your cursor, as text (bounded). After a compaction this is where your
+      own decisions come back; a note marked "repeats `X`, changed at seq N"
+      copies a value that has since changed — trust the retraction.
+   6. `digest` (cold start) — document list and counts. Follow the
       `kronicle://docs/<slug>` resources or call `recall()` for content.
 
 4. **Reconcile retractions BEFORE acting.** For each item:
@@ -98,9 +110,11 @@ stop and orient.
 
 ## Receipts
 
-Every `recall()` hit carries a signed receipt. Keep the receipt with any
-claim you derive from the block. Before you build on that claim again later
-in the session — and always before writing — call `verify(receipt)`:
+Every `recall()` hit carries a signed receipt, by default as a
+`receipt_id` (the receipt is stored; `receipts: "inline"` returns the whole
+object). Keep it with any claim you derive from the block. Before you build
+on that claim again later in the session — and always before writing — call
+`verify({receipt_id})` (or `verify({receipt})`):
 
 - `VERIFIED` — proceed.
 - `SUPERSEDED` — fetch `current_block_id`; the content you remember is old.
@@ -161,17 +175,22 @@ Orient before the next write and re-check anything the delta touched.
 - `get_system_state`: `focus` = `orientation` (digest + delta +
   retractions; default) | `recent_changes` (delta + retractions) |
   `retractions` (only retractions) | `pulse` (head + drift banner; call it
-  before every write and escalate when the banner surfaces).
+  before every write and escalate when the banner surfaces). With a valid
+  cursor and nothing new, any focus answers in one line.
+  `include_cosmetic: true` lists formatting-only edits as retractions too.
   `budget_tokens` (200–64000, default 3000) bounds the delta; folded
   entries are rolled up, never dropped. `response_format` = `markdown`
   (default) or `json` for the text block; `structuredContent` always has
   the JSON. An invalid or missing cursor never fails: `recovery.method`
   says how your position was recovered (`presented`, `presented_compact`,
   `presented_stale`, `flight_recorder`, `genesis`).
-- `recall`: bm25 over live blocks; superseded blocks are never returned,
-  tombstoned only with `include_tombstoned`; `include_receipts: false`
-  for a lean result (no receipt is stored, so the read is not remembered
-  for `already_read`); `max_chars` (default 16000) bounds the content.
+- `recall`: bm25 over live blocks of this project (plus documents with no
+  project); `all_projects: true` searches every project. Superseded blocks
+  are never returned, tombstoned only with `include_tombstoned`;
+  `include_receipts: false` for a lean result (no receipt is stored, so the
+  read is not remembered for `already_read`); `max_chars` (default 4000 over
+  MCP) bounds the content — raise it or read `truncated.read` when a hit is
+  cut.
 - Small context? The operator can run `kronicle-lite serve --core`: six
   tools (`get_system_state`, `audit_assumptions`, `recall`, `verify`,
   `put_document`, `supersede_block`).

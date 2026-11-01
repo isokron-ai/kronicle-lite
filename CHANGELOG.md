@@ -4,6 +4,104 @@ All notable changes to kronicle-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
+## [Unreleased]
+
+Fixes measured by agent-memory-bench Track A (deterministic, 20 seeds per
+cell; before = 0.6.0, after = this branch). Additive: no hash recipe,
+receipt, checkpoint, cursor or event layout changed; new payload and result
+fields are optional; one local column (`documents.project_key`) is added and
+backfilled on open.
+
+### Fixed — formatting edits no longer cry wolf (bench S7: 20% → 100% quiet)
+
+- Orient classifies every supersession as cosmetic or semantic
+  (`src/orient/cosmetic.ts`, rules in docs/FORMAT.md §3.8). Cosmetic:
+  whitespace, line endings, reflow, quote and dash style, trailing
+  punctuation, emphasis markers, list markers, intra-word hyphens, case, a
+  one-letter typo in an ordinary word (two for 8+ letters), the date on a
+  "Last reviewed / updated" line. Never cosmetic: anything in a code span or
+  code block, any number / host / path / URL / flag / identifier (changed
+  or reordered), negations and other meaning-bearing words, ordinary word
+  swaps, added or removed words.
+- Cosmetic edits are listed under `cosmetic_edits` and not in
+  `retractions`, so they are not "reconcile before acting" and a push hook
+  does not push them. They stay on the chain and queryable:
+  `include_cosmetic: true` (`--include-cosmetic`) lists them as
+  `informational` retractions with `cosmetic: [rules]`. The Markdown says
+  "N cosmetic edit(s) recorded … no action needed" and the delta shows them
+  as `cosmetic edit`.
+
+### Fixed — a moved file is a rename, not a removal (S8: 75% → 100%)
+
+- When an instruction file moves inside its project with its content
+  intact, the sync appends `document.renamed` and a put recording the new
+  path with every block carried: same `doc_id` and block ids, receipts keep
+  verifying, no "REMOVED — stop following it" safety retraction. Works
+  whichever path the FileChanged hook / watcher syncs first. A real
+  deletion (no intact copy, or an ambiguous one) still retires the blocks.
+  New sync action `renamed` (`renamed_from`).
+
+### Fixed — decisions survive compaction as text (S4a: 0% → 100%)
+
+- `get_system_state` (focus `orientation` / `recent_changes`) carries back
+  the orienting actor's own notes written since its cursor
+  (`carried_notes`, Markdown "Your notes since seq N"): up to 3 documents,
+  600 characters each, 1500 in total, integrity-checked and secret-scrubbed.
+  Other actors' notes are not inlined. A note that copies an identifier a
+  retraction in the same briefing changed is marked ("this note repeats
+  `X`, changed at seq N").
+
+### Fixed — one repository's notes no longer leak into another (S11: 50% → 100%)
+
+- Documents record their project: `put_document` and CLI `put SLUG FILE`
+  add `project: {key, root}` (the server's / CLI's working directory, same
+  key as instruction slugs) to the `document.put` payload; instruction
+  files already carry `source.project`. Projected into
+  `documents.project_key`.
+- `recall` searches this project's documents plus unscoped ones by default
+  (`scope.other_projects_hidden`, `absence.not_searched: other_projects`);
+  `all_projects: true` opts out. `get_system_state` leaves other projects'
+  events out of the delta and digest (`scope.hidden_events`) and their
+  retractions out of `retractions` (was: instruction retractions only).
+  Documents written before this release have no project and stay visible
+  everywhere, so a single-repo store behaves as before.
+
+### Fixed — concurrent first start (S3d)
+
+- The signing key, cursor secret and HTTP bearer are created with
+  `link(tmp, path)` (create-if-absent with the full content); EEXIST re-reads
+  the winner; a short or invalid file is re-read for up to 2 s before it is
+  reported corrupt; a concurrent `mkdir` of the data dir is tolerated.
+  Before: 50 processes on a fresh data dir could crash on a half-written
+  `cursor-secret` (sea-lite, 1/20 bench seeds) or end up signing with
+  different keys (2/20 stress trials). After: 0 crashes, one identity, in
+  1000 concurrent starts.
+
+### Changed — response diet
+
+- With a verified cursor and nothing new, `get_system_state` answers in one
+  line (`kronicle-lite: no change since seq N. Proceed; next cursor: …`,
+  ~110 B; was ~1.1 KB). `focus=pulse` is also one to three lines.
+- The Markdown briefing omits the digest when a cursor was presented (still
+  in `structuredContent`).
+- MCP `recall`: receipts by id (`receipt_id` per hit; the receipt is stored
+  and `verify` takes `{receipt_id}`; `receipts: "inline"` for the old
+  shape), compact JSON text, `max_chars` default 4000 (library default
+  unchanged at 16000).
+
+### Added — push contract for hooks
+
+- `kronicle-lite orient --cursor C --focus retractions --json` is the
+  documented contract for a PostToolUse / PreToolUse push hook
+  (docs/PUSH.md): stable fields, cosmetic edits excluded, no git calls
+  (`source_drift: null`), the integrity pass re-hashes the events since the
+  cursor (not the last 1000) and still every live block. The CLI loads the MCP SDK, HTTP, anchor and doctor code only for the
+  commands that use them (code splitting): ~0.33 s per call on a 300-file
+  store, was ~0.5 s.
+- The orient skill, the example wake contract and the server instructions
+  say to orient before world-changing commands (deploy, migrate, publish,
+  `git push`): the no-hook fallback for Cursor, Codex and Hermes.
+
 ## [0.6.0] — 2026-11-01
 
 Honest labels: deterministic, LLM-free checks ported from IsoKron

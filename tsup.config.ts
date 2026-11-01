@@ -8,6 +8,7 @@ export default defineConfig({
   dts: { entry: { index: 'src/index.ts' } },
   sourcemap: true,
   clean: true,
-  splitting: false,
+  // Chunks let the CLI load the MCP SDK, HTTP and anchor code only for the commands that use them.
+  splitting: true,
   banner: ({ format }) => (format === 'esm' ? { js: '' } : {}),
 });

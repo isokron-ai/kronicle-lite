@@ -106,8 +106,11 @@ claude mcp add kronicle-lite -- npx -y kronicle-lite serve
 ```
 
 Optional: copy `skills/orient/` to `.claude/skills/orient/` and add the
-two-line wake contract from `examples/.claude/CLAUDE.md` to your `CLAUDE.md`.
-Then typing `orient` re-grounds the agent against the chain.
+wake contract from `examples/.claude/CLAUDE.md` to your `CLAUDE.md` (it
+includes "pulse before every world-changing command"). Then typing `orient`
+re-grounds the agent against the chain. To push changes that land while the
+agent works, add a `PostToolUse` hook on `kronicle-lite orient --cursor C
+--focus retractions --json` ([docs/PUSH.md](docs/PUSH.md)).
 
 ### Cursor
 
@@ -343,6 +346,14 @@ directories with a debounce (150 ms; `--debounce`) plus a polling pass
 (`--interval`, default 2000 ms) that also discovers new rule files;
 `--poll` uses polling only.
 
+A file moved inside the project with its content intact is a **rename**,
+not a removal: the document follows it (`document.renamed`, same blocks and
+receipts, no retraction), whichever of the two paths is synced first. Edits
+that only change formatting (whitespace, quotes, punctuation, a one-letter
+typo, a "Last reviewed" date) are chained like any other but reported under
+`cosmetic_edits`, not as retractions; changes to numbers, hosts, paths,
+flags, code or ordinary words still are.
+
 **Inside Claude Code: hooks, not a watcher.** Claude Code already watches
 files: a `SessionStart` hook can return `watchPaths`, and a `FileChanged`
 hook runs whenever one of them changes on disk, whoever wrote it
@@ -422,10 +433,10 @@ no-ops there, with an `icacls` line to lock the data dir down.
 
 | tool | what it does | writes chain |
 |---|---|---|
-| `get_system_state` | Orient. `since_cursor` → delta since then; drift banner; retractions with `old_text` / `new_text` / `diff`; integrity pass; new cursor. `focus`: `orientation` (default), `recent_changes`, `retractions`, `pulse`. `response_format`: `markdown` (default) or `json`. `all_projects`: include other projects' instruction retractions. | no |
+| `get_system_state` | Orient. `since_cursor` → delta since then; drift banner; retractions with `old_text` / `new_text` / `diff`; your own notes written since (`carried_notes`); integrity pass; new cursor. Nothing new → a one-line answer. `focus`: `orientation` (default), `recent_changes`, `retractions`, `pulse`. `response_format`: `markdown` (default) or `json`. Scoped to this project (`all_projects` opts out); formatting-only edits under `cosmetic_edits` (`include_cosmetic` opts in). | no |
 | `audit_assumptions` | Grade claims `{symbol, value}` (block id, doc slug, or `head`) → `current \| stale \| contradicted \| retracted \| unknown \| stale_source` with the current truth and a reconcile line. | no |
-| `recall` | FTS5 bm25 search over live blocks; each hit carries a receipt v2 bound to the chain head and (0.6.0) `authority` / `authority_reason` / `authority_basis`; the result carries `authority_floor`, `absence` and, with `cursor`, an attention rerank (`already_read`). A block whose stored text no longer hashes to the chain is withheld (`withheld`), never served. `top_k`, `include_tombstoned`, `include_receipts`, `max_chars`, `cursor`, `actor_id`. | no (stores receipts) |
-| `verify` | Re-derive a receipt against the live store: signature, block existence, re-hashed block text vs the chain, chain binding, supersession walk, git-bound source → `VERIFIED \| SUPERSEDED \| TOMBSTONED \| UNVERIFIED \| STALE_SOURCE` + reason. | no |
+| `recall` | FTS5 bm25 search over live blocks; each hit carries a receipt v2 bound to the chain head and (0.6.0) `authority` / `authority_reason` / `authority_basis`; the result carries `authority_floor`, `absence` and, with `cursor`, an attention rerank (`already_read`). A block whose stored text no longer hashes to the chain is withheld (`withheld`), never served. Searches this project's documents and unscoped ones (`all_projects` opts out). Receipts come back as `receipt_id` (`receipts: "inline"` for the object). `top_k`, `include_tombstoned`, `include_receipts`, `receipts`, `max_chars` (default 4000), `all_projects`, `cursor`, `actor_id`. | no (stores receipts) |
+| `verify` | Re-derive a receipt (object or `receipt_id`) against the live store: signature, block existence, re-hashed block text vs the chain, chain binding, supersession walk, git-bound source → `VERIFIED \| SUPERSEDED \| TOMBSTONED \| UNVERIFIED \| STALE_SOURCE` + reason. | no |
 | `verify_chain` | Recompute every hash and link in a range; first mismatch; checkpoint results; over the whole chain also the projection (every stored document and block re-derived and re-hashed). | no |
 | `checkpoint_chain` | Sign a Merkle root over a seq range with the local key; `push: true` also anchors it off-box. | no (checkpoints, anchors tables) |
 | `anchor_status` | Last off-box anchor, events since, and whether the local chain still matches it (`remote: true` asks the service). | no |

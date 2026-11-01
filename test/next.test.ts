@@ -222,6 +222,14 @@ describe('response diet', () => {
   });
 });
 
+describe('CLI start-up', () => {
+  it('help names the HTTP default port (the CLI inlines it so `orient` does not load the MCP SDK)', async () => {
+    const { DEFAULT_HTTP_PORT } = await import('../src/http.js');
+    const r = await runCli(['help']);
+    expect(r.stdout).toContain(`127.0.0.1:${DEFAULT_HTTP_PORT}/mcp`);
+  });
+});
+
 describe('push contract: orient --cursor C --focus retractions --json', () => {
   it('stable shape: cursor, head.seq, retractions[{seq,kind,diff,old_text,new_text}]; cosmetic edits not pushed', async () => {
     const root = tempDir('kl-push-');

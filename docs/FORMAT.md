@@ -172,12 +172,12 @@ renamed heading keeps its address.
 
 | event_type | payload fields |
 |---|---|
-| `document.put` | `doc_id, slug, title, revision, markdown, markdown_hash (BLAKE3), block_ids[], carried[{block_id, ordinal, heading_path}]`, optional `source` (0.4.0, §3.4) |
+| `document.put` | `doc_id, slug, title, revision, markdown, markdown_hash (BLAKE3), block_ids[], carried[{block_id, ordinal, heading_path}]`, optional `source` (0.4.0, §3.4), optional `project` (unreleased, §3.7) |
 | `document.revised` | `doc_id, slug, title, revision, markdown, markdown_hash, cause` |
 | `block.created` | `block_id, doc_id, doc_slug, revision, ordinal, kind, level, heading_path[], content, content_hash` |
 | `block.superseded` | `block_id, successor_block_id, doc_id, doc_slug, revision, reason` |
 | `block.tombstoned` | `block_id, doc_id, doc_slug, revision, reason` |
-| `document.renamed` (0.5.0) | `doc_id, from_slug, slug, revision, reason` — same document, new slug; revisions and blocks are keyed by `doc_id` and carry over |
+| `document.renamed` (0.5.0) | `doc_id, from_slug, slug, revision, reason` — same document, new slug; revisions and blocks are keyed by `doc_id` and carry over. Unreleased: also written when an instruction file moves inside its project with its content intact (`reason: "moved: <old path> → <new path> (same content)"`), followed by a `document.put` recording the new `source.path` with every block carried |
 
 Block content and document markdown live in the chain, so the chain alone
 rebuilds the tables (`kronicle-lite import`, `kronicle-lite rebuild`).
@@ -306,6 +306,43 @@ before serving them. The whole-projection check replays every event into an
 empty schema and compares `documents`, `document_revisions`, `blocks` and
 `doc_sources` column by column, then re-hashes every block and revision.
 
+### 3.7 Document projects (unreleased, additive)
+
+`document.put` may carry `project: {key, root}` (same recipe as the
+instruction project key, §3.4): the MCP `put_document` tool and the CLI
+`put SLUG FILE` record the project of the server's / CLI's working
+directory. A put without it hashes as before. The projection keeps the
+latest put's project in `documents.project_key` (`source.project.key` for
+instruction and memory files, else `project.key`, else NULL). Opening an
+older database adds the column and backfills it from `doc_sources`.
+
+`recall` and `get_system_state` are scoped to the caller's project keys by
+default: documents of another project are not served (recall counts them in
+`scope.other_projects_hidden` and lists `other_projects` under
+`absence.not_searched`; orient leaves their events out of the delta, counted
+in `scope.hidden_events`, and their retractions out of `retractions`,
+counted in `scope.hidden_retractions`). Documents with no project (every
+put made before this field existed) stay visible from every project.
+`all_projects: true` / `--all-projects` turns scoping off.
+
+### 3.8 Cosmetic edits (unreleased)
+
+Orient classifies each supersession whose old and new block text it still
+has (`src/orient/cosmetic.ts`). An edit is **cosmetic** when the two texts
+are equal after normalizing line endings, whitespace and reflow, quote and
+dash style, trailing punctuation, emphasis markers, list markers, intra-word
+hyphens and letter case, or when at most two ordinary words (≥ 4 letters,
+same first letter, not a meaning-bearing word such as not/never/must/
+enable/east) differ by one edit (two for words of 8+ letters), or when only
+the date on a "Last reviewed / updated …" line changed. It is never
+cosmetic when anything inside a code span or code block, or any token
+holding a digit, path or URL separator, `@`, `=`, an internal `.`/`:`/`_` or
+a leading `-`/`--` changes or moves. Cosmetic supersessions are listed under
+`cosmetic_edits` (`seq, doc_slug, block_id, successor_block_id, rules[],
+diff`) instead of `retractions`; with `include_cosmetic` they are also
+retractions with `cosmetic: [rules]` and severity `informational`. Nothing
+on the chain differs: the classification is a read-time view.
+
 ## 4. Receipts (v2)
 
 A receipt is issued for each `recall()` hit:
@@ -390,6 +427,12 @@ by holding one.
 <data-dir>/signing-key.pem     Ed25519 private key, PKCS#8 PEM, mode 0600
 <data-dir>/cursor-secret       64 hex chars, mode 0600
 ```
+
+Unreleased: the key, the secret and `http-bearer.token` are created with
+`link(tmp, path)` (create-if-absent with the full content), so processes
+starting together on a fresh data dir agree on one identity; a reader that
+finds a short or invalid file (an older writer mid-write) re-reads it for up
+to 2 s before reporting it corrupt.
 
 `signing_keys(key_id, public_key_pem, algorithm, created_at, revoked_at)`
 holds the public half so a copied database verifies on its own. Setting
