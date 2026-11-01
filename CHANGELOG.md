@@ -4,6 +4,24 @@ All notable changes to kronicle-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
+## [Unreleased]
+
+### Fixed — a one-letter value change was hidden as a typo (0.7.0 blocker)
+
+- 0.7.0's cosmetic classifier normalized hyphens away before its typo rule,
+  so `./bin/deploy --target staging-a` → `staging-b` was a "cosmetic edit"
+  (no retraction, nothing pushed): exactly the stale-runbook case. The
+  classifier is now conservative: hyphens and case are judged per token
+  pair (only `e-mail` → `email`-style soft hyphens, hyphen followed by 3+
+  letters); the one-letter-typo rule applies only to purely alphabetic
+  words of 5+ letters with the same first letter; every token on a
+  command-like line (a flag, a path, `./x`, `a=b`, a `$ ` prompt or a code
+  span) is compared exactly; dash style is no longer normalized. Must-alarm
+  tests: staging-a→b, us-east-1→2, v1→v2, port 8080→8081, prod1→prod2,
+  --target a→b, do→don't, must→must not, removing --dry-run,
+  enable→disable, one character inside backticks, a one-letter change on a
+  command line. Bench S7 stays 100% quiet; S1, S5 100%.
+
 ## [0.7.0] — 2026-11-01
 
 Fixes measured by agent-memory-bench Track A (deterministic, 20 seeds per

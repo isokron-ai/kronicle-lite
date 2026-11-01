@@ -66,6 +66,32 @@ const SEMANTIC: [string, string, string][] = [
   ['strikethrough', 'Use the canary stage.', 'Use the ~~canary~~ stage.'],
 ];
 
+// 0.7.0 release blocker (cc-anchor contract tests): one-character changes in
+// values, flags and commands were hidden as typos. Each of these must alarm.
+const MUST_ALARM: [string, string, string][] = [
+  ['staging-a → staging-b on a command line', 'Deploy with ./bin/deploy --target staging-a.', 'Deploy with ./bin/deploy --target staging-b.'],
+  ['staging-a → staging-b in prose', 'Deploys go to staging-a first.', 'Deploys go to staging-b first.'],
+  ['staging-a → stagingb (hyphen dropped, letter changed)', 'Deploys go to staging-a first.', 'Deploys go to stagingb first.'],
+  ['us-east-1 → us-east-2', 'The primary region is us-east-1.', 'The primary region is us-east-2.'],
+  ['v1 → v2', 'Call the v1 API for exports.', 'Call the v2 API for exports.'],
+  ['port 8080 → 8081', 'The service listens on port 8080.', 'The service listens on port 8081.'],
+  ['prod1 → prod2', 'Deploys land on prod1 first.', 'Deploys land on prod2 first.'],
+  ['--target a → b', 'Run deploy --target a after the build.', 'Run deploy --target b after the build.'],
+  ['--target=a → =b', 'Run deploy --target=alpha.', 'Run deploy --target=alpho.'],
+  ['do → don\'t', 'Always do run the migration first.', "Always don't run the migration first."],
+  ['must → must not', 'You must restart the worker.', 'You must not restart the worker.'],
+  ['--dry-run removed', 'Run the migration with --dry-run first.', 'Run the migration first.'],
+  ['enable → disable', 'Set the flag to enable caching.', 'Set the flag to disable caching.'],
+  ['one character inside backticks', 'Run `deploy -a` after the build.', 'Run `deploy -b` after the build.'],
+  ['one character inside backticks, word', 'Run `make deploys` now.', 'Run `make deploy` now.'],
+  ['one-letter word change on a command line', 'Run ./scripts/sync --mode mirror nightly.', 'Run ./scripts/sync --mode mirrer nightly.'],
+  ['one-letter word change after a $ prompt', '$ deploy production carefully', '$ deploy productoin carefully'],
+  ['quoted argument', 'Use the "blue" pool for deploys.', 'Use the "blur" pool for deploys.'],
+  ['short word typo-like change', 'Deploy to the east pool.', 'Deploy to the eest pool.'],
+  ['first letter changed', 'Restart the worker gracefully.', 'Restart the worker fracefully.'],
+  ['dash style', 'Stop \u2014 then restart.', 'Stop - then restart.'],
+];
+
 describe('classifyEdit', () => {
   it.each(BENCH_BENIGN)('bench benign template %s is cosmetic', (_t, a, b) => {
     const c = classifyEdit(a, b);
@@ -81,6 +107,11 @@ describe('classifyEdit', () => {
     const c = classifyEdit(a, b);
     expect(c.cosmetic).toBe(false);
     expect(c.semantic_reason).toEqual(expect.any(String));
+  });
+
+  it.each(MUST_ALARM)('must alarm: %s', (_t, a, b) => {
+    const c = classifyEdit(a, b);
+    expect(c.cosmetic, JSON.stringify(c)).toBe(false);
   });
 
   it('names the rules that explain a cosmetic edit', () => {

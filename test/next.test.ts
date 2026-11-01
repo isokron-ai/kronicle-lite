@@ -92,6 +92,19 @@ describe('S7: cosmetic edits are recorded, not retractions', () => {
   });
 });
 
+describe('0.7.0 blocker: a one-letter value change is a retraction, not a typo', () => {
+  it('runbook --target staging-a → staging-b: 1 retraction, 0 cosmetic edits', () => {
+    const store = new KronicleLite({ memory: true });
+    store.docs.putDocument({ slug: 'runbook', title: 'Runbook', markdown: '# Runbook\n\nDeploy with ./bin/deploy --target staging-a.\n', actor_id: 'ops' });
+    const c0 = store.orient.getSystemState({ actor_id: 'hook', focus: 'pulse' }).cursor;
+    store.docs.putDocument({ slug: 'runbook', title: 'Runbook', markdown: '# Runbook\n\nDeploy with ./bin/deploy --target staging-b.\n', actor_id: 'ops' });
+    const s = store.orient.getSystemState({ actor_id: 'hook', since_cursor: c0, focus: 'retractions' });
+    expect(s.retractions).toHaveLength(1);
+    expect(s.retractions![0]!.diff).toContain('staging-b');
+    expect(s.cosmetic_edits).toEqual([]);
+  });
+});
+
 describe('S8: a moved file is a rename', () => {
   for (const order of ['old path first', 'new path first'] as const) {
     it(`same content at a new path → document.renamed, same block ids, no retraction (${order})`, () => {
