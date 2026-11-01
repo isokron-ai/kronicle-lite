@@ -16,10 +16,12 @@
 import { McpServer, ResourceTemplate, type McpServerFactory } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 
+import { anchorStatus, tryPushCheckpoint, verifyLastAnchor } from './anchor/anchor.js';
 import { ChainConflictError } from './chain/index.js';
 import { DocumentError } from './docs/documents.js';
 import { FOCUSES, type SystemState } from './orient/orient.js';
 import {
+  AnchorStatusResultSchema,
   AuditSummarySchema,
   CheckpointSchema,
   PutDocumentResultSchema,
@@ -269,17 +271,50 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
       title: 'Sign a Merkle checkpoint',
       description:
         'Compute a Merkle root over event hashes in [from_seq, to_seq] (default: 1..head), sign it with the server key, and ' +
-        'store it. verify_chain checks checkpoints; export them off-box if you want a record that survives local tampering.',
+        'store it. verify_chain checks checkpoints. push:true also sends the signed root (never the events) to the hosted ' +
+        'anchor service configured in the data dir and stores its countersigned receipt; the result\'s anchor object says ' +
+        'whether that worked. The local checkpoint is stored even when the service is unreachable.',
       inputSchema: z.object({
         from_seq: z.number().int().min(1).default(1),
         to_seq: z.number().int().min(1).optional(),
+        push: z.boolean().default(false).describe('Also anchor the checkpoint off-box (leaves the machine: root, range, signature, public key).'),
       }),
       outputSchema: CheckpointSchema,
-      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
-    (args) => {
+    async (args) => {
       try {
-        return json(store.chain.checkpoint(args.from_seq, args.to_seq));
+        const cp = store.chain.checkpoint(args.from_seq, args.to_seq);
+        if (!args.push) return json(cp);
+        const anchor = await tryPushCheckpoint(store, { checkpointId: cp.checkpoint_id });
+        return json({ ...cp, anchor });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'anchor_status',
+    {
+      title: 'Hosted anchor status',
+      description:
+        'When was this chain last anchored off-box, and does the local chain still match it? Returns the latest anchor ' +
+        '(range, status, events since), and a verification of that range: the local Merkle root recomputed and compared ' +
+        'with the anchored root (match | diverged | beyond_head | gap), plus the service countersignature checked with ' +
+        'cached keys. remote:true also asks the service (conflict flag, fresh keys); an unreachable service is reported, ' +
+        'never an error. diverged means the local chain was rewritten after it was anchored.',
+      inputSchema: z.object({
+        remote: z.boolean().default(false).describe('Also query the anchor service (network).'),
+      }),
+      outputSchema: AnchorStatusResultSchema,
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+    },
+    async (args) => {
+      try {
+        const status = anchorStatus(store);
+        const verification = await verifyLastAnchor(store, { remote: args.remote });
+        return json({ ...status, verification });
       } catch (err) {
         return errorResult(err);
       }
@@ -431,6 +466,7 @@ export function renderSystemStateMarkdown(s: SystemState): string {
   lines.push('');
   if (s.drift_banner.surfaced) lines.push(`> **${s.drift_banner.line}**`);
   else lines.push(`> ${s.drift_banner.line}`);
+  lines.push(`> ${anchorLine(s)}`);
   lines.push('');
   lines.push(`**cursor_compact:** \`${s.cursor_compact}\`  `);
   lines.push(`**recovery:** ${s.recovery.method} — ${s.recovery.reason}`);
@@ -490,6 +526,13 @@ export function renderSystemStateMarkdown(s: SystemState): string {
   lines.push('');
   lines.push(`<details><summary>full cursor</summary>\n\n\`${s.cursor}\`\n\n</details>`);
   return lines.join('\n');
+}
+
+/** One banner line for the latest hosted anchor (local record, no network). */
+export function anchorLine(s: Pick<SystemState, 'anchor'>): string {
+  const a = s.anchor;
+  if (!a) return 'never anchored';
+  return `anchored ${a.events_since} ${a.events_since === 1 ? 'event' : 'events'} ago (${a.status}, [${a.from_seq}, ${a.to_seq}] at ${a.received_at})`;
 }
 
 function summarizePayload(p: Record<string, unknown>): string {

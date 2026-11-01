@@ -66,6 +66,18 @@ export class KronicleLite {
       out.write(JSON.stringify(ev) + '\n');
       n++;
     }
+    // 0.4.0, additive: one trailing line with the countersigned anchor
+    // receipts, only when there are any (an un-anchored store exports exactly
+    // as 0.3.0 did). `import` skips it; receipts are re-fetchable by chain_id.
+    const anchors = this.chain.listAnchors();
+    if (anchors.length > 0) {
+      out.write(
+        JSON.stringify({
+          kronicle_lite_anchors: 1,
+          anchors: anchors.map(({ receipt_json, ...rest }) => ({ ...rest, receipt: JSON.parse(receipt_json) as unknown })),
+        }) + '\n',
+      );
+    }
     return { events: n, head };
   }
 
@@ -83,6 +95,7 @@ export class KronicleLite {
     for await (const line of lines) {
       if (line.trim().length === 0) continue;
       const obj: unknown = JSON.parse(line);
+      if (typeof obj === 'object' && obj !== null && 'kronicle_lite_anchors' in obj) continue; // trailing anchors line (0.4.0)
       if (first) {
         first = false;
         if (typeof obj === 'object' && obj !== null && 'kronicle_lite_export' in obj) {

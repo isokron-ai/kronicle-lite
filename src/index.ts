@@ -4,13 +4,13 @@
  */
 
 export { KronicleLite, type KronicleLiteOptions } from './store.js';
-export { createServer, createServerFactory, renderSystemStateMarkdown, INSTRUCTIONS, CACHE_HINTS, type ServerOptions } from './server.js';
+export { createServer, createServerFactory, renderSystemStateMarkdown, anchorLine, INSTRUCTIONS, CACHE_HINTS, type ServerOptions } from './server.js';
 export { serveHttp, createHttpListener, loadOrCreateBearer, DEFAULT_HTTP_PORT, DEFAULT_HTTP_PATH, type HttpServeOptions, type HttpServeHandle } from './http.js';
 export * as toolSchemas from './schemas.js';
 export * from './chain/index.js';
 export { canonicalize, type JsonValue } from './crypto/canonical.js';
 export { sha256Hex, blake3Hex } from './crypto/hash.js';
-export { verifyEd25519, type Signer, type ServerIdentity } from './crypto/keys.js';
+export { verifyEd25519, chainIdFromPublicKeyPem, keyIdFromPublicKey, type Signer, type ServerIdentity } from './crypto/keys.js';
 export { openDatabase, defaultDataDir, type Db, type OpenOptions, type Opened } from './db/open.js';
 export { SCHEMA_SQL, SCHEMA_VERSION } from './db/schema.js';
 export {
@@ -28,3 +28,17 @@ export * from './recall/receipt.js';
 export { Recall, toMatchExpression, type RecallInput, type RecallResult, type RecallHit } from './recall/recall.js';
 export { ReceiptVerifier, VERIFY_REASONS, type VerifyResult, type VerifyStatus, type VerifyReason } from './recall/verify-receipt.js';
 export * from './orient/index.js';
+export * as anchor from './anchor/index.js';
+export {
+  pushCheckpoint,
+  tryPushCheckpoint,
+  verifyRemote,
+  anchorStatus,
+  verifyLastAnchor,
+  type PushResult,
+  type PushOutcome,
+  type VerifyRemoteResult,
+  type AnchorStatus,
+} from './anchor/anchor.js';
+export { AnchorClient, AnchorApiError, AnchorUnreachableError } from './anchor/client.js';
+export { DEFAULT_ANCHOR_URL, loadConfig as loadAnchorConfig, type AnchorConfig } from './anchor/config.js';

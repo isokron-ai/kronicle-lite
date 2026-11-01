@@ -4,6 +4,55 @@ All notable changes to kronicle-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
+## [0.4.0] — unreleased
+
+Four additive features. Every 0.3.0 chain verifies byte-for-byte: no hash
+recipe, receipt, checkpoint or cursor layout changed; new event payload
+fields and tables are optional and old databases gain them on open.
+
+### Added — hosted anchoring
+
+The isokron-anchor client folded in (protocol code copied, not depended
+on; kronicle-lite's own DB, key and Merkle code replace the duplicates).
+
+- `kronicle-lite checkpoint --push [--key K] [--url U]`: sign a checkpoint,
+  send root + range + signature + public key (never events) to the anchor
+  service, verify the countersigned receipt (service key from
+  `/.well-known/anchor-keys.json`, field-by-field match with what was sent)
+  and store it. Refuses a checkpoint that no longer matches the local rows.
+- `kronicle-lite verify --remote [--offline]`: recompute the §2 root for
+  every anchored range → `match | diverged | beyond_head | gap`, print
+  `local chain diverges from anchor at [a,b]`, exit 1. `--offline` uses the
+  stored receipts and `<data-dir>/anchor-keys.cache.json`. `verify` without
+  `--remote` is `verify-chain`.
+- `kronicle-lite anchor status [--json]`: last anchor, status, events since
+  (no network).
+- Config: `<data-dir>/config.json {anchor_url, license_key}` (created `0600`
+  with the default `anchor_url` on first open), `KRONICLE_ANCHOR_URL`,
+  `KRONICLE_ANCHOR_KEY`; flags win.
+- Additive `anchors` table (FORMAT §9); `export` appends one
+  `{"kronicle_lite_anchors":1, …}` line when anchors exist, `import` skips it.
+- MCP: `checkpoint_chain` gains `push` (result gains an optional `anchor`
+  outcome; `openWorldHint: true`); new read-only `anchor_status` tool
+  (local root vs anchored root, countersignature with cached keys,
+  `remote: true` asks the service). `get_system_state` gains `anchor`
+  (latest anchor or null) and the Markdown banner a line
+  `anchored N events ago (status)` / `never anchored`.
+- `Chain.rootOver()`, `latestCheckpoint()`, `getCheckpoint()`,
+  `recordAnchor()`, `listAnchors()`, `lastAnchor()`;
+  `chainIdFromPublicKeyPem()`; `pushCheckpoint`, `tryPushCheckpoint`,
+  `verifyRemote`, `anchorStatus`, `verifyLastAnchor`, `AnchorClient`
+  exported.
+- The default service (`https://anchor.isokron.ai`) is **not deployed yet**.
+  Every remote call fails with `AnchorUnreachableError` ("anchor service
+  unreachable at …": refused connection, timeout after 10 s, or a non-JSON
+  answer such as a parked-domain 404) and never touches local state;
+  `checkpoint --push` keeps the local checkpoint and exits 2.
+- Tests: the isokron-anchor client acceptance suite ported (13 cases per
+  backend) and run against an in-test HTTP stub of the service; with
+  `KRONICLE_ANCHOR_WORKER_DIR` set they also run against the real Worker
+  under Miniflare. Plus unreachable-service, config and export cases.
+
 ## [0.3.0] — 2026-11-01
 
 MCP spec **2026-07-28** and the TypeScript SDK **v2**

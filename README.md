@@ -116,14 +116,14 @@ Copilot code review:
       "type": "local",
       "command": "npx",
       "args": ["-y", "kronicle-lite", "serve", "--data-dir", "./.kronicle-lite", "--actor", "copilot"],
-      "tools": ["get_system_state", "audit_assumptions", "recall", "verify", "verify_chain"]
+      "tools": ["get_system_state", "audit_assumptions", "recall", "verify", "verify_chain", "anchor_status"]
     }
   }
 }
 ```
 
 `tools` is required; GitHub recommends allowlisting read-only tools because
-the agent calls them without asking. The five above are the ones
+the agent calls them without asking. The six above are the ones
 kronicle-lite marks `readOnlyHint: true`, which is also the set Copilot code
 review will use (it ignores tools without that annotation). Add
 `put_document`, `supersede_block`, `tombstone_block` (or `"*"`) if the
@@ -183,6 +183,44 @@ In an agent session the loop is: `get_system_state` → work → `recall` (keep
 the receipts) → `verify` before building on an old receipt → write with your
 `cursor` → `get_system_state` again next turn with the new cursor.
 
+## Anchor off-box (0.4.0)
+
+kronicle-lite is free and local. Anchoring adds one flag —
+`checkpoint --push` — and a URL anyone can check. The local key proves the
+rows still match what the box signed; it cannot prove anything against the
+box owner, who holds the key. An anchor service countersigns your signed
+Merkle root with its own key and a `received_at` time, so a later rewrite of
+an anchored range is detectable even when it was re-signed locally.
+
+```sh
+# config: flags > env > <data-dir>/config.json > default
+export KRONICLE_ANCHOR_KEY=KLA_…                 # or {"license_key": "KLA_…"} in config.json (0600)
+# export KRONICLE_ANCHOR_URL=https://anchor.isokron.ai   # the default
+
+kronicle-lite checkpoint --push        # sign a checkpoint, anchor it, store the countersigned receipt
+kronicle-lite verify --remote          # recompute every anchored range; exit 1 on
+                                       #   "local chain diverges from anchor at [a,b]"
+kronicle-lite verify --remote --offline   # same, from stored receipts + cached service keys
+kronicle-lite anchor status            # last anchor, status, events since (no network)
+```
+
+- **What leaves the box:** the root, range, signature and your public key.
+  Never events or content. Details in [FORMAT §9](docs/FORMAT.md#9-hosted-anchors-040-additive)
+  and [THREAT-MODEL](docs/THREAT-MODEL.md#what-tamper-evidence-gives-you-here).
+- **MCP:** `checkpoint_chain {push: true}` returns the anchor outcome next to
+  the local checkpoint; `anchor_status` (read-only) compares the local chain
+  with the last anchor (`match | diverged | beyond_head | gap`), `remote:
+  true` also asks the service. `get_system_state` adds one banner line:
+  `anchored N events ago (status)` or `never anchored`.
+- **Not deployed yet.** The default service, `https://anchor.isokron.ai`, is
+  not live. Until it is, `--push` stores the checkpoint locally and exits 2
+  with `anchor service unreachable at …`; `verify --remote` exits 2 the same
+  way; every local command, the MCP server and `orient` behave exactly as
+  without anchoring. Planned pricing at launch: 1,000 anchors a month free,
+  $5 a month beyond that.
+- Exit codes: 0 ok, 1 divergence or conflict, 2 usage or I/O (incl.
+  unreachable).
+
 ## Tools
 
 | tool | what it does | writes chain |
@@ -192,7 +230,8 @@ the receipts) → `verify` before building on an old receipt → write with your
 | `recall` | FTS5 bm25 search over live blocks; each hit carries a receipt v2 bound to the chain head. `top_k`, `include_tombstoned`, `include_receipts`. | no (stores receipts) |
 | `verify` | Re-derive a receipt against the live store: signature, block existence, content hash, chain binding, supersession walk → `VERIFIED \| SUPERSEDED \| TOMBSTONED \| UNVERIFIED` + reason. | no |
 | `verify_chain` | Recompute every hash and link in a range; first mismatch; checkpoint results. | no |
-| `checkpoint_chain` | Sign a Merkle root over a seq range with the local key. | no (checkpoints table) |
+| `checkpoint_chain` | Sign a Merkle root over a seq range with the local key; `push: true` also anchors it off-box. | no (checkpoints, anchors tables) |
+| `anchor_status` | Last off-box anchor, events since, and whether the local chain still matches it (`remote: true` asks the service). | no |
 | `put_document` | Create or re-put a Markdown document by slug. Unchanged blocks keep their ids; changed ones are superseded; removed ones tombstoned. | yes |
 | `supersede_block` | Replace one live block with new content and a reason. | yes |
 | `tombstone_block` | Retire one live block with a reason. | yes |
@@ -255,8 +294,14 @@ npm run catalog:check  # tools/list bytes vs .mcp-catalog/ (re-snapshot with cat
 ```
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) (DCO sign-off required) and
-[`ROADMAP.md`](ROADMAP.md) for what is deliberately not here yet: remote checkpoint
-anchoring, chain-backed tickets, semantic recall.
+[`ROADMAP.md`](ROADMAP.md) for what is deliberately not here yet: inclusion
+proofs against published anchor day roots, chain-backed tickets, semantic
+recall.
+
+The anchor acceptance tests run against an in-test stub of the service. To
+run them against the real isokron-anchor Worker under Miniflare as well,
+point `KRONICLE_ANCHOR_WORKER_DIR` at a checkout with its dependencies
+installed: `KRONICLE_ANCHOR_WORKER_DIR=../isokron-anchor npx vitest run test/anchor.test.ts`.
 
 ## Beyond one agent
 

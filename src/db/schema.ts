@@ -136,4 +136,26 @@ CREATE TABLE IF NOT EXISTS flight_recorder (
   record_json  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS flight_actor_idx ON flight_recorder (actor_id, issued_at);
+
+-- 0.4.0, additive. Countersigned anchor receipts fetched from the hosted
+-- anchor service (checkpoint --push). Not part of any hash; re-fetchable
+-- from the service by chain_id. receipt_json holds the JCS bytes, so
+-- sha256(receipt_json) is the receipt's public-log leaf.
+CREATE TABLE IF NOT EXISTS anchors (
+  anchor_id     TEXT PRIMARY KEY,
+  checkpoint_id TEXT,
+  chain_id      TEXT NOT NULL,
+  anchor_url    TEXT NOT NULL,
+  from_seq      INTEGER NOT NULL,
+  to_seq        INTEGER NOT NULL,
+  root          TEXT NOT NULL,
+  received_at   TEXT NOT NULL,
+  receipt_json  TEXT NOT NULL,
+  day           TEXT,
+  leaf_index    INTEGER,
+  path_json     TEXT,
+  status        TEXT NOT NULL DEFAULT 'pending_public',
+  fetched_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS anchors_range_idx ON anchors (chain_id, from_seq, to_seq);
 `;

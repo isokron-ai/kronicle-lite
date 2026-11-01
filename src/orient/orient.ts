@@ -65,6 +65,17 @@ export interface Digest {
   recent_documents: { slug: string; title: string; revision: number; updated_at: string }[];
 }
 
+/** Latest hosted anchor, from the local `anchors` table (no network). */
+export interface AnchorSummary {
+  anchor_id: string;
+  from_seq: number;
+  to_seq: number;
+  received_at: string;
+  status: string;
+  /** head.seq - to_seq: events appended since the anchored range. */
+  events_since: number;
+}
+
 export interface SystemState {
   format: 'kronicle-lite/1';
   briefing_id: string;
@@ -77,6 +88,8 @@ export interface SystemState {
   recovery: Recovery;
   drift_banner: DriftBanner;
   stale_write_advisory: StaleWriteAdvisory;
+  /** 0.4.0: latest anchor, or null when never anchored. */
+  anchor: AnchorSummary | null;
   delta: TypedDelta | null;
   retractions: Retraction[] | null;
   digest: Digest | null;
@@ -270,6 +283,17 @@ export class Orient {
     }
 
     const next_steps = nextSteps({ focus, recovery, drift_banner, retractions });
+    const lastAnchor = this.chain.lastAnchor();
+    const anchor: AnchorSummary | null = lastAnchor
+      ? {
+          anchor_id: lastAnchor.anchor_id,
+          from_seq: lastAnchor.from_seq,
+          to_seq: lastAnchor.to_seq,
+          received_at: lastAnchor.received_at,
+          status: lastAnchor.status,
+          events_since: Math.max(0, head.seq - lastAnchor.to_seq),
+        }
+      : null;
 
     const state: SystemState = {
       format: 'kronicle-lite/1',
@@ -283,6 +307,7 @@ export class Orient {
       recovery,
       drift_banner,
       stale_write_advisory,
+      anchor,
       delta,
       retractions,
       digest,

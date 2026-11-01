@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-01T00:00:48.207Z",
+  "capturedAt": "2026-11-01T00:51:59.764Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -13,6 +13,183 @@
       }
     ],
     "tools": [
+      {
+        "annotations": {
+          "idempotentHint": true,
+          "openWorldHint": true,
+          "readOnlyHint": true
+        },
+        "description": "When was this chain last anchored off-box, and does the local chain still match it? Returns the latest anchor (range, status, events since), and a verification of that range: the local Merkle root recomputed and compared with the anchored root (match | diverged | beyond_head | gap), plus the service countersignature checked with cached keys. remote:true also asks the service (conflict flag, fresh keys); an unreachable service is reported, never an error. diverged means the local chain was rewritten after it was anchored.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "remote": {
+              "default": false,
+              "description": "Also query the anchor service (network).",
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "name": "anchor_status",
+        "outputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "additionalProperties": false,
+          "properties": {
+            "anchor_url": {
+              "type": "string"
+            },
+            "anchors": {
+              "description": "Anchor receipts stored locally.",
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "chain_id": {
+              "description": "sha256 of the signing key SPKI DER; the service keys the chain by it.",
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "head_seq": {
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "key_id": {
+              "type": "string"
+            },
+            "last": {
+              "anyOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "anchor_id": {
+                      "type": "string"
+                    },
+                    "events_since": {
+                      "maximum": 9007199254740991,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "range": {
+                      "items": false,
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "prefixItems": [
+                        {
+                          "maximum": 9007199254740991,
+                          "minimum": -9007199254740991,
+                          "type": "integer"
+                        },
+                        {
+                          "maximum": 9007199254740991,
+                          "minimum": -9007199254740991,
+                          "type": "integer"
+                        }
+                      ],
+                      "type": "array"
+                    },
+                    "received_at": {
+                      "type": "string"
+                    },
+                    "root": {
+                      "description": "lowercase hex sha256",
+                      "pattern": "^[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "verify_url": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "anchor_id",
+                    "range",
+                    "root",
+                    "received_at",
+                    "status",
+                    "verify_url",
+                    "events_since"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "license_key_configured": {
+              "type": "boolean"
+            },
+            "verification": {
+              "additionalProperties": false,
+              "properties": {
+                "countersignature": {
+                  "enum": [
+                    "ok",
+                    "failed",
+                    "unchecked"
+                  ],
+                  "type": "string"
+                },
+                "detail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "remote": {
+                  "enum": [
+                    "checked",
+                    "skipped",
+                    "unreachable"
+                  ],
+                  "type": "string"
+                },
+                "remote_conflict": {
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "result": {
+                  "description": "Local root over the last anchored range vs the anchored root.",
+                  "enum": [
+                    "match",
+                    "diverged",
+                    "beyond_head",
+                    "gap",
+                    "none"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "result",
+                "countersignature",
+                "remote",
+                "remote_conflict",
+                "detail"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "chain_id",
+            "key_id",
+            "head_seq",
+            "anchor_url",
+            "license_key_configured",
+            "anchors",
+            "last",
+            "verification"
+          ],
+          "type": "object"
+        },
+        "title": "Hosted anchor status"
+      },
       {
         "annotations": {
           "idempotentHint": true,
@@ -205,10 +382,10 @@
       {
         "annotations": {
           "destructiveHint": false,
-          "openWorldHint": false,
+          "openWorldHint": true,
           "readOnlyHint": false
         },
-        "description": "Compute a Merkle root over event hashes in [from_seq, to_seq] (default: 1..head), sign it with the server key, and store it. verify_chain checks checkpoints; export them off-box if you want a record that survives local tampering.",
+        "description": "Compute a Merkle root over event hashes in [from_seq, to_seq] (default: 1..head), sign it with the server key, and store it. verify_chain checks checkpoints. push:true also sends the signed root (never the events) to the hosted anchor service configured in the data dir and stores its countersigned receipt; the result's anchor object says whether that worked. The local checkpoint is stored even when the service is unreachable.",
         "inputSchema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
@@ -217,6 +394,11 @@
               "maximum": 9007199254740991,
               "minimum": 1,
               "type": "integer"
+            },
+            "push": {
+              "default": false,
+              "description": "Also anchor the checkpoint off-box (leaves the machine: root, range, signature, public key).",
+              "type": "boolean"
             },
             "to_seq": {
               "maximum": 9007199254740991,
@@ -231,6 +413,96 @@
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "additionalProperties": false,
           "properties": {
+            "anchor": {
+              "additionalProperties": false,
+              "description": "Present when push=true: the hosted anchor outcome.",
+              "properties": {
+                "anchor_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "conflict": {
+                  "description": "This range was anchored earlier with a different root: the chain was rewritten.",
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "conflicting_anchor_ids": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "duplicate": {
+                  "description": "Same checkpoint was anchored before; the original receipt is returned.",
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                },
+                "error": {
+                  "anyOf": [
+                    {
+                      "enum": [
+                        "anchor_unreachable",
+                        "anchor_refused",
+                        "anchor_config",
+                        "anchor_failed"
+                      ],
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Why the push did not complete. The local checkpoint is stored either way."
+                },
+                "message": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "ok": {
+                  "description": "true when the service countersigned and the receipt verified.",
+                  "type": "boolean"
+                },
+                "public_status": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "received_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "verify_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "ok",
+                "anchor_id",
+                "duplicate",
+                "conflict",
+                "conflicting_anchor_ids",
+                "received_at",
+                "verify_url",
+                "public_status",
+                "error",
+                "message"
+              ],
+              "type": "object"
+            },
             "checkpoint_id": {
               "type": "string"
             },
@@ -334,6 +606,55 @@
           "properties": {
             "actor_id": {
               "type": "string"
+            },
+            "anchor": {
+              "anyOf": [
+                {
+                  "additionalProperties": false,
+                  "description": "Latest hosted anchor of this chain (local record, no network).",
+                  "properties": {
+                    "anchor_id": {
+                      "type": "string"
+                    },
+                    "events_since": {
+                      "description": "Events appended after the anchored range.",
+                      "maximum": 9007199254740991,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "from_seq": {
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991,
+                      "type": "integer"
+                    },
+                    "received_at": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "description": "pending_public | published | conflict",
+                      "type": "string"
+                    },
+                    "to_seq": {
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "anchor_id",
+                    "from_seq",
+                    "to_seq",
+                    "received_at",
+                    "status",
+                    "events_since"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "null when the chain was never anchored."
             },
             "briefing_id": {
               "type": "string"
@@ -934,6 +1255,7 @@
             "recovery",
             "drift_banner",
             "stale_write_advisory",
+            "anchor",
             "delta",
             "retractions",
             "digest",
@@ -1990,5 +2312,5 @@
     "title": "kronicle-lite",
     "version": "0.3.0"
   },
-  "sha256": "11f99985cdee9ac69e2f746a5ce4592fa239be8018c8018fd33d9e2af2a329d6"
+  "sha256": "337f412d40909bf96ea607ddff46fd3da3db8c76796040a0915a7e85260aa160"
 }

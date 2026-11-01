@@ -28,6 +28,7 @@ const MODERN = '2026-07-28';
 const META = { 'io.modelcontextprotocol/protocolVersion': MODERN, 'io.modelcontextprotocol/clientCapabilities': {} };
 
 const TOOL_NAMES = [
+  'anchor_status',
   'audit_assumptions',
   'checkpoint_chain',
   'get_system_state',
@@ -38,6 +39,8 @@ const TOOL_NAMES = [
   'verify',
   'verify_chain',
 ].sort();
+
+const OPEN_WORLD = new Set(['checkpoint_chain', 'anchor_status']);
 
 interface ToolResult {
   content: { type: string; text?: string }[];
@@ -109,7 +112,8 @@ describe('MCP server (in-process, 2026-07-28 client via serveStdio over InMemory
       expect(t.inputSchema, t.name).toMatchObject({ type: 'object' });
       expect(t.outputSchema, t.name).toMatchObject({ type: 'object' });
       expect(t.annotations, t.name).toHaveProperty('readOnlyHint');
-      expect(t.annotations?.openWorldHint, t.name).toBe(false);
+      // Only the anchoring surface can leave the box (push / remote check).
+      expect(t.annotations?.openWorldHint, t.name).toBe(OPEN_WORLD.has(t.name));
     }
     const gss = tools.find((t) => t.name === 'get_system_state')!;
     expect(gss.description).toMatch(/since_cursor/);

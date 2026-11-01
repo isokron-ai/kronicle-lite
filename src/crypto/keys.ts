@@ -43,6 +43,16 @@ export function keyIdFromPublicKey(pub: KeyObject): string {
   return `ed25519-${sha256Hex(new Uint8Array(der)).slice(0, 16)}`;
 }
 
+/**
+ * chain_id = sha256 hex of the SPKI DER of the public key — the same DER
+ * `keyIdFromPublicKey` hashes, kept whole. The hosted anchor service keys a
+ * chain by it (key_id is its first 16 hex chars with an `ed25519-` prefix).
+ */
+export function chainIdFromPublicKeyPem(public_key_pem: string): string {
+  const der = createPublicKey(public_key_pem).export({ type: 'spki', format: 'der' }) as Buffer;
+  return sha256Hex(new Uint8Array(der));
+}
+
 export function signerFromPrivateKey(priv: KeyObject): Signer {
   const pub = createPublicKey(priv);
   const public_key_pem = pub.export({ type: 'spki', format: 'pem' }) as string;

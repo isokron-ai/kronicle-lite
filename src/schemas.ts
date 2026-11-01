@@ -117,6 +117,17 @@ export const TypedDeltaSchema = z.object({
   }),
 });
 
+export const AnchorSummarySchema = z
+  .object({
+    anchor_id: z.string(),
+    from_seq: z.number().int().positive(),
+    to_seq: z.number().int().positive(),
+    received_at: z.string(),
+    status: z.string().describe('pending_public | published | conflict'),
+    events_since: z.number().int().nonnegative().describe('Events appended after the anchored range.'),
+  })
+  .describe('Latest hosted anchor of this chain (local record, no network).');
+
 export const SystemStateSchema = z.object({
   format: z.literal('kronicle-lite/1'),
   briefing_id: z.string(),
@@ -129,6 +140,7 @@ export const SystemStateSchema = z.object({
   recovery: RecoverySchema,
   drift_banner: DriftBannerSchema,
   stale_write_advisory: StaleWriteAdvisorySchema,
+  anchor: AnchorSummarySchema.nullable().describe('null when the chain was never anchored.'),
   delta: TypedDeltaSchema.nullable().describe('null for focus=retractions and focus=pulse.'),
   retractions: z.array(RetractionSchema).nullable().describe('null for focus=pulse.'),
   digest: DigestSchema.nullable().describe('Present on cold start and focus=orientation.'),
@@ -231,6 +243,53 @@ export const CheckpointSchema = z.object({
   key_id: z.string(),
   signature: z.string().describe('Ed25519 signature, base64.'),
   created_at: z.string(),
+  anchor: z
+    .object({
+      ok: z.boolean().describe('true when the service countersigned and the receipt verified.'),
+      anchor_id: z.string().nullable(),
+      duplicate: z.boolean().nullable().describe('Same checkpoint was anchored before; the original receipt is returned.'),
+      conflict: z.boolean().nullable().describe('This range was anchored earlier with a different root: the chain was rewritten.'),
+      conflicting_anchor_ids: z.array(z.string()),
+      received_at: z.string().nullable(),
+      verify_url: z.string().nullable(),
+      public_status: z.string().nullable(),
+      error: z
+        .enum(['anchor_unreachable', 'anchor_refused', 'anchor_config', 'anchor_failed'])
+        .nullable()
+        .describe('Why the push did not complete. The local checkpoint is stored either way.'),
+      message: z.string().nullable(),
+    })
+    .optional()
+    .describe('Present when push=true: the hosted anchor outcome.'),
+});
+
+const RANGE_RESULTS = ['match', 'diverged', 'beyond_head', 'gap'] as const;
+
+export const AnchorStatusResultSchema = z.object({
+  chain_id: HEX64.describe('sha256 of the signing key SPKI DER; the service keys the chain by it.'),
+  key_id: z.string(),
+  head_seq: z.number().int().nonnegative(),
+  anchor_url: z.string(),
+  license_key_configured: z.boolean(),
+  anchors: z.number().int().nonnegative().describe('Anchor receipts stored locally.'),
+  last: z
+    .object({
+      anchor_id: z.string(),
+      range: z.tuple([z.number().int(), z.number().int()]),
+      root: HEX64,
+      received_at: z.string(),
+      status: z.string(),
+      verify_url: z.string(),
+      events_since: z.number().int().nonnegative(),
+    })
+    .nullable(),
+  verification: z.object({
+    result: z.enum([...RANGE_RESULTS, 'none']).describe('Local root over the last anchored range vs the anchored root.'),
+    countersignature: z.enum(['ok', 'failed', 'unchecked']),
+    remote: z.enum(['checked', 'skipped', 'unreachable']),
+    remote_conflict: z.boolean().nullable(),
+    detail: z.string().nullable(),
+  }),
 });
 
 export const BlockSummarySchema = z.object({

@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
+import { ensureDefaultConfig } from '../anchor/config.js';
 import { GENESIS_HASH } from '../chain/genesis.js';
 import {
   ephemeralIdentity,
@@ -44,6 +45,8 @@ export function openDatabase(opts: OpenOptions = {}): Opened {
     mkdirSync(dataDir, { recursive: true, mode: 0o700 });
     db = new Database(join(dataDir, 'kronicle-lite.db'));
     identity = loadOrCreateIdentity(dataDir);
+    // First run: config.json with the default anchor_url only (no license key).
+    ensureDefaultConfig(dataDir);
   }
 
   db.exec(SCHEMA_SQL);

@@ -26,7 +26,18 @@ language, or from `sha256sum` in a shell, without trusting this code.
 **Checkpoints you can take off-box.** A signed Merkle root over a seq range is
 a few hundred bytes. If you copy checkpoints (or the whole JSONL export) to a
 place the local machine cannot write, a later rewrite of the local chain is
-detectable by comparing roots. kronicle-lite does not do this for you.
+detectable by comparing roots. Since 0.4.0 `checkpoint --push` does this for
+you against a hosted anchor service, and `verify --remote` does the comparing:
+
+| evidence | who signs | what it proves | what it cannot |
+|---|---|---|---|
+| local checkpoint | the box's own key | the rows still hash to the root the box signed | anything against the box owner: they hold the key and can re-sign |
+| anchored checkpoint (0.4.0) | the box's key, countersigned by the anchor service, `received_at` bound | that this root for this range existed no later than `received_at`; a later rewrite of that range shows as `diverged` locally and as a `409 CONFLICT` if re-pushed | that the root covers real events (the service never sees leaves); that `[1..N+k]` extends an earlier `[1..N]` (no consistency proof in v1); who holds the signing key (the license key only pays) |
+| published anchor (service day roots, later) | as above, plus a public log | as above, without trusting the service's database | as above |
+
+An anchor is a timestamped commitment, not a content audit. The service is
+not deployed yet; until it is, `--push` and `--remote` report "anchor service
+unreachable" and every local command behaves exactly as without them.
 
 ## What it does not give you
 
@@ -36,7 +47,9 @@ database can also read `signing-key.pem`, rewrite the chain from any point,
 re-sign new receipts and checkpoints, and `verify_chain` will pass. Tamper-
 evidence against the box owner, or against malware running as the box owner,
 requires a key the box does not hold — a hardware token, a remote signer, or
-anchoring roots in a third-party log. None of that is in v0.1. If someone
+anchoring roots in a third-party log. 0.4.0 adds the last of these
+(`checkpoint --push`); it bounds *when* a root existed, it does not make the
+local key trustworthy. If someone
 tells you a local signature "proves" something to a third party, they are
 wrong.
 
@@ -111,8 +124,13 @@ by itself, a multi-user service. Treat the token like an SSH key.
 - The user does not need to convince anyone else of anything.
 
 If your situation is different — shared machines, adversarial co-tenants,
-compliance evidence — treat kronicle-lite as a well-structured log and add an
-external anchor (see ROADMAP: remote checkpoint anchoring).
+compliance evidence — treat kronicle-lite as a well-structured log and anchor
+its checkpoints off-box (`checkpoint --push`, `verify --remote`).
+
+**What leaves the box when you anchor.** The checkpoint (range, leaf count,
+root, key_id, signature), your public key and your license key. Never events,
+block content, document titles or receipts. `config.json` holds the license
+key; it is written `0600` and `doctor` flags it when it is not.
 
 ## Reporting
 

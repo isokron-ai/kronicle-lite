@@ -70,7 +70,11 @@ your beliefs aligned with what the store actually says now.
 
 When two sources disagree, the authoritative order is:
 
-1. **Chain** — `get_system_state`, `verify`, `verify_chain` results.
+1. **Chain** — `get_system_state`, `verify`, `verify_chain` results. When
+   the chain itself is in question (a teammate restored a backup, the banner
+   says the last anchor is far behind), `anchor_status` compares the local
+   chain with its last off-box anchor: `diverged` means the local history was
+   rewritten after it was anchored — stop and tell the operator.
 2. **Fresh tool result** — a `recall()` hit with a receipt that verifies now.
 3. **Operator instruction** — the live message outranks your context.
 4. **Session reasoning** — earlier turns, IF they were chain-grounded at the

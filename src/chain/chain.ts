@@ -72,6 +72,27 @@ export interface Checkpoint {
   created_at: string;
 }
 
+/** One row of the additive `anchors` table (0.4.0): a service-countersigned receipt for a pushed checkpoint. */
+export interface AnchorRecord {
+  anchor_id: string;
+  checkpoint_id: string | null;
+  /** sha256 hex of the SPKI DER of the signing key (key_id is its 16-char prefix). */
+  chain_id: string;
+  anchor_url: string;
+  from_seq: number;
+  to_seq: number;
+  root: string;
+  received_at: string;
+  /** The receipt as JCS bytes; sha256 of this string is its public-log leaf. */
+  receipt_json: string;
+  day: string | null;
+  leaf_index: number | null;
+  path_json: string | null;
+  /** pending_public | published | conflict */
+  status: string;
+  fetched_at: string;
+}
+
 export const CHECKPOINT_VERSION = 1 as const;
 
 /** The bytes a checkpoint signature covers. */
@@ -332,17 +353,14 @@ export class Chain {
     const to = to_seq ?? head.seq;
     if (to < from_seq || from_seq < 1) throw new Error('checkpoint: invalid range');
     if (to > head.seq) throw new Error(`checkpoint: to_seq ${to} beyond head ${head.seq}`);
-    const leaves = this.db
-      .prepare(`SELECT seq, this_hash FROM events WHERE seq >= ? AND seq <= ? ORDER BY seq`)
-      .all(from_seq, to) as { seq: number; this_hash: string }[];
-    if (leaves.length !== to - from_seq + 1) throw new Error('checkpoint: seq gap in range');
-    const root = merkleRootHex(leaves);
+    const over = this.rootOver(from_seq, to);
+    if (!over) throw new Error('checkpoint: seq gap in range');
     const cp: Checkpoint = {
       checkpoint_id: randomUUID(),
       from_seq,
       to_seq: to,
-      leaf_count: leaves.length,
-      root,
+      leaf_count: over.leaf_count,
+      root: over.root,
       key_id: this.signer.key_id,
       signature: '',
       created_at: new Date().toISOString(),
@@ -359,6 +377,76 @@ export class Chain {
 
   listCheckpoints(): Checkpoint[] {
     return this.db.prepare(`SELECT * FROM checkpoints ORDER BY to_seq, from_seq`).all() as Checkpoint[];
+  }
+
+  /** The checkpoint reaching furthest up the chain (newest on ties), or null. */
+  latestCheckpoint(): Checkpoint | null {
+    return (
+      (this.db.prepare(`SELECT * FROM checkpoints ORDER BY to_seq DESC, created_at DESC LIMIT 1`).get() as
+        | Checkpoint
+        | undefined) ?? null
+    );
+  }
+
+  getCheckpoint(checkpoint_id: string): Checkpoint | null {
+    return (
+      (this.db.prepare(`SELECT * FROM checkpoints WHERE checkpoint_id = ?`).get(checkpoint_id) as Checkpoint | undefined) ??
+      null
+    );
+  }
+
+  /**
+   * FORMAT §2 Merkle root over the stored event hashes in [from_seq, to_seq],
+   * or null when the range is empty, inverted, has a gap or runs past head.
+   * Shared by checkpoint(), verifyCheckpoint() and the anchor client.
+   */
+  rootOver(from_seq: number, to_seq: number): { root: string; leaf_count: number } | null {
+    if (from_seq < 1 || to_seq < from_seq) return null;
+    const leaves = this.db
+      .prepare(`SELECT seq, this_hash FROM events WHERE seq >= ? AND seq <= ? ORDER BY seq`)
+      .all(from_seq, to_seq) as { seq: number; this_hash: string }[];
+    if (leaves.length !== to_seq - from_seq + 1) return null;
+    return { root: merkleRootHex(leaves), leaf_count: leaves.length };
+  }
+
+  // ───────────────────────────── anchors (0.4.0, additive) ─────────────────────────────
+
+  /**
+   * Insert a countersigned anchor receipt, or refresh the mutable public
+   * fields (day, leaf_index, path_json, status) of one already stored.
+   * Anchors are not chain events: they live beside the chain and never
+   * change a hash.
+   */
+  recordAnchor(a: Omit<AnchorRecord, 'fetched_at'> & { fetched_at?: string }): void {
+    this.db
+      .prepare(
+        `INSERT INTO anchors (anchor_id, checkpoint_id, chain_id, anchor_url, from_seq, to_seq, root, received_at,
+           receipt_json, day, leaf_index, path_json, status, fetched_at)
+         VALUES (@anchor_id, @checkpoint_id, @chain_id, @anchor_url, @from_seq, @to_seq, @root, @received_at,
+           @receipt_json, @day, @leaf_index, @path_json, @status, @fetched_at)
+         ON CONFLICT(anchor_id) DO UPDATE SET day = excluded.day, leaf_index = excluded.leaf_index,
+           path_json = excluded.path_json, status = excluded.status, fetched_at = excluded.fetched_at`,
+      )
+      .run({
+        ...a,
+        checkpoint_id: a.checkpoint_id ?? null,
+        day: a.day ?? null,
+        leaf_index: a.leaf_index ?? null,
+        path_json: a.path_json ?? null,
+        fetched_at: a.fetched_at ?? new Date().toISOString(),
+      });
+  }
+
+  listAnchors(): AnchorRecord[] {
+    return this.db.prepare(`SELECT * FROM anchors ORDER BY from_seq, to_seq, received_at`).all() as AnchorRecord[];
+  }
+
+  lastAnchor(): AnchorRecord | null {
+    return (
+      (this.db.prepare(`SELECT * FROM anchors ORDER BY to_seq DESC, received_at DESC LIMIT 1`).get() as
+        | AnchorRecord
+        | undefined) ?? null
+    );
   }
 
   private publicKeyFor(key_id: string): string | null {
@@ -492,10 +580,8 @@ export class Chain {
     if (!verifyEd25519(pem, checkpointSigningPayload(cp), cp.signature)) {
       return { ...base, ok: false, reason: 'signature_invalid' };
     }
-    const leaves = this.db
-      .prepare(`SELECT seq, this_hash FROM events WHERE seq >= ? AND seq <= ? ORDER BY seq`)
-      .all(cp.from_seq, cp.to_seq) as { seq: number; this_hash: string }[];
-    if (leaves.length !== cp.leaf_count || merkleRootHex(leaves) !== cp.root) {
+    const over = this.rootOver(cp.from_seq, cp.to_seq);
+    if (!over || over.leaf_count !== cp.leaf_count || over.root !== cp.root) {
       return { ...base, ok: false, reason: 'root_mismatch' };
     }
     return { ...base, ok: true, reason: 'valid' };

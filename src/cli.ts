@@ -5,7 +5,9 @@
  *   kronicle-lite serve [--data-dir DIR] [--actor ID]   stdio MCP server (dual-era: 2026-07-28 + 2025 initialize)
  *   kronicle-lite serve --http [--port N] [--host H] [--bearer T | --bearer-file F]   Streamable HTTP (2026-07-28 only)
  *   kronicle-lite verify-chain [--data-dir DIR] [--from N] [--to N]
- *   kronicle-lite checkpoint [--data-dir DIR] [--from N] [--to N]
+ *   kronicle-lite checkpoint [--data-dir DIR] [--from N] [--to N] [--push [--key K] [--url U]]
+ *   kronicle-lite verify [--remote [--offline] [--url U] [--json]]   local by default (= verify-chain)
+ *   kronicle-lite anchor status [--url U] [--json]
  *   kronicle-lite export [--data-dir DIR] [--out FILE]  JSONL of events (stdout default)
  *   kronicle-lite import [--data-dir DIR] --in FILE     into an empty store
  *   kronicle-lite keys [--data-dir DIR]                 show key id + public key
@@ -17,6 +19,9 @@ import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { createReadStream, createWriteStream, readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 
+import { anchorStatus, tryPushCheckpoint, verifyRemote, type AnchorCallOptions } from './anchor/anchor.js';
+import { AnchorApiError, AnchorUnreachableError } from './anchor/client.js';
+import { AnchorConfigError } from './anchor/config.js';
 import { defaultDataDir } from './db/open.js';
 import { DEFAULT_HTTP_PORT, loadOrCreateBearer, readBearerFile, serveHttp } from './http.js';
 import { createServerFactory, renderSystemStateMarkdown } from './server.js';
@@ -79,6 +84,11 @@ Usage:
                                                                  bearer from DIR/http-bearer.token (created 0600)
   kronicle-lite verify-chain [--data-dir DIR] [--from N] [--to N] recompute every hash; exit 1 on mismatch
   kronicle-lite checkpoint   [--data-dir DIR] [--from N] [--to N] sign a Merkle checkpoint
+                 [--push [--key K] [--url U]]                    …and anchor it off-box (hosted service countersigns)
+  kronicle-lite verify       [--remote [--offline]] [--url U] [--json]
+                                                                 local: = verify-chain; --remote: recompute each anchored
+                                                                 range, exit 1 on "local chain diverges from anchor at [a,b]"
+  kronicle-lite anchor status [--url U] [--json]                 last anchor, its status, events since (no network)
   kronicle-lite export       [--data-dir DIR] [--out FILE]        JSONL of all events (stdout by default)
   kronicle-lite import       [--data-dir DIR] --in FILE           rebuild an EMPTY store from JSONL
   kronicle-lite keys         [--data-dir DIR]                     print key id + public key PEM
@@ -86,7 +96,21 @@ Usage:
   kronicle-lite orient       [--data-dir DIR] [--actor ID] [--cursor C] [--focus F] [--json]
 
 Data dir defaults to $KRONICLE_LITE_DATA_DIR or ~/.kronicle-lite.
+Anchor config: flags > KRONICLE_ANCHOR_URL / KRONICLE_ANCHOR_KEY > DIR/config.json {anchor_url, license_key}
+  > https://anchor.isokron.ai. Exit codes for anchor commands: 0 ok, 1 divergence/conflict, 2 usage or I/O
+  (including "anchor service unreachable").
 `;
+
+function anchorOpts(flags: Record<string, string | true>): AnchorCallOptions {
+  return {
+    ...(str(flags['key']) !== undefined ? { licenseKey: str(flags['key'])! } : {}),
+    ...(str(flags['url']) !== undefined ? { anchorUrl: str(flags['url'])! } : {}),
+  };
+}
+
+function isAnchorIoError(err: unknown): boolean {
+  return err instanceof AnchorUnreachableError || err instanceof AnchorApiError || err instanceof AnchorConfigError;
+}
 
 async function main(argv: string[]): Promise<number> {
   const { cmd, positional, flags } = parseArgs(argv);
@@ -166,9 +190,93 @@ async function main(argv: string[]): Promise<number> {
     case 'checkpoint': {
       const store = new KronicleLite({ dataDir });
       const cp = store.chain.checkpoint(num(flags['from']) ?? 1, num(flags['to']));
-      process.stdout.write(JSON.stringify(cp, null, 2) + '\n');
+      if (flags['push'] !== true) {
+        process.stdout.write(JSON.stringify(cp, null, 2) + '\n');
+        store.close();
+        return 0;
+      }
+      // The checkpoint is stored locally before anything leaves the box; a
+      // failed push never undoes it.
+      const anchor = await tryPushCheckpoint(store, { ...anchorOpts(flags), checkpointId: cp.checkpoint_id });
+      process.stdout.write(JSON.stringify({ checkpoint: cp, anchor }, null, 2) + '\n');
       store.close();
+      if (anchor.error) {
+        process.stderr.write(`checkpoint ${cp.checkpoint_id} stored locally; push failed: ${anchor.message}\n`);
+        return 2;
+      }
+      if (anchor.conflict) {
+        process.stderr.write(`${anchor.message}\n`);
+        return 1;
+      }
+      process.stderr.write(
+        `${anchor.duplicate ? 'already anchored' : 'anchored'} [${cp.from_seq}, ${cp.to_seq}] root ${cp.root.slice(0, 16)}… at ${anchor.received_at}; verify: ${anchor.verify_url}\n`,
+      );
       return 0;
+    }
+    case 'verify': {
+      const store = new KronicleLite({ dataDir });
+      try {
+        if (flags['remote'] !== true) {
+          // Local verification; identical to verify-chain.
+          const r = store.chain.verify(num(flags['from']) ?? 1, num(flags['to']));
+          process.stdout.write(JSON.stringify(r, null, 2) + '\n');
+          return r.ok ? 0 : 1;
+        }
+        const r = await verifyRemote(store, { ...anchorOpts(flags), offline: flags['offline'] === true });
+        if (flags['json']) {
+          process.stdout.write(JSON.stringify(r, null, 2) + '\n');
+        } else {
+          const lines = [r.summary];
+          for (const c of r.checks) {
+            lines.push(
+              `  [${c.from_seq}, ${c.to_seq}] ${c.result === 'match' ? 'ok' : c.result.toUpperCase()} anchored ${c.anchored_root.slice(0, 16)}… ${c.received_at} countersig ${c.countersignature}${c.conflict_remote ? ' REMOTE-CONFLICT' : ''} (${c.source})`,
+            );
+          }
+          for (const d of r.divergences) lines.push(d);
+          process.stdout.write(lines.join('\n') + '\n');
+        }
+        return r.ok ? 0 : 1;
+      } catch (err) {
+        if (!isAnchorIoError(err)) throw err;
+        process.stderr.write(`error: ${(err as Error).message}\n`);
+        if (flags['json']) process.stdout.write(JSON.stringify({ error: (err as Error).message }) + '\n');
+        return 2;
+      } finally {
+        store.close();
+      }
+    }
+    case 'anchor': {
+      const sub = positional[0];
+      if (sub !== 'status') {
+        process.stderr.write(`usage: kronicle-lite anchor status [--url U] [--json]\n`);
+        return 2;
+      }
+      const store = new KronicleLite({ dataDir });
+      try {
+        const r = anchorStatus(store, anchorOpts(flags));
+        if (flags['json']) {
+          process.stdout.write(JSON.stringify(r, null, 2) + '\n');
+        } else {
+          const lines = [
+            `chain ${r.chain_id.slice(0, 16)}… key ${r.key_id} head ${r.head_seq} anchors ${r.anchors} via ${r.anchor_url}${r.license_key_configured ? '' : ' (no license key configured)'}`,
+          ];
+          if (r.last) {
+            lines.push(
+              `last anchor [${r.last.range[0]}, ${r.last.range[1]}] ${r.last.status} at ${r.last.received_at}; ${r.last.events_since} event(s) since; ${r.last.verify_url}`,
+            );
+          } else {
+            lines.push('never anchored: run `kronicle-lite checkpoint --push`');
+          }
+          process.stdout.write(lines.join('\n') + '\n');
+        }
+        return 0;
+      } catch (err) {
+        if (!isAnchorIoError(err)) throw err;
+        process.stderr.write(`error: ${(err as Error).message}\n`);
+        return 2;
+      } finally {
+        store.close();
+      }
     }
     case 'export': {
       const store = new KronicleLite({ dataDir });

@@ -279,6 +279,11 @@ holds the public half so a copied database verifies on its own. Setting
 `revoked_at` downgrades every receipt and checkpoint signed by that key to
 `UNVERIFIED` / `unknown_key`.
 
+```
+<data-dir>/config.json               {"anchor_url", "license_key"}, mode 0600 (0.4.0; created with anchor_url only)
+<data-dir>/anchor-keys.cache.json    anchor service public keys from the last online call, mode 0600 (0.4.0)
+```
+
 ## 7. Export
 
 `kronicle-lite export` writes JSONL: a header line
@@ -287,9 +292,59 @@ one event object per line, ascending `seq`, with all columns from §1
 (`payload` as an object). `import` re-verifies every hash and link while
 loading and rebuilds documents and blocks from the events.
 
+0.4.0, additive: when the store holds anchor receipts (§9), one trailing
+line `{"kronicle_lite_anchors":1, "anchors":[…]}` follows the events — one
+object per `anchors` row with `receipt_json` parsed into `receipt`. A store
+that was never anchored exports exactly as before. `import` skips the line
+(receipts are re-fetchable from the service by `chain_id`).
+
 ## 8. Versioning
 
 Any change to §1.2, §2, §3 content hashing, §4 payloads or §5 token layout is
 a format change and must bump the genesis string, the receipt `v`, the
 checkpoint `v` or the cursor prefix respectively. Old data must still verify
 under its original rules.
+
+## 9. Hosted anchors (0.4.0, additive)
+
+`checkpoint --push` sends one signed checkpoint (§2) to an anchor service
+(default `https://anchor.isokron.ai`) and stores the countersigned receipt
+it returns. Nothing in §1–§5 changes: anchors are not chain events, no hash
+covers them, and old databases gain the empty table on open.
+
+```
+chain_id = hex( sha256( SPKI DER of the Ed25519 public key ) )      // key_id = "ed25519-" + chain_id[0..16]
+POST /v1/anchor   { chain_id, pubkey: <SPKI PEM>, checkpoint: { v:1, from_seq, to_seq, leaf_count, root, key_id, signature } }
+```
+
+The service sees the root, the range, the signature and the public key;
+never events or content. It checks `sha256(SPKI DER) == chain_id`, the
+key_id derivation, the §2 signature and the range arithmetic, then
+countersigns an **anchor receipt v1**:
+
+```
+{ v: 1, anchor_id, chain_id, key_id, checkpoint, received_at, tier, service_key_id, verified: ["chain_id","key_id","signature","range"], signature }
+signature = base64( Ed25519_sign_service( utf8( canonicalize(receipt without "signature") ) ) )
+leaf      = sha256( canonicalize(receipt) )          // the receipt's public-log leaf
+```
+
+Service public keys are published at `/.well-known/anchor-keys.json`. The
+client verifies the countersignature and that `receipt.checkpoint` equals
+what it sent before storing anything:
+
+| `anchors` column | meaning |
+|---|---|
+| `anchor_id` | service id (uuidv7) |
+| `checkpoint_id` | local `checkpoints.checkpoint_id` that was pushed |
+| `chain_id`, `anchor_url` | which chain, which service |
+| `from_seq`, `to_seq`, `root` | the anchored range and Merkle root |
+| `received_at` | service clock at countersigning |
+| `receipt_json` | the receipt as JCS bytes |
+| `day`, `leaf_index`, `path_json` | public-log inclusion, NULL until published |
+| `status` | `pending_public` \| `published` \| `conflict` |
+
+`verify --remote` recomputes §2 over the local rows for every anchored range:
+`match`, `diverged` (local root differs: the chain was rewritten after it was
+anchored), `beyond_head` (the range is gone: truncation) or `gap`. Pushing a
+different root for an already-anchored range is answered `409` and both
+anchors are flagged `conflict`.
