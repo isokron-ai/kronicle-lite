@@ -95,3 +95,4 @@ export {
 } from './anchor/anchor.js';
 export { AnchorClient, AnchorApiError, AnchorUnreachableError } from './anchor/client.js';
 export { DEFAULT_ANCHOR_URL, loadConfig as loadAnchorConfig, type AnchorConfig } from './anchor/config.js';
+export * as shim from './shim/index.js';

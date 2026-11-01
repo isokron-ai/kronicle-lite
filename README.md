@@ -110,7 +110,9 @@ wake contract from `examples/.claude/CLAUDE.md` to your `CLAUDE.md` (it
 includes "pulse before every world-changing command"). Then typing `orient`
 re-grounds the agent against the chain. To push changes that land while the
 agent works, add a `PostToolUse` hook on `kronicle-lite orient --cursor C
---focus retractions --json` ([docs/PUSH.md](docs/PUSH.md)).
+--focus retractions --json` ([docs/PUSH.md](docs/PUSH.md)). For a check
+at the moment `git push` / `terraform apply` / `kubectl apply` actually
+runs, in any client, see [exec-time pulse shims](#exec-time-pulse-shims-unreleased).
 
 ### Cursor
 
@@ -430,6 +432,43 @@ vs the local root (fails on divergence); anchor service reachability
 `~/.cursor/mcp.json`, `~/.codex/config.toml` — read, never written) and with
 which `--data-dir`. On Windows it adds a note that the POSIX modes are
 no-ops there, with an `icacls` line to lock the data dir down.
+
+## Exec-time pulse shims (unreleased)
+
+A push hook only reaches clients that have hooks, and a check made before a
+Bash call misses a runbook change that lands while `build && deploy` runs,
+or a deploy hidden in `make release`, `bash -c "$CMD"` or a wrapper script.
+Shims check at the moment the real binary is executed, for any client
+(Claude Code, Cursor, Codex, Hermes, a human in a terminal):
+
+```sh
+kronicle-lite shim install                      # git terraform tofu kubectl helm npm pnpm yarn → ~/.kronicle-lite/shims
+export PATH="$HOME/.kronicle-lite/shims:$PATH"  # FIRST on PATH: shell profile and each agent's environment
+kronicle-lite shim status                       # active on PATH? real binaries? anything blocking here?
+```
+
+Each shim is a small POSIX sh wrapper (plus `.cmd`/`.ps1` on Windows). A
+read-only invocation (`git status`, `terraform plan`, `kubectl get`) execs
+the real binary at once with shell builtins only, ~1 ms overhead and no
+node start. A world-changing one (`git push`, `terraform apply`,
+`kubectl apply|delete|patch|replace|rollout …`, `helm install|upgrade|uninstall`,
+`npm|pnpm|yarn publish`, `npm run deploy`, plus your own `--world "make release,docker push"`)
+first runs `kronicle-lite pulse` (~0.2 s): when a document changed since
+the last check it is **refused** with the diff (exit 77):
+
+```text
+$ terraform apply
+kronicle-lite shim: did NOT run `terraform apply` — kronicle-lite has 1 change(s) you have not reconciled (head seq 7):
+- runbook › Runbook › Deploy (seq 7, supersession/behavioral): relied on "Target: prod-a" → now "Target: prod-b"; diff: Target: [-prod-a-]{+prod-b+}
+Re-read the affected document(s) … Once reconciled, acknowledge with `kronicle-lite shim ack --through 7` (in this directory), then run the command again.
+```
+
+`--mode warn` prints the same and runs the command. A store that fails its
+integrity check refuses world-changing commands in both modes (fail
+closed); a missing, broken or hung kronicle-lite lets them run (fail open,
+noted once on stderr, logged in `.kronicle-shim/shim.log`). Matching rules,
+recursion guard, per-project acknowledgement and client snippets:
+[docs/PUSH.md § Shims](docs/PUSH.md#shims-exec-time-pulse-for-any-client).
 
 ## Tools
 

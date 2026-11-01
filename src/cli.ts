@@ -17,6 +17,8 @@
  *   kronicle-lite doctor [--json] [--no-network] [--full] [--cwd DIR]
  *   kronicle-lite orient [--data-dir DIR] [--actor ID] [--cursor C] [--focus F] [--json] [--all-projects] [--include-format-only]
  *   kronicle-lite verify-chain [--full] | rebuild | demo [--dir D] [--keep]
+ *   kronicle-lite pulse [--state D | --cursor C] [--cwd DIR] [--mode deny|warn] [--json] [-- CMD…]
+ *   kronicle-lite shim install|uninstall|status|ack|exec …   exec-time pulse wrappers (src/shim)
  */
 
 import { createReadStream, createWriteStream, existsSync, readFileSync } from 'node:fs';
@@ -162,6 +164,13 @@ Usage:
                                                                  directory); "--cursor C --focus retractions --json" is the
                                                                  hook contract (docs/PUSH.md); format-only edits are listed
                                                                  under format_only_edits unless --include-format-only
+  kronicle-lite pulse        [--data-dir DIR] [--cwd DIR] [--cursor C | --state D] [--mode deny|warn] [--json] [-- CMD…]
+                                                                 the exec-time check: exit 0 allow, 77 refused (unreconciled
+                                                                 retractions or integrity failure; reason on stderr), 3 no store
+  kronicle-lite shim install [--dir D] [--commands git,terraform,kubectl,…] [--world "make release,…"] [--mode deny|warn]
+                 | status | ack [--through SEQ] | uninstall      PATH wrappers that pulse before world-changing commands
+                                                                 (git push, terraform apply, kubectl apply, npm publish, …)
+                                                                 for any client; \`kronicle-lite shim help\`
 
 Data dir defaults to $KRONICLE_LITE_DATA_DIR or ~/.kronicle-lite. Instruction slugs carry a project key
 (<repo>-<hash8>); $KRONICLE_LITE_PROJECT overrides it.
@@ -182,6 +191,11 @@ function isAnchorIoError(err: unknown): boolean {
 }
 
 async function main(argv: string[]): Promise<number> {
+  // pulse / shim parse their own argv (`--` hands the rest over verbatim).
+  if (argv[0] === 'pulse' || argv[0] === 'shim') {
+    const { runShimCli } = await import('./shim/cli.js');
+    return runShimCli(argv[0], argv.slice(1));
+  }
   const { cmd, positional, flags } = parseArgs(argv);
   if (cmd === 'help' || cmd === '--help' || cmd === '-h') {
     process.stdout.write(HELP);
