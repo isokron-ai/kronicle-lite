@@ -19,9 +19,9 @@ import { sha256Hex } from './crypto/hash.js';
 import { createServerFactory } from './server.js';
 import { KronicleLite } from './store.js';
 
-export const CATALOG_FINGERPRINT = 'fa8d1d6f50b1c461af859c6520515c621c7aee09be19f516a03e366b42a48dee';
+export const CATALOG_FINGERPRINT = '7eed4b72e51af9da660f2a0af4749205791f67338e632104819009600257337f';
 /** Package version the fingerprint above was pinned for. */
-export const CATALOG_VERSION = '0.4.0';
+export const CATALOG_VERSION = '0.5.0';
 
 const MODERN = '2026-07-28';
 

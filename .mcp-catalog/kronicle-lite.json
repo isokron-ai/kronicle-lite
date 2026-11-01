@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-01T01:15:15.886Z",
+  "capturedAt": "2026-11-01T02:43:32.883Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -19,13 +19,11 @@
           "openWorldHint": true,
           "readOnlyHint": true
         },
-        "description": "When was this chain last anchored off-box, and does the local chain still match it? Returns the latest anchor (range, status, events since), and a verification of that range: the local Merkle root recomputed and compared with the anchored root (match | diverged | beyond_head | gap), plus the service countersignature checked with cached keys. remote:true also asks the service (conflict flag, fresh keys); an unreachable service is reported, never an error. diverged means the local chain was rewritten after it was anchored.",
+        "description": "Last off-box anchor and whether the local chain still matches it: match | diverged (rewritten after anchoring) | beyond_head | gap. remote:true also asks the anchor service.",
         "inputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "remote": {
               "default": false,
-              "description": "Also query the anchor service (network).",
               "type": "boolean"
             }
           },
@@ -33,146 +31,32 @@
         },
         "name": "anchor_status",
         "outputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "additionalProperties": false,
           "properties": {
             "anchor_url": {
               "type": "string"
             },
             "anchors": {
-              "description": "Anchor receipts stored locally.",
-              "maximum": 9007199254740991,
-              "minimum": 0,
               "type": "integer"
             },
             "chain_id": {
-              "description": "sha256 of the signing key SPKI DER; the service keys the chain by it.",
-              "pattern": "^[0-9a-f]{64}$",
               "type": "string"
             },
             "head_seq": {
-              "maximum": 9007199254740991,
-              "minimum": 0,
               "type": "integer"
             },
             "key_id": {
               "type": "string"
             },
             "last": {
-              "anyOf": [
-                {
-                  "additionalProperties": false,
-                  "properties": {
-                    "anchor_id": {
-                      "type": "string"
-                    },
-                    "events_since": {
-                      "maximum": 9007199254740991,
-                      "minimum": 0,
-                      "type": "integer"
-                    },
-                    "range": {
-                      "items": false,
-                      "maxItems": 2,
-                      "minItems": 2,
-                      "prefixItems": [
-                        {
-                          "maximum": 9007199254740991,
-                          "minimum": -9007199254740991,
-                          "type": "integer"
-                        },
-                        {
-                          "maximum": 9007199254740991,
-                          "minimum": -9007199254740991,
-                          "type": "integer"
-                        }
-                      ],
-                      "type": "array"
-                    },
-                    "received_at": {
-                      "type": "string"
-                    },
-                    "root": {
-                      "description": "lowercase hex sha256",
-                      "pattern": "^[0-9a-f]{64}$",
-                      "type": "string"
-                    },
-                    "status": {
-                      "type": "string"
-                    },
-                    "verify_url": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "anchor_id",
-                    "range",
-                    "root",
-                    "received_at",
-                    "status",
-                    "verify_url",
-                    "events_since"
-                  ],
-                  "type": "object"
-                },
-                {
-                  "type": "null"
-                }
+              "type": [
+                "object",
+                "null"
               ]
             },
             "license_key_configured": {
               "type": "boolean"
             },
             "verification": {
-              "additionalProperties": false,
-              "properties": {
-                "countersignature": {
-                  "enum": [
-                    "ok",
-                    "failed",
-                    "unchecked"
-                  ],
-                  "type": "string"
-                },
-                "detail": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "remote": {
-                  "enum": [
-                    "checked",
-                    "skipped",
-                    "unreachable"
-                  ],
-                  "type": "string"
-                },
-                "remote_conflict": {
-                  "type": [
-                    "boolean",
-                    "null"
-                  ]
-                },
-                "result": {
-                  "description": "Local root over the last anchored range vs the anchored root.",
-                  "enum": [
-                    "match",
-                    "diverged",
-                    "beyond_head",
-                    "gap",
-                    "none"
-                  ],
-                  "type": "string"
-                }
-              },
-              "required": [
-                "result",
-                "countersignature",
-                "remote",
-                "remote_conflict",
-                "detail"
-              ],
               "type": "object"
             }
           },
@@ -196,9 +80,8 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "The reconciliation surface. Pass the facts you are about to act on as claims {symbol, value}: symbol is a block id (value = its content or content_hash), a document slug (value = revision number, markdown hash, or markdown), or \"head\" (value = chain seq or hash). Each claim is graded current | stale (a newer version exists) | contradicted (the live value differs) | retracted (tombstoned) | unknown, with the current truth and a reconcile line. Use it after a drift banner or retraction list, before writing.",
+        "description": "Grade facts before acting on them. claims: [{symbol, value}]; symbol is a block id (value: content or content_hash), a document slug (value: revision, markdown hash or markdown) or \"head\" (value: seq or hash). Verdict per claim: current | stale | contradicted | retracted | unknown | stale_source, with the current truth.",
         "inputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "claims": {
               "items": {
@@ -239,264 +122,17 @@
         },
         "name": "audit_assumptions",
         "outputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "additionalProperties": false,
           "properties": {
             "checked_at": {
               "type": "string"
             },
             "counts": {
-              "additionalProperties": false,
-              "properties": {
-                "contradicted": {
-                  "maximum": 9007199254740991,
-                  "minimum": 0,
-                  "type": "integer"
-                },
-                "current": {
-                  "maximum": 9007199254740991,
-                  "minimum": 0,
-                  "type": "integer"
-                },
-                "retracted": {
-                  "maximum": 9007199254740991,
-                  "minimum": 0,
-                  "type": "integer"
-                },
-                "stale": {
-                  "maximum": 9007199254740991,
-                  "minimum": 0,
-                  "type": "integer"
-                },
-                "stale_source": {
-                  "description": "Present when any claim is stale_source.",
-                  "maximum": 9007199254740991,
-                  "minimum": 0,
-                  "type": "integer"
-                },
-                "unknown": {
-                  "maximum": 9007199254740991,
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              },
-              "required": [
-                "current",
-                "stale",
-                "contradicted",
-                "retracted",
-                "unknown"
-              ],
               "type": "object"
             },
             "head": {
-              "additionalProperties": false,
-              "description": "Chain head at the time of the call.",
-              "properties": {
-                "hash": {
-                  "description": "Hash of the head event (genesis hash at seq 0).",
-                  "pattern": "^[0-9a-f]{64}$",
-                  "type": "string"
-                },
-                "seq": {
-                  "description": "Chain head sequence number (0 = genesis).",
-                  "maximum": 9007199254740991,
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              },
-              "required": [
-                "seq",
-                "hash"
-              ],
               "type": "object"
             },
             "results": {
-              "items": {
-                "additionalProperties": false,
-                "properties": {
-                  "asserted": {
-                    "type": "string"
-                  },
-                  "current": {
-                    "anyOf": [
-                      {
-                        "additionalProperties": {},
-                        "propertyNames": {
-                          "type": "string"
-                        },
-                        "type": "object"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ],
-                    "description": "The current truth for the symbol, when known."
-                  },
-                  "kind": {
-                    "enum": [
-                      "block",
-                      "document",
-                      "chain",
-                      "unknown"
-                    ],
-                    "type": "string"
-                  },
-                  "reconcile": {
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "source_drift": {
-                    "additionalProperties": false,
-                    "description": "With stale_source: the bound file changed.",
-                    "properties": {
-                      "bound_blob_sha": {
-                        "type": "string"
-                      },
-                      "bound_commit": {
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      },
-                      "detail": {
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      },
-                      "diff_stat": {
-                        "anyOf": [
-                          {
-                            "additionalProperties": false,
-                            "properties": {
-                              "bound_from": {
-                                "description": "Where the bound side of the diff came from.",
-                                "enum": [
-                                  "git",
-                                  "stored_revision",
-                                  "none"
-                                ],
-                                "type": "string"
-                              },
-                              "deletions": {
-                                "maximum": 9007199254740991,
-                                "minimum": 0,
-                                "type": "integer"
-                              },
-                              "files_changed": {
-                                "maximum": 9007199254740991,
-                                "minimum": 0,
-                                "type": "integer"
-                              },
-                              "insertions": {
-                                "maximum": 9007199254740991,
-                                "minimum": 0,
-                                "type": "integer"
-                              },
-                              "summary": {
-                                "description": "git diff --stat style line.",
-                                "type": "string"
-                              }
-                            },
-                            "required": [
-                              "files_changed",
-                              "insertions",
-                              "deletions",
-                              "summary",
-                              "bound_from"
-                            ],
-                            "type": "object"
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
-                      },
-                      "doc_id": {
-                        "type": "string"
-                      },
-                      "head_commit": {
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      },
-                      "path": {
-                        "description": "Path inside repo_root, /-separated.",
-                        "type": "string"
-                      },
-                      "repo_root": {
-                        "type": "string"
-                      },
-                      "revision": {
-                        "description": "Revision whose put recorded the binding.",
-                        "exclusiveMinimum": 0,
-                        "maximum": 9007199254740991,
-                        "type": "integer"
-                      },
-                      "slug": {
-                        "type": "string"
-                      },
-                      "state": {
-                        "enum": [
-                          "current",
-                          "changed",
-                          "missing",
-                          "unavailable"
-                        ],
-                        "type": "string"
-                      },
-                      "working_blob_sha": {
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      }
-                    },
-                    "required": [
-                      "slug",
-                      "doc_id",
-                      "revision",
-                      "repo_root",
-                      "path",
-                      "bound_commit",
-                      "bound_blob_sha",
-                      "state",
-                      "working_blob_sha",
-                      "head_commit",
-                      "diff_stat",
-                      "detail"
-                    ],
-                    "type": "object"
-                  },
-                  "symbol": {
-                    "type": "string"
-                  },
-                  "verdict": {
-                    "enum": [
-                      "current",
-                      "stale",
-                      "contradicted",
-                      "retracted",
-                      "unknown",
-                      "stale_source"
-                    ],
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "symbol",
-                  "asserted",
-                  "verdict",
-                  "kind",
-                  "current",
-                  "reconcile"
-                ],
-                "type": "object"
-              },
               "type": "array"
             }
           },
@@ -516,23 +152,19 @@
           "openWorldHint": true,
           "readOnlyHint": false
         },
-        "description": "Compute a Merkle root over event hashes in [from_seq, to_seq] (default: 1..head), sign it with the server key, and store it. verify_chain checks checkpoints. push:true also sends the signed root (never the events) to the hosted anchor service configured in the data dir and stores its countersigned receipt; the result's anchor object says whether that worked. The local checkpoint is stored even when the service is unreachable.",
+        "description": "Sign and store a Merkle root over event hashes in [from_seq, to_seq] (default: all). push:true also anchors it off-box (root, range, signature and public key leave the machine; the local checkpoint is kept either way).",
         "inputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "from_seq": {
               "default": 1,
-              "maximum": 9007199254740991,
               "minimum": 1,
               "type": "integer"
             },
             "push": {
               "default": false,
-              "description": "Also anchor the checkpoint off-box (leaves the machine: root, range, signature, public key).",
               "type": "boolean"
             },
             "to_seq": {
-              "maximum": 9007199254740991,
               "minimum": 1,
               "type": "integer"
             }
@@ -541,97 +173,8 @@
         },
         "name": "checkpoint_chain",
         "outputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "additionalProperties": false,
           "properties": {
             "anchor": {
-              "additionalProperties": false,
-              "description": "Present when push=true: the hosted anchor outcome.",
-              "properties": {
-                "anchor_id": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "conflict": {
-                  "description": "This range was anchored earlier with a different root: the chain was rewritten.",
-                  "type": [
-                    "boolean",
-                    "null"
-                  ]
-                },
-                "conflicting_anchor_ids": {
-                  "items": {
-                    "type": "string"
-                  },
-                  "type": "array"
-                },
-                "duplicate": {
-                  "description": "Same checkpoint was anchored before; the original receipt is returned.",
-                  "type": [
-                    "boolean",
-                    "null"
-                  ]
-                },
-                "error": {
-                  "anyOf": [
-                    {
-                      "enum": [
-                        "anchor_unreachable",
-                        "anchor_refused",
-                        "anchor_config",
-                        "anchor_failed"
-                      ],
-                      "type": "string"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ],
-                  "description": "Why the push did not complete. The local checkpoint is stored either way."
-                },
-                "message": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "ok": {
-                  "description": "true when the service countersigned and the receipt verified.",
-                  "type": "boolean"
-                },
-                "public_status": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "received_at": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "verify_url": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                }
-              },
-              "required": [
-                "ok",
-                "anchor_id",
-                "duplicate",
-                "conflict",
-                "conflicting_anchor_ids",
-                "received_at",
-                "verify_url",
-                "public_status",
-                "error",
-                "message"
-              ],
               "type": "object"
             },
             "checkpoint_id": {
@@ -641,30 +184,21 @@
               "type": "string"
             },
             "from_seq": {
-              "exclusiveMinimum": 0,
-              "maximum": 9007199254740991,
               "type": "integer"
             },
             "key_id": {
               "type": "string"
             },
             "leaf_count": {
-              "maximum": 9007199254740991,
-              "minimum": 0,
               "type": "integer"
             },
             "root": {
-              "description": "Merkle root over event hashes in range.",
-              "pattern": "^[0-9a-f]{64}$",
               "type": "string"
             },
             "signature": {
-              "description": "Ed25519 signature, base64.",
               "type": "string"
             },
             "to_seq": {
-              "maximum": 9007199254740991,
-              "minimum": 0,
               "type": "integer"
             }
           },
@@ -688,19 +222,22 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Orient call — INSTRUCTS the agent. Call at session start AND before any write-class work. Present your previous `cursor` (or `cursor_compact`) as `since_cursor` to get a true delta: cold start receives the digest plus everything; warm wake receives only what changed since your cursor. Honor the drift banner: when it is surfaced, your memory of this store is stale and the delta is the catch-up. When retractions are reported, reconcile BEFORE acting — affirm the current truth (cite seq), name the old claim once, stop using it as a premise. An invalid or missing cursor never fails: position is recovered from the flight recorder or genesis, and the response says which. Focuses: orientation (default: digest + delta + retractions) | recent_changes (delta + retractions) | retractions (only retractions) | pulse (head + drift banner, ~50 tokens; call this before every write and only pay for a full delta when the banner surfaces). response_format markdown (default) or json controls the text block; structuredContent always carries the JSON state. Always carry the returned cursor forward.",
+        "description": "Orient. Call at session start and before writes with your last cursor as since_cursor. Returns what changed since (delta), a drift banner, and retractions: things you relied on that changed, with old → new text. Reconcile retractions before acting. A bad or missing cursor never fails. focus: orientation (default) | recent_changes | retractions | pulse (head + banner only). Carry the returned cursor forward.",
         "inputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "actor_id": {
-              "description": "Stable identity of the calling agent. Defaults to the server --actor setting. Cursors are bound to it.",
+              "description": "Your agent id (default: server --actor). Cursors are bound to it.",
               "maxLength": 200,
               "minLength": 1,
               "type": "string"
             },
+            "all_projects": {
+              "default": false,
+              "description": "Include instruction retractions from other projects.",
+              "type": "boolean"
+            },
             "budget_tokens": {
               "default": 3000,
-              "description": "Approximate token budget for the delta.",
               "maximum": 64000,
               "minimum": 200,
               "type": "integer"
@@ -724,7 +261,7 @@
               "type": "string"
             },
             "since_cursor": {
-              "description": "Cursor from your previous call (sxt1. or sxt1c. form).",
+              "description": "cursor or cursor_compact from your last call",
               "type": "string"
             }
           },
@@ -732,435 +269,38 @@
         },
         "name": "get_system_state",
         "outputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "additionalProperties": false,
           "properties": {
             "actor_id": {
               "type": "string"
             },
             "anchor": {
-              "anyOf": [
-                {
-                  "additionalProperties": false,
-                  "description": "Latest hosted anchor of this chain (local record, no network).",
-                  "properties": {
-                    "anchor_id": {
-                      "type": "string"
-                    },
-                    "events_since": {
-                      "description": "Events appended after the anchored range.",
-                      "maximum": 9007199254740991,
-                      "minimum": 0,
-                      "type": "integer"
-                    },
-                    "from_seq": {
-                      "exclusiveMinimum": 0,
-                      "maximum": 9007199254740991,
-                      "type": "integer"
-                    },
-                    "received_at": {
-                      "type": "string"
-                    },
-                    "status": {
-                      "description": "pending_public | published | conflict",
-                      "type": "string"
-                    },
-                    "to_seq": {
-                      "exclusiveMinimum": 0,
-                      "maximum": 9007199254740991,
-                      "type": "integer"
-                    }
-                  },
-                  "required": [
-                    "anchor_id",
-                    "from_seq",
-                    "to_seq",
-                    "received_at",
-                    "status",
-                    "events_since"
-                  ],
-                  "type": "object"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "null when the chain was never anchored."
+              "type": [
+                "object",
+                "null"
+              ]
             },
             "briefing_id": {
               "type": "string"
             },
             "cursor": {
-              "description": "Full cursor (sxt1.). Carry it forward to the next get_system_state call.",
               "type": "string"
             },
             "cursor_compact": {
-              "description": "Compact cursor (sxt1c.), interchangeable with cursor.",
               "type": "string"
             },
             "delta": {
-              "anyOf": [
-                {
-                  "additionalProperties": false,
-                  "properties": {
-                    "by_type": {
-                      "additionalProperties": {
-                        "maximum": 9007199254740991,
-                        "minimum": 0,
-                        "type": "integer"
-                      },
-                      "propertyNames": {
-                        "type": "string"
-                      },
-                      "type": "object"
-                    },
-                    "coverage": {
-                      "additionalProperties": false,
-                      "properties": {
-                        "demoted_by_budget": {
-                          "items": {
-                            "type": "string"
-                          },
-                          "type": "array"
-                        },
-                        "enumerated": {
-                          "maximum": 9007199254740991,
-                          "minimum": 0,
-                          "type": "integer"
-                        },
-                        "estimated_tokens": {
-                          "maximum": 9007199254740991,
-                          "minimum": 0,
-                          "type": "integer"
-                        },
-                        "rolled_up": {
-                          "maximum": 9007199254740991,
-                          "minimum": 0,
-                          "type": "integer"
-                        },
-                        "rollup_groups": {
-                          "maximum": 9007199254740991,
-                          "minimum": 0,
-                          "type": "integer"
-                        },
-                        "total_events_in": {
-                          "maximum": 9007199254740991,
-                          "minimum": 0,
-                          "type": "integer"
-                        },
-                        "truncated": {
-                          "type": "boolean"
-                        }
-                      },
-                      "required": [
-                        "total_events_in",
-                        "enumerated",
-                        "rolled_up",
-                        "rollup_groups",
-                        "demoted_by_budget",
-                        "truncated",
-                        "estimated_tokens"
-                      ],
-                      "type": "object"
-                    },
-                    "entries": {
-                      "description": "Chain order, oldest first.",
-                      "items": {
-                        "anyOf": [
-                          {
-                            "additionalProperties": false,
-                            "properties": {
-                              "actor_id": {
-                                "type": "string"
-                              },
-                              "event_type": {
-                                "type": "string"
-                              },
-                              "hash": {
-                                "description": "lowercase hex sha256",
-                                "pattern": "^[0-9a-f]{64}$",
-                                "type": "string"
-                              },
-                              "kind": {
-                                "const": "event",
-                                "type": "string"
-                              },
-                              "occurred_at": {
-                                "type": "string"
-                              },
-                              "payload": {
-                                "additionalProperties": {},
-                                "propertyNames": {
-                                  "type": "string"
-                                },
-                                "type": "object"
-                              },
-                              "rendered_via": {
-                                "enum": [
-                                  "enumerate",
-                                  "volume-rollup"
-                                ],
-                                "type": "string"
-                              },
-                              "seq": {
-                                "exclusiveMinimum": 0,
-                                "maximum": 9007199254740991,
-                                "type": "integer"
-                              }
-                            },
-                            "required": [
-                              "kind",
-                              "seq",
-                              "hash",
-                              "event_type",
-                              "actor_id",
-                              "occurred_at",
-                              "payload",
-                              "rendered_via"
-                            ],
-                            "type": "object"
-                          },
-                          {
-                            "additionalProperties": false,
-                            "properties": {
-                              "count": {
-                                "exclusiveMinimum": 0,
-                                "maximum": 9007199254740991,
-                                "type": "integer"
-                              },
-                              "event_type": {
-                                "type": "string"
-                              },
-                              "first_seq": {
-                                "exclusiveMinimum": 0,
-                                "maximum": 9007199254740991,
-                                "type": "integer"
-                              },
-                              "kind": {
-                                "const": "volume_rollup",
-                                "type": "string"
-                              },
-                              "last_seq": {
-                                "exclusiveMinimum": 0,
-                                "maximum": 9007199254740991,
-                                "type": "integer"
-                              },
-                              "rendered_via": {
-                                "enum": [
-                                  "volume-rollup",
-                                  "budget"
-                                ],
-                                "type": "string"
-                              },
-                              "sample": {
-                                "additionalProperties": false,
-                                "description": "Most recent event in the group.",
-                                "properties": {
-                                  "actor_id": {
-                                    "type": "string"
-                                  },
-                                  "event_type": {
-                                    "type": "string"
-                                  },
-                                  "hash": {
-                                    "description": "lowercase hex sha256",
-                                    "pattern": "^[0-9a-f]{64}$",
-                                    "type": "string"
-                                  },
-                                  "kind": {
-                                    "const": "event",
-                                    "type": "string"
-                                  },
-                                  "occurred_at": {
-                                    "type": "string"
-                                  },
-                                  "payload": {
-                                    "additionalProperties": {},
-                                    "propertyNames": {
-                                      "type": "string"
-                                    },
-                                    "type": "object"
-                                  },
-                                  "rendered_via": {
-                                    "enum": [
-                                      "enumerate",
-                                      "volume-rollup"
-                                    ],
-                                    "type": "string"
-                                  },
-                                  "seq": {
-                                    "exclusiveMinimum": 0,
-                                    "maximum": 9007199254740991,
-                                    "type": "integer"
-                                  }
-                                },
-                                "required": [
-                                  "kind",
-                                  "seq",
-                                  "hash",
-                                  "event_type",
-                                  "actor_id",
-                                  "occurred_at",
-                                  "payload",
-                                  "rendered_via"
-                                ],
-                                "type": "object"
-                              }
-                            },
-                            "required": [
-                              "kind",
-                              "event_type",
-                              "count",
-                              "first_seq",
-                              "last_seq",
-                              "sample",
-                              "rendered_via"
-                            ],
-                            "type": "object"
-                          }
-                        ]
-                      },
-                      "type": "array"
-                    },
-                    "events_since": {
-                      "maximum": 9007199254740991,
-                      "minimum": 0,
-                      "type": "integer"
-                    },
-                    "from_seq": {
-                      "description": "Exclusive.",
-                      "maximum": 9007199254740991,
-                      "minimum": 0,
-                      "type": "integer"
-                    },
-                    "to_seq": {
-                      "description": "Inclusive.",
-                      "maximum": 9007199254740991,
-                      "minimum": 0,
-                      "type": "integer"
-                    }
-                  },
-                  "required": [
-                    "from_seq",
-                    "to_seq",
-                    "events_since",
-                    "by_type",
-                    "entries",
-                    "coverage"
-                  ],
-                  "type": "object"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "null for focus=retractions and focus=pulse."
+              "type": [
+                "object",
+                "null"
+              ]
             },
             "digest": {
-              "anyOf": [
-                {
-                  "additionalProperties": false,
-                  "properties": {
-                    "checkpoints": {
-                      "maximum": 9007199254740991,
-                      "minimum": 0,
-                      "type": "integer"
-                    },
-                    "documents": {
-                      "maximum": 9007199254740991,
-                      "minimum": 0,
-                      "type": "integer"
-                    },
-                    "genesis_hash": {
-                      "description": "lowercase hex sha256",
-                      "pattern": "^[0-9a-f]{64}$",
-                      "type": "string"
-                    },
-                    "live_blocks": {
-                      "maximum": 9007199254740991,
-                      "minimum": 0,
-                      "type": "integer"
-                    },
-                    "recent_documents": {
-                      "items": {
-                        "additionalProperties": false,
-                        "properties": {
-                          "revision": {
-                            "exclusiveMinimum": 0,
-                            "maximum": 9007199254740991,
-                            "type": "integer"
-                          },
-                          "slug": {
-                            "type": "string"
-                          },
-                          "title": {
-                            "type": "string"
-                          },
-                          "updated_at": {
-                            "type": "string"
-                          }
-                        },
-                        "required": [
-                          "slug",
-                          "title",
-                          "revision",
-                          "updated_at"
-                        ],
-                        "type": "object"
-                      },
-                      "type": "array"
-                    }
-                  },
-                  "required": [
-                    "genesis_hash",
-                    "documents",
-                    "live_blocks",
-                    "checkpoints",
-                    "recent_documents"
-                  ],
-                  "type": "object"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Present on cold start and focus=orientation."
+              "type": [
+                "object",
+                "null"
+              ]
             },
             "drift_banner": {
-              "additionalProperties": false,
-              "properties": {
-                "events_since_last_orient": {
-                  "anyOf": [
-                    {
-                      "maximum": 9007199254740991,
-                      "minimum": -9007199254740991,
-                      "type": "integer"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "line": {
-                  "type": "string"
-                },
-                "seconds_since_last_orient": {
-                  "type": [
-                    "number",
-                    "null"
-                  ]
-                },
-                "surfaced": {
-                  "description": "true when the drift rules fired: your memory of this store is stale.",
-                  "type": "boolean"
-                }
-              },
-              "required": [
-                "surfaced",
-                "events_since_last_orient",
-                "seconds_since_last_orient",
-                "line"
-              ],
               "type": "object"
             },
             "focus": {
@@ -1177,337 +317,42 @@
               "type": "string"
             },
             "head": {
-              "additionalProperties": false,
-              "description": "Chain head at the time of the call.",
-              "properties": {
-                "hash": {
-                  "description": "Hash of the head event (genesis hash at seq 0).",
-                  "pattern": "^[0-9a-f]{64}$",
-                  "type": "string"
-                },
-                "seq": {
-                  "description": "Chain head sequence number (0 = genesis).",
-                  "maximum": 9007199254740991,
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              },
-              "required": [
-                "seq",
-                "hash"
-              ],
               "type": "object"
+            },
+            "integrity": {
+              "type": [
+                "object",
+                "null"
+              ]
             },
             "issued_at": {
               "type": "string"
             },
             "next_steps": {
-              "items": {
-                "type": "string"
-              },
               "type": "array"
             },
             "recovery": {
-              "additionalProperties": false,
-              "properties": {
-                "cursor_error": {
-                  "description": "Set when a since_cursor was presented but rejected. The call still succeeds.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "cursor_issued_at": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "from_seq": {
-                  "maximum": 9007199254740991,
-                  "minimum": 0,
-                  "type": "integer"
-                },
-                "method": {
-                  "description": "How the server recovered your position.",
-                  "enum": [
-                    "presented",
-                    "presented_compact",
-                    "presented_stale",
-                    "flight_recorder",
-                    "genesis"
-                  ],
-                  "type": "string"
-                },
-                "reason": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "method",
-                "from_seq",
-                "reason",
-                "cursor_error",
-                "cursor_issued_at"
-              ],
               "type": "object"
             },
             "retractions": {
-              "anyOf": [
-                {
-                  "items": {
-                    "additionalProperties": false,
-                    "properties": {
-                      "block_id": {
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      },
-                      "doc_slug": {
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      },
-                      "event_type": {
-                        "type": "string"
-                      },
-                      "kind": {
-                        "description": "instruction = a CLAUDE.md / AGENTS.md / rule / memory block changed on disk.",
-                        "enum": [
-                          "tombstone",
-                          "supersession",
-                          "retraction",
-                          "instruction"
-                        ],
-                        "type": "string"
-                      },
-                      "reason": {
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      },
-                      "reason_line": {
-                        "description": "\"You previously relied on X; current truth is Y. Reconcile before proceeding.\"",
-                        "type": "string"
-                      },
-                      "seq": {
-                        "exclusiveMinimum": 0,
-                        "maximum": 9007199254740991,
-                        "type": "integer"
-                      },
-                      "severity": {
-                        "enum": [
-                          "safety",
-                          "behavioral",
-                          "informational"
-                        ],
-                        "type": "string"
-                      },
-                      "successor_block_id": {
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      }
-                    },
-                    "required": [
-                      "seq",
-                      "event_type",
-                      "kind",
-                      "severity",
-                      "block_id",
-                      "doc_slug",
-                      "successor_block_id",
-                      "reason",
-                      "reason_line"
-                    ],
-                    "type": "object"
-                  },
-                  "type": "array"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "null for focus=pulse."
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "scope": {
+              "type": [
+                "object",
+                "null"
+              ]
             },
             "source_drift": {
-              "anyOf": [
-                {
-                  "items": {
-                    "additionalProperties": false,
-                    "description": "A git-bound document compared with its working-tree source file.",
-                    "properties": {
-                      "bound_blob_sha": {
-                        "type": "string"
-                      },
-                      "bound_commit": {
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      },
-                      "detail": {
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      },
-                      "diff_stat": {
-                        "anyOf": [
-                          {
-                            "additionalProperties": false,
-                            "properties": {
-                              "bound_from": {
-                                "description": "Where the bound side of the diff came from.",
-                                "enum": [
-                                  "git",
-                                  "stored_revision",
-                                  "none"
-                                ],
-                                "type": "string"
-                              },
-                              "deletions": {
-                                "maximum": 9007199254740991,
-                                "minimum": 0,
-                                "type": "integer"
-                              },
-                              "files_changed": {
-                                "maximum": 9007199254740991,
-                                "minimum": 0,
-                                "type": "integer"
-                              },
-                              "insertions": {
-                                "maximum": 9007199254740991,
-                                "minimum": 0,
-                                "type": "integer"
-                              },
-                              "summary": {
-                                "description": "git diff --stat style line.",
-                                "type": "string"
-                              }
-                            },
-                            "required": [
-                              "files_changed",
-                              "insertions",
-                              "deletions",
-                              "summary",
-                              "bound_from"
-                            ],
-                            "type": "object"
-                          },
-                          {
-                            "type": "null"
-                          }
-                        ]
-                      },
-                      "doc_id": {
-                        "type": "string"
-                      },
-                      "head_commit": {
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      },
-                      "path": {
-                        "description": "Path inside repo_root, /-separated.",
-                        "type": "string"
-                      },
-                      "repo_root": {
-                        "type": "string"
-                      },
-                      "revision": {
-                        "description": "Revision whose put recorded the binding.",
-                        "exclusiveMinimum": 0,
-                        "maximum": 9007199254740991,
-                        "type": "integer"
-                      },
-                      "slug": {
-                        "type": "string"
-                      },
-                      "state": {
-                        "enum": [
-                          "current",
-                          "changed",
-                          "missing",
-                          "unavailable"
-                        ],
-                        "type": "string"
-                      },
-                      "working_blob_sha": {
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      }
-                    },
-                    "required": [
-                      "slug",
-                      "doc_id",
-                      "revision",
-                      "repo_root",
-                      "path",
-                      "bound_commit",
-                      "bound_blob_sha",
-                      "state",
-                      "working_blob_sha",
-                      "head_commit",
-                      "diff_stat",
-                      "detail"
-                    ],
-                    "type": "object"
-                  },
-                  "type": "array"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Git-bound documents whose source file changed or was deleted since binding; null for focus=pulse."
+              "type": [
+                "array",
+                "null"
+              ]
             },
             "stale_write_advisory": {
-              "additionalProperties": false,
-              "properties": {
-                "advisory": {
-                  "description": "true when the actor wrote without a fresh orient; nothing is blocked.",
-                  "type": "boolean"
-                },
-                "events_since_last_orient": {
-                  "anyOf": [
-                    {
-                      "maximum": 9007199254740991,
-                      "minimum": -9007199254740991,
-                      "type": "integer"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "line": {
-                  "description": "Human-readable advisory, or null when none.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "seconds_since_last_orient": {
-                  "type": [
-                    "number",
-                    "null"
-                  ]
-                }
-              },
-              "required": [
-                "advisory",
-                "events_since_last_orient",
-                "seconds_since_last_orient",
-                "line"
-              ],
               "type": "object"
             }
           },
@@ -1525,6 +370,8 @@
             "stale_write_advisory",
             "anchor",
             "source_drift",
+            "integrity",
+            "scope",
             "delta",
             "retractions",
             "digest",
@@ -1541,27 +388,24 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Store a Markdown document under a slug. A new slug creates revision 1; an existing slug creates the next revision: unchanged blocks keep their ids, changed blocks are superseded (old → new), removed blocks are tombstoned. Emits document.put + block.* events and returns every block id with its BLAKE3 content hash and the new chain head. Pass your cursor so the response can tell you if you are writing on stale assumptions (advisory only). bind_git:true with source_path (the file the markdown came from) records {repo_root, commit, path, blob_sha}; verify and audit_assumptions then report stale_source when that file changes. Outside git the put still succeeds, with a warning.",
+        "description": "Create or re-put a Markdown document by slug. Unchanged blocks keep their ids; changed blocks are superseded and removed ones tombstoned, which other agents see as retractions. bind_git with source_path ties the document to that file's git blob (verify reports STALE_SOURCE when the file changes).",
         "inputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "actor_id": {
-              "description": "Stable identity of the calling agent. Defaults to the server --actor setting. Cursors are bound to it.",
+              "description": "Your agent id (default: server --actor). Cursors are bound to it.",
               "maxLength": 200,
               "minLength": 1,
               "type": "string"
             },
             "bind_git": {
               "default": false,
-              "description": "Bind the document to source_path in its git repository (git rev-parse / hash-object).",
               "type": "boolean"
             },
             "cursor": {
-              "description": "Your most recent cursor from get_system_state (full or compact). Used only to compute the stale-write advisory.",
+              "description": "Your latest cursor (for the stale-write advisory).",
               "type": "string"
             },
             "idempotency_key": {
-              "description": "Replay-safe key; repeating it returns the first result.",
               "maxLength": 200,
               "minLength": 1,
               "type": "string"
@@ -1571,12 +415,11 @@
               "type": "string"
             },
             "slug": {
-              "description": "lowercase letters, digits, . _ -",
               "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
               "type": "string"
             },
             "source_path": {
-              "description": "File the markdown came from (absolute, or relative to the server working directory).",
+              "description": "File the markdown came from.",
               "maxLength": 4096,
               "minLength": 1,
               "type": "string"
@@ -1596,208 +439,38 @@
         },
         "name": "put_document",
         "outputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "additionalProperties": false,
           "properties": {
             "blocks": {
-              "items": {
-                "additionalProperties": false,
-                "properties": {
-                  "block_id": {
-                    "type": "string"
-                  },
-                  "content_hash": {
-                    "description": "lowercase hex sha256",
-                    "pattern": "^[0-9a-f]{64}$",
-                    "type": "string"
-                  },
-                  "heading_path": {
-                    "items": {
-                      "type": "string"
-                    },
-                    "type": "array"
-                  },
-                  "kind": {
-                    "enum": [
-                      "heading",
-                      "paragraph",
-                      "code"
-                    ],
-                    "type": "string"
-                  },
-                  "ordinal": {
-                    "maximum": 9007199254740991,
-                    "minimum": 0,
-                    "type": "integer"
-                  },
-                  "status": {
-                    "enum": [
-                      "created",
-                      "unchanged",
-                      "superseded",
-                      "tombstoned"
-                    ],
-                    "type": "string"
-                  },
-                  "supersedes": {
-                    "description": "The block this one replaced, when status=superseded.",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "block_id",
-                  "ordinal",
-                  "kind",
-                  "heading_path",
-                  "content_hash",
-                  "status"
-                ],
-                "type": "object"
-              },
               "type": "array"
             },
             "chain_seq": {
-              "description": "seq of the document.put event.",
-              "exclusiveMinimum": 0,
-              "maximum": 9007199254740991,
               "type": "integer"
             },
             "doc_id": {
               "type": "string"
             },
             "events": {
-              "description": "Events appended by this call (0 on idempotent replay).",
-              "maximum": 9007199254740991,
-              "minimum": 0,
               "type": "integer"
             },
             "head": {
-              "additionalProperties": false,
-              "description": "Chain head at the time of the call.",
-              "properties": {
-                "hash": {
-                  "description": "Hash of the head event (genesis hash at seq 0).",
-                  "pattern": "^[0-9a-f]{64}$",
-                  "type": "string"
-                },
-                "seq": {
-                  "description": "Chain head sequence number (0 = genesis).",
-                  "maximum": 9007199254740991,
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              },
-              "required": [
-                "seq",
-                "hash"
-              ],
               "type": "object"
             },
             "revision": {
-              "exclusiveMinimum": 0,
-              "maximum": 9007199254740991,
               "type": "integer"
             },
             "slug": {
               "type": "string"
             },
             "source": {
-              "additionalProperties": false,
-              "description": "Provenance recorded in the document.put event.",
-              "properties": {
-                "git": {
-                  "additionalProperties": false,
-                  "properties": {
-                    "blob_sha": {
-                      "description": "git hash-object of the file at put time.",
-                      "type": "string"
-                    },
-                    "commit": {
-                      "description": "HEAD at put time; null in a repository without commits.",
-                      "type": [
-                        "string",
-                        "null"
-                      ]
-                    },
-                    "path": {
-                      "description": "Path inside repo_root, /-separated.",
-                      "type": "string"
-                    },
-                    "repo_root": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "repo_root",
-                    "commit",
-                    "path",
-                    "blob_sha"
-                  ],
-                  "type": "object"
-                },
-                "kind": {
-                  "description": "instruction | memory | file",
-                  "type": "string"
-                },
-                "path": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "kind",
-                "path"
-              ],
               "type": "object"
             },
             "stale_write_advisory": {
-              "additionalProperties": false,
-              "properties": {
-                "advisory": {
-                  "description": "true when the actor wrote without a fresh orient; nothing is blocked.",
-                  "type": "boolean"
-                },
-                "events_since_last_orient": {
-                  "anyOf": [
-                    {
-                      "maximum": 9007199254740991,
-                      "minimum": -9007199254740991,
-                      "type": "integer"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "line": {
-                  "description": "Human-readable advisory, or null when none.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "seconds_since_last_orient": {
-                  "type": [
-                    "number",
-                    "null"
-                  ]
-                }
-              },
-              "required": [
-                "advisory",
-                "events_since_last_orient",
-                "seconds_since_last_orient",
-                "line"
-              ],
               "type": "object"
             },
             "title": {
               "type": "string"
             },
             "warnings": {
-              "description": "Non-fatal notes, e.g. bind_git outside a git repository.",
-              "items": {
-                "type": "string"
-              },
               "type": "array"
             }
           },
@@ -1821,9 +494,8 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Full-text search (bm25) over live document blocks. Each hit carries a signed receipt v2 binding (block_id, content_hash, doc_slug, revision) to the chain head at issue time. Keep the receipt with any claim you derive from the block; pass it to verify() later to learn whether the block is still current (VERIFIED), was replaced (SUPERSEDED, with the current head), was retired (TOMBSTONED), or cannot be trusted (UNVERIFIED). Superseded blocks are never returned; tombstoned only with include_tombstoned. Set include_receipts:false for a lean result.",
+        "description": "Full-text search over live blocks. Each hit carries a signed receipt: keep it with what you derive and pass it to verify() before relying on it later. Blocks whose stored text fails its integrity check are withheld, never served.",
         "inputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "include_receipts": {
               "default": true,
@@ -1852,201 +524,11 @@
         },
         "name": "recall",
         "outputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "additionalProperties": false,
           "properties": {
             "head": {
-              "additionalProperties": false,
-              "description": "Chain head at the time of the call.",
-              "properties": {
-                "hash": {
-                  "description": "Hash of the head event (genesis hash at seq 0).",
-                  "pattern": "^[0-9a-f]{64}$",
-                  "type": "string"
-                },
-                "seq": {
-                  "description": "Chain head sequence number (0 = genesis).",
-                  "maximum": 9007199254740991,
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              },
-              "required": [
-                "seq",
-                "hash"
-              ],
               "type": "object"
             },
             "hits": {
-              "items": {
-                "additionalProperties": false,
-                "properties": {
-                  "block_id": {
-                    "type": "string"
-                  },
-                  "content": {
-                    "type": "string"
-                  },
-                  "content_hash": {
-                    "description": "BLAKE3 of the block content.",
-                    "pattern": "^[0-9a-f]{64}$",
-                    "type": "string"
-                  },
-                  "doc_slug": {
-                    "type": "string"
-                  },
-                  "doc_title": {
-                    "type": "string"
-                  },
-                  "heading_path": {
-                    "items": {
-                      "type": "string"
-                    },
-                    "type": "array"
-                  },
-                  "kind": {
-                    "type": "string"
-                  },
-                  "ordinal": {
-                    "maximum": 9007199254740991,
-                    "minimum": 0,
-                    "type": "integer"
-                  },
-                  "receipt": {
-                    "anyOf": [
-                      {
-                        "additionalProperties": false,
-                        "properties": {
-                          "block_id": {
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                            "type": "string"
-                          },
-                          "chain_head_hash": {
-                            "pattern": "^[0-9a-f]{64}$",
-                            "type": "string"
-                          },
-                          "chain_seq": {
-                            "maximum": 9007199254740991,
-                            "minimum": 0,
-                            "type": "integer"
-                          },
-                          "content_hash": {
-                            "pattern": "^[0-9a-f]{64}$",
-                            "type": "string"
-                          },
-                          "doc_slug": {
-                            "maxLength": 128,
-                            "minLength": 1,
-                            "type": "string"
-                          },
-                          "issued_at": {
-                            "format": "date-time",
-                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
-                            "type": "string"
-                          },
-                          "key_id": {
-                            "maxLength": 100,
-                            "minLength": 1,
-                            "type": "string"
-                          },
-                          "query_hash": {
-                            "pattern": "^[0-9a-f]{64}$",
-                            "type": "string"
-                          },
-                          "receipt_id": {
-                            "format": "uuid",
-                            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
-                            "type": "string"
-                          },
-                          "revision": {
-                            "exclusiveMinimum": 0,
-                            "maximum": 9007199254740991,
-                            "type": "integer"
-                          },
-                          "signature": {
-                            "minLength": 1,
-                            "type": "string"
-                          },
-                          "v": {
-                            "const": 2,
-                            "type": "number"
-                          },
-                          "workspace": {
-                            "maxLength": 100,
-                            "minLength": 1,
-                            "type": "string"
-                          }
-                        },
-                        "required": [
-                          "v",
-                          "receipt_id",
-                          "workspace",
-                          "block_id",
-                          "content_hash",
-                          "doc_slug",
-                          "revision",
-                          "chain_seq",
-                          "chain_head_hash",
-                          "query_hash",
-                          "issued_at",
-                          "key_id"
-                        ],
-                        "type": "object"
-                      },
-                      {
-                        "type": "null"
-                      }
-                    ],
-                    "description": "Signed receipt v2; null when include_receipts=false."
-                  },
-                  "revision": {
-                    "exclusiveMinimum": 0,
-                    "maximum": 9007199254740991,
-                    "type": "integer"
-                  },
-                  "score": {
-                    "type": "number"
-                  },
-                  "status": {
-                    "enum": [
-                      "live",
-                      "superseded",
-                      "tombstoned"
-                    ],
-                    "type": "string"
-                  },
-                  "superseded_by": {
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  },
-                  "tombstone_reason": {
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  }
-                },
-                "required": [
-                  "block_id",
-                  "doc_slug",
-                  "doc_title",
-                  "revision",
-                  "ordinal",
-                  "kind",
-                  "heading_path",
-                  "content",
-                  "content_hash",
-                  "score",
-                  "status",
-                  "superseded_by",
-                  "tombstone_reason",
-                  "receipt"
-                ],
-                "type": "object"
-              },
               "type": "array"
             },
             "match_mode": {
@@ -2061,9 +543,10 @@
               "type": "string"
             },
             "query_hash": {
-              "description": "lowercase hex sha256",
-              "pattern": "^[0-9a-f]{64}$",
               "type": "string"
+            },
+            "withheld": {
+              "type": "array"
             }
           },
           "required": [
@@ -2071,7 +554,8 @@
             "query_hash",
             "head",
             "match_mode",
-            "hits"
+            "hits",
+            "withheld"
           ],
           "type": "object"
         },
@@ -2084,23 +568,21 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Replace a live block's content with a new block (old → new supersession, with a reason). Receipts issued for the old block will verify as SUPERSEDED pointing at the new one. The document gets a new revision. Refused if the block is already superseded or tombstoned (operate on the current head instead).",
+        "description": "Replace one live block's content, with a reason. Receipts for the old block then verify as SUPERSEDED.",
         "inputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "actor_id": {
-              "description": "Stable identity of the calling agent. Defaults to the server --actor setting. Cursors are bound to it.",
+              "description": "Your agent id (default: server --actor). Cursors are bound to it.",
               "maxLength": 200,
               "minLength": 1,
               "type": "string"
             },
             "block_id": {
               "format": "uuid",
-              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
               "type": "string"
             },
             "cursor": {
-              "description": "Your most recent cursor from get_system_state (full or compact). Used only to compute the stale-write advisory.",
+              "description": "Your latest cursor (for the stale-write advisory).",
               "type": "string"
             },
             "new_content": {
@@ -2123,37 +605,14 @@
         },
         "name": "supersede_block",
         "outputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "additionalProperties": false,
           "properties": {
             "content_hash": {
-              "description": "lowercase hex sha256",
-              "pattern": "^[0-9a-f]{64}$",
               "type": "string"
             },
             "doc_slug": {
               "type": "string"
             },
             "head": {
-              "additionalProperties": false,
-              "description": "Chain head at the time of the call.",
-              "properties": {
-                "hash": {
-                  "description": "Hash of the head event (genesis hash at seq 0).",
-                  "pattern": "^[0-9a-f]{64}$",
-                  "type": "string"
-                },
-                "seq": {
-                  "description": "Chain head sequence number (0 = genesis).",
-                  "maximum": 9007199254740991,
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              },
-              "required": [
-                "seq",
-                "hash"
-              ],
               "type": "object"
             },
             "new_block_id": {
@@ -2163,49 +622,9 @@
               "type": "string"
             },
             "revision": {
-              "exclusiveMinimum": 0,
-              "maximum": 9007199254740991,
               "type": "integer"
             },
             "stale_write_advisory": {
-              "additionalProperties": false,
-              "properties": {
-                "advisory": {
-                  "description": "true when the actor wrote without a fresh orient; nothing is blocked.",
-                  "type": "boolean"
-                },
-                "events_since_last_orient": {
-                  "anyOf": [
-                    {
-                      "maximum": 9007199254740991,
-                      "minimum": -9007199254740991,
-                      "type": "integer"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "line": {
-                  "description": "Human-readable advisory, or null when none.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "seconds_since_last_orient": {
-                  "type": [
-                    "number",
-                    "null"
-                  ]
-                }
-              },
-              "required": [
-                "advisory",
-                "events_since_last_orient",
-                "seconds_since_last_orient",
-                "line"
-              ],
               "type": "object"
             }
           },
@@ -2229,23 +648,21 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Mark a live block as no longer valid, with a reason, and no successor. It leaves recall() results (unless include_tombstoned) and receipts for it verify as TOMBSTONED. The document gets a new revision.",
+        "description": "Retire one live block with a reason (no successor). Receipts for it then verify as TOMBSTONED.",
         "inputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "actor_id": {
-              "description": "Stable identity of the calling agent. Defaults to the server --actor setting. Cursors are bound to it.",
+              "description": "Your agent id (default: server --actor). Cursors are bound to it.",
               "maxLength": 200,
               "minLength": 1,
               "type": "string"
             },
             "block_id": {
               "format": "uuid",
-              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
               "type": "string"
             },
             "cursor": {
-              "description": "Your most recent cursor from get_system_state (full or compact). Used only to compute the stale-write advisory.",
+              "description": "Your latest cursor (for the stale-write advisory).",
               "type": "string"
             },
             "reason": {
@@ -2262,8 +679,6 @@
         },
         "name": "tombstone_block",
         "outputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "additionalProperties": false,
           "properties": {
             "block_id": {
               "type": "string"
@@ -2272,71 +687,12 @@
               "type": "string"
             },
             "head": {
-              "additionalProperties": false,
-              "description": "Chain head at the time of the call.",
-              "properties": {
-                "hash": {
-                  "description": "Hash of the head event (genesis hash at seq 0).",
-                  "pattern": "^[0-9a-f]{64}$",
-                  "type": "string"
-                },
-                "seq": {
-                  "description": "Chain head sequence number (0 = genesis).",
-                  "maximum": 9007199254740991,
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              },
-              "required": [
-                "seq",
-                "hash"
-              ],
               "type": "object"
             },
             "revision": {
-              "exclusiveMinimum": 0,
-              "maximum": 9007199254740991,
               "type": "integer"
             },
             "stale_write_advisory": {
-              "additionalProperties": false,
-              "properties": {
-                "advisory": {
-                  "description": "true when the actor wrote without a fresh orient; nothing is blocked.",
-                  "type": "boolean"
-                },
-                "events_since_last_orient": {
-                  "anyOf": [
-                    {
-                      "maximum": 9007199254740991,
-                      "minimum": -9007199254740991,
-                      "type": "integer"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "line": {
-                  "description": "Human-readable advisory, or null when none.",
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "seconds_since_last_orient": {
-                  "type": [
-                    "number",
-                    "null"
-                  ]
-                }
-              },
-              "required": [
-                "advisory",
-                "events_since_last_orient",
-                "seconds_since_last_orient",
-                "line"
-              ],
               "type": "object"
             }
           },
@@ -2357,16 +713,11 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Re-derive a receipt against the live store. Fail-closed. Checks the Ed25519 signature (local key registry), block existence, content hash, that the receipt's chain position is still on the chain, and walks supersession to the current head. Returns VERIFIED | SUPERSEDED (with current_block_id/current_content_hash) | TOMBSTONED | UNVERIFIED with a closed-enum reason. Malformed input yields UNVERIFIED/malformed_receipt, never a tool error.",
+        "description": "Re-check a recall() receipt against the store (signature, re-hashed block text, chain position, supersession): VERIFIED | SUPERSEDED (see current_block_id) | TOMBSTONED | STALE_SOURCE | UNVERIFIED, with a reason. Fail-closed.",
         "inputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "receipt": {
-              "additionalProperties": {},
-              "description": "The full receipt object from recall(), including signature.",
-              "propertyNames": {
-                "type": "string"
-              },
+              "description": "The receipt object from recall().",
               "type": "object"
             }
           },
@@ -2377,8 +728,6 @@
         },
         "name": "verify",
         "outputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "additionalProperties": false,
           "properties": {
             "block_id": {
               "type": [
@@ -2387,35 +736,24 @@
               ]
             },
             "chain_head": {
-              "additionalProperties": false,
-              "description": "Chain head at the time of the call.",
-              "properties": {
-                "hash": {
-                  "description": "Hash of the head event (genesis hash at seq 0).",
-                  "pattern": "^[0-9a-f]{64}$",
-                  "type": "string"
-                },
-                "seq": {
-                  "description": "Chain head sequence number (0 = genesis).",
-                  "maximum": 9007199254740991,
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              },
-              "required": [
-                "seq",
-                "hash"
-              ],
               "type": "object"
             },
             "checked_at": {
               "type": "string"
             },
             "current_block_id": {
-              "description": "Head of the supersession lineage when it differs from the receipt block.",
               "type": "string"
             },
             "current_content_hash": {
+              "type": "string"
+            },
+            "integrity_problem": {
+              "enum": [
+                "content_hash_mismatch",
+                "chain_event_missing",
+                "chain_event_mismatch",
+                "chain_event_hash_mismatch"
+              ],
               "type": "string"
             },
             "reason": {
@@ -2432,7 +770,9 @@
                 "chain_head_mismatch",
                 "superseded_by_newer_head",
                 "tombstoned",
-                "stale_source"
+                "stale_source",
+                "content_tampered",
+                "projection_mismatch"
               ],
               "type": "string"
             },
@@ -2443,127 +783,6 @@
               ]
             },
             "source_drift": {
-              "additionalProperties": false,
-              "description": "With STALE_SOURCE: the git-bound source file changed since binding.",
-              "properties": {
-                "bound_blob_sha": {
-                  "type": "string"
-                },
-                "bound_commit": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "detail": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "diff_stat": {
-                  "anyOf": [
-                    {
-                      "additionalProperties": false,
-                      "properties": {
-                        "bound_from": {
-                          "description": "Where the bound side of the diff came from.",
-                          "enum": [
-                            "git",
-                            "stored_revision",
-                            "none"
-                          ],
-                          "type": "string"
-                        },
-                        "deletions": {
-                          "maximum": 9007199254740991,
-                          "minimum": 0,
-                          "type": "integer"
-                        },
-                        "files_changed": {
-                          "maximum": 9007199254740991,
-                          "minimum": 0,
-                          "type": "integer"
-                        },
-                        "insertions": {
-                          "maximum": 9007199254740991,
-                          "minimum": 0,
-                          "type": "integer"
-                        },
-                        "summary": {
-                          "description": "git diff --stat style line.",
-                          "type": "string"
-                        }
-                      },
-                      "required": [
-                        "files_changed",
-                        "insertions",
-                        "deletions",
-                        "summary",
-                        "bound_from"
-                      ],
-                      "type": "object"
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "doc_id": {
-                  "type": "string"
-                },
-                "head_commit": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "path": {
-                  "description": "Path inside repo_root, /-separated.",
-                  "type": "string"
-                },
-                "repo_root": {
-                  "type": "string"
-                },
-                "revision": {
-                  "description": "Revision whose put recorded the binding.",
-                  "exclusiveMinimum": 0,
-                  "maximum": 9007199254740991,
-                  "type": "integer"
-                },
-                "slug": {
-                  "type": "string"
-                },
-                "state": {
-                  "enum": [
-                    "current",
-                    "changed",
-                    "missing",
-                    "unavailable"
-                  ],
-                  "type": "string"
-                },
-                "working_blob_sha": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                }
-              },
-              "required": [
-                "slug",
-                "doc_id",
-                "revision",
-                "repo_root",
-                "path",
-                "bound_commit",
-                "bound_blob_sha",
-                "state",
-                "working_blob_sha",
-                "head_commit",
-                "diff_stat",
-                "detail"
-              ],
               "type": "object"
             },
             "status": {
@@ -2577,8 +796,6 @@
               "type": "string"
             },
             "supersession_depth": {
-              "maximum": 9007199254740991,
-              "minimum": 0,
               "type": "integer"
             },
             "tombstone_reason": {
@@ -2606,18 +823,15 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Recompute every event hash and link in [from_seq, to_seq] (default: whole chain), report the first mismatch if any, and validate every stored signed checkpoint in range. ok:false means the database was altered outside the append path or is corrupt; the first_mismatch seq tells you where.",
+        "description": "Recompute every event hash and link in [from_seq, to_seq] and check stored checkpoints. Over the whole chain (the default) it also re-derives and re-hashes every stored document and block (projection). ok:false means the database was edited outside kronicle-lite or is corrupt.",
         "inputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
             "from_seq": {
               "default": 1,
-              "maximum": 9007199254740991,
               "minimum": 1,
               "type": "integer"
             },
             "to_seq": {
-              "maximum": 9007199254740991,
               "minimum": 1,
               "type": "integer"
             }
@@ -2626,128 +840,35 @@
         },
         "name": "verify_chain",
         "outputSchema": {
-          "$schema": "https://json-schema.org/draft/2020-12/schema",
-          "additionalProperties": false,
           "properties": {
             "checkpoints": {
-              "items": {
-                "additionalProperties": false,
-                "properties": {
-                  "checkpoint_id": {
-                    "type": "string"
-                  },
-                  "from_seq": {
-                    "exclusiveMinimum": 0,
-                    "maximum": 9007199254740991,
-                    "type": "integer"
-                  },
-                  "ok": {
-                    "type": "boolean"
-                  },
-                  "reason": {
-                    "enum": [
-                      "valid",
-                      "root_mismatch",
-                      "signature_invalid",
-                      "unknown_key",
-                      "range_outside_verified"
-                    ],
-                    "type": "string"
-                  },
-                  "to_seq": {
-                    "exclusiveMinimum": 0,
-                    "maximum": 9007199254740991,
-                    "type": "integer"
-                  }
-                },
-                "required": [
-                  "checkpoint_id",
-                  "from_seq",
-                  "to_seq",
-                  "ok",
-                  "reason"
-                ],
-                "type": "object"
-              },
               "type": "array"
             },
             "events_checked": {
-              "maximum": 9007199254740991,
-              "minimum": 0,
               "type": "integer"
             },
             "first_mismatch": {
-              "anyOf": [
-                {
-                  "additionalProperties": false,
-                  "properties": {
-                    "actual": {
-                      "type": "string"
-                    },
-                    "expected": {
-                      "type": "string"
-                    },
-                    "kind": {
-                      "enum": [
-                        "hash_mismatch",
-                        "link_broken",
-                        "seq_gap",
-                        "head_mismatch"
-                      ],
-                      "type": "string"
-                    },
-                    "seq": {
-                      "maximum": 9007199254740991,
-                      "minimum": -9007199254740991,
-                      "type": "integer"
-                    }
-                  },
-                  "required": [
-                    "seq",
-                    "kind",
-                    "expected",
-                    "actual"
-                  ],
-                  "type": "object"
-                },
-                {
-                  "type": "null"
-                }
+              "type": [
+                "object",
+                "null"
               ]
             },
             "from_seq": {
-              "maximum": 9007199254740991,
-              "minimum": 0,
               "type": "integer"
             },
             "head": {
-              "additionalProperties": false,
-              "description": "Chain head at the time of the call.",
-              "properties": {
-                "hash": {
-                  "description": "Hash of the head event (genesis hash at seq 0).",
-                  "pattern": "^[0-9a-f]{64}$",
-                  "type": "string"
-                },
-                "seq": {
-                  "description": "Chain head sequence number (0 = genesis).",
-                  "maximum": 9007199254740991,
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              },
-              "required": [
-                "seq",
-                "hash"
-              ],
               "type": "object"
             },
             "ok": {
               "type": "boolean"
             },
+            "projection": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
             "to_seq": {
-              "maximum": 9007199254740991,
-              "minimum": 0,
               "type": "integer"
             }
           },
@@ -2758,7 +879,8 @@
             "events_checked",
             "first_mismatch",
             "head",
-            "checkpoints"
+            "checkpoints",
+            "projection"
           ],
           "type": "object"
         },
@@ -2771,7 +893,7 @@
   "server": {
     "name": "kronicle-lite",
     "title": "kronicle-lite",
-    "version": "0.4.0"
+    "version": "0.5.0"
   },
-  "sha256": "fa8d1d6f50b1c461af859c6520515c621c7aee09be19f516a03e366b42a48dee"
+  "sha256": "7eed4b72e51af9da660f2a0af4749205791f67338e632104819009600257337f"
 }

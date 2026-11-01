@@ -4,6 +4,113 @@ All notable changes to kronicle-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
+## [0.5.0] — unreleased
+
+Fixes from an adoption audit (B3, B4, G3, G4, G5, G6, H2 and the first-run
+items). No hash recipe, receipt, checkpoint or cursor layout changed: every
+0.3.0 and 0.4.0 chain imports, verifies and re-exports byte-for-byte. One
+new event type (`document.renamed`) and one new optional `source` field
+(`project`) are additive; older readers ignore them.
+
+### Fixed — what the agent reads is checked against the chain (B4)
+
+Before: editing `blocks.content` in the SQLite file passed `verify-chain`
+and `doctor`, and `recall` served the edited text with a receipt that
+verified `VERIFIED` (`verify` compared the stored hash column with the
+receipt and never re-hashed the content). THREAT-MODEL.md claimed this
+case was caught.
+
+- Every read path that serves text re-hashes it (BLAKE3, FORMAT §3.6) and
+  checks it against the `block.created` / `document.put` event that made
+  it, including that event's own hash. `recall` withholds a failing block
+  (new `withheld: [{block_id, doc_slug, problem}]`, no content, no
+  receipt); `verify` returns `UNVERIFIED / content_tampered` (+
+  `integrity_problem`) and, for a block the projection calls live but the
+  chain retired, `UNVERIFIED / projection_mismatch`; the
+  `kronicle://docs/{slug}` resource refuses a revision that does not match.
+- `verify-chain` / `verify` (local) over the whole chain, or with `--full`,
+  and the MCP `verify_chain` tool over the whole chain replay every event
+  into a scratch schema and compare `documents`, `document_revisions`,
+  `blocks` and `doc_sources` column by column, then re-hash every block and
+  revision (new `projection` result; `ok` covers both). Exit 1 on mismatch
+  with a one-line summary on stderr.
+- `doctor` gains a `projection` check (fails on mismatch).
+- `get_system_state` gains `integrity {ok, events_checked, blocks_checked,
+  problem}`: it re-checks the events of its window (at least the last 1000)
+  and the newest 2000 live blocks, and leads with an `INTEGRITY FAILURE`
+  banner and next step when one fails.
+- New `kronicle-lite rebuild`: re-derive the projection from a chain that
+  verifies (refuses a broken chain).
+- THREAT-MODEL.md now states exactly what is and is not detected.
+
+### Fixed — instructions are keyed by project (B3)
+
+Before: every repository sharing `~/.kronicle-lite` wrote `CLAUDE.md` to
+`instructions/claude-md`, so syncing repo B tombstoned repo A's rules and
+told A's agent, at `safety` severity, to stop following them.
+
+- Instruction and auto-memory slugs carry a project key after the
+  namespace: `instructions/<repo>-<8 hex>/claude-md`,
+  `memory/<repo>-<8 hex>/MEMORY` (key from the worktree root, resp. the
+  main worktree root; `$KRONICLE_LITE_PROJECT` overrides). `source` gains
+  `project {key, root}`.
+- Migration, additive: the first sync of a file whose 0.4.0 un-keyed
+  document still holds exactly that file's text renames it in place
+  (`document.renamed`), keeping doc_id, blocks and receipts, with no
+  retraction. Any other legacy document is left alone.
+- `get_system_state` hides instruction retractions from documents of other
+  projects (`scope {project_keys, hidden_retractions}`); `all_projects:
+  true` / `orient --all-projects` shows them. `serve` and `orient` scope to
+  their working directory (`--cwd`).
+- Slugs deeper than 16 segments are now bounded too (they used to fail
+  validation).
+
+### Changed — retractions say what changed, in words (G3)
+
+- Retractions gain `heading_path`, `old_text`, `new_text` (≤ 160 chars)
+  and `diff` (word diff `[-old-]{+new+}`, ≤ 400 chars); `reason_line`
+  quotes the old and new text instead of block ids when the store has it
+  (falls back to the 0.4.0 wording otherwise). The Markdown briefing adds a
+  `changed:` / `removed:` line under each.
+
+### Changed — first run, demo, noise (G5, G6)
+
+- New `kronicle-lite demo [--dir D] [--keep]`: the stale-runbook story end
+  to end in a temp dir (put, orient, change, retraction with the diff,
+  receipt SUPERSEDED, direct table edit withheld / UNVERIFIED / verify-chain
+  exit 1 / integrity banner, rebuild, chain edit caught at its seq). No LLM,
+  no network; exits 1 if any step does not play out.
+- The README tour is self-contained (it writes `runbook.md` itself) and
+  covered by a test that runs it in an empty directory with a fresh HOME.
+- `put SLUG FILE` reads the file and validates the slug before opening the
+  store: a failed put no longer creates the data dir and signing key.
+  `import` checks its input file first too.
+- `put SLUG FILE` prints one summary line; `--json` prints the full result
+  as before.
+- No `never anchored` line in orient until something was anchored
+  (`anchorLine()` returns null); `doctor` skips the anchor reachability
+  probe unless a license key or anchor URL is configured.
+
+### Changed — token diet (G4)
+
+- `tools/list`: **43,185 → 12,439 bytes** (−71%; measured over stdio).
+  Tool descriptions shortened, the longer guidance moved to
+  `skills/orient/SKILL.md`. Output schemas are advertised in a compact form
+  (top-level fields with type, enum and `required`; nested shapes as bare
+  types; no descriptions, patterns or bounds). Inputs keep their
+  constraints minus ±2^53 integer bounds and regexes beside a `format`.
+  Results are still validated against the full zod schemas, now served by
+  the new `kronicle://schemas/tools` resource. No tool, parameter or result
+  field was removed.
+- Catalog re-pinned: `7eed4b72e51af9da660f2a0af4749205791f67338e632104819009600257337f`.
+
+### Changed — HTTP serves 2025-era clients (H2)
+
+- `serve --http` serves 2025-era (`initialize`) clients such as Cursor's
+  through the SDK's stateless legacy leg (fresh server per request, same
+  Host/Origin/bearer checks). `--modern-only` (`modernOnly`) restores the
+  0.4.0 refusal (`-32022`).
+
 ## [0.4.0] — 2026-11-01
 
 Four additive features. Every 0.3.0 chain verifies byte-for-byte: no hash
