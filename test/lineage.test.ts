@@ -216,6 +216,84 @@ describe('inferred lineage (derived_from_inferred)', () => {
   });
 });
 
+describe('inferred lineage is bounded', () => {
+  const back = (store: KronicleLite, actor: string, ms: number) => {
+    const t = new Date(Date.now() - ms).toISOString();
+    store.db.prepare(`UPDATE reads SET read_at = ? WHERE actor_id = ?`).run(t, actor);
+    store.db.prepare(`UPDATE receipts SET issued_at = ? WHERE actor_id = ?`).run(t, actor);
+  };
+
+  it('never oriented: reads older than 24 h are not inferred, and the write records derived_from_inferred_truncated', () => {
+    const { store, target } = setup();
+    store.recall.recall({ query: 'page on-call', actor_id: 'agent' });
+    back(store, 'agent', 25 * 3600_000);
+    store.recall.recall({ query: 'deploys cluster', actor_id: 'agent' });
+    const put = store.docs.putDocument({ slug: 'note', title: 'Note', markdown: '# Note\n\nDeploy target note: blue-7.\n', actor_id: 'agent' });
+    expect(put.lineage).toEqual({ derived_from: 0, derived_from_inferred: 1, derived_from_inferred_truncated: true });
+    expect(store.lineage.edges(put.doc_id).map((e) => e.source_block_id)).toEqual([target.block_id]);
+    const ev = store.chain.get(put.chain_seq)!;
+    expect(ev.payload).toMatchObject({ derived_from_inferred_truncated: true });
+    expect(store.verifyAll().ok).toBe(true);
+    // Only old reads: nothing inferred, still flagged (on the chain and in the reply).
+    back(store, 'agent', 25 * 3600_000);
+    const p2 = store.docs.putDocument({ slug: 'note2', title: 'Note 2', markdown: '# Note 2\n\nX.\n', actor_id: 'agent' });
+    expect(p2.lineage).toEqual({ derived_from: 0, derived_from_inferred: 0, derived_from_inferred_truncated: true });
+    expect(store.lineage.edges(p2.doc_id)).toEqual([]);
+    store.close();
+  });
+
+  it('never oriented: at most the 200 most recently read blocks; within the bound nothing is flagged', () => {
+    const store = new KronicleLite({ memory: true });
+    const md = '# Big\n\n' + Array.from({ length: 205 }, (_, i) => `## S${i}\n\nFact number ${i} lives here.\n`).join('\n');
+    store.docs.putDocument({ slug: 'big', title: 'Big', markdown: md, actor_id: 'human' });
+    const paras = store.docs.liveBlocks(store.docs.getDocument('big')!.doc_id).filter((b) => b.kind === 'paragraph');
+    expect(paras.length).toBe(205);
+    // 205 reads, oldest first, one millisecond apart (block i read at t0 + i).
+    const t0 = Date.now() - 60_000;
+    const ins = store.db.prepare(`INSERT INTO reads (actor_id, doc_id, block_id, content_hash, doc_revision, head_seq, read_at, via) VALUES ('agent', ?, ?, ?, 1, 1, ?, 'recall')`);
+    paras.forEach((b, i) => ins.run(b.doc_id, b.block_id, b.content_hash, new Date(t0 + i).toISOString()));
+    const r = store.lineage.infer('agent', null, null);
+    expect(r.truncated).toBe(true);
+    expect(r.refs.length).toBe(200);
+    expect(new Set(r.refs.map((x) => x.block_id))).toEqual(new Set(paras.slice(5).map((b) => b.block_id)));
+    // A session start bounds it instead (no cap, no flag).
+    const s = store.lineage.infer('agent', new Date(t0 + 100).toISOString(), null);
+    expect(s).toMatchObject({ truncated: false });
+    expect(s.refs.length).toBe(105);
+    // Under the bound: not truncated.
+    store.db.prepare(`DELETE FROM reads WHERE actor_id = 'agent' AND read_at < ?`).run(new Date(t0 + 10).toISOString());
+    expect(store.lineage.infer('agent', null, null)).toMatchObject({ truncated: false });
+    expect(store.lineage.infer('agent', null, null).refs.length).toBe(195);
+    store.close();
+  });
+
+  it('dedupes by block and by lineage: two versions read → one edge, the later one', () => {
+    const { store, target } = setup();
+    store.recall.recall({ query: 'deploys cluster', actor_id: 'agent' });
+    store.recall.recall({ query: 'deploys cluster', actor_id: 'agent' });
+    const sup = store.docs.supersedeBlock({ block_id: target.block_id, new_content: 'Deploys go to the cluster `green-2` first.', reason: 'cutover', actor_id: 'human' });
+    store.recall.recall({ query: 'deploys cluster green-2', actor_id: 'agent' });
+    const r = store.lineage.infer('agent', null, null);
+    const ids = r.refs.map((x) => x.block_id);
+    expect(ids).toContain(sup.new_block_id);
+    expect(ids).not.toContain(target.block_id);
+    expect(new Set(ids).size).toBe(ids.length);
+    store.close();
+  });
+
+  it('an orient bounds inference to the session (earlier reads, even recent ones, are out)', async () => {
+    const { store, target } = setup();
+    store.recall.recall({ query: 'page on-call', actor_id: 'agent' });
+    await new Promise((r) => setTimeout(r, 5));
+    store.orient.getSystemState({ actor_id: 'agent' });
+    store.recall.recall({ query: 'deploys cluster', actor_id: 'agent' });
+    const put = store.docs.putDocument({ slug: 'note', title: 'Note', markdown: '# Note\n\nDeploy target note: blue-7.\n', actor_id: 'agent' });
+    expect(put.lineage).toEqual({ derived_from: 0, derived_from_inferred: 1 });
+    expect(store.lineage.edges(put.doc_id).map((e) => e.source_block_id)).toEqual([target.block_id]);
+    store.close();
+  });
+});
+
 describe('derived retractions in orient', () => {
   it('a source change lists a `derived` retraction for the stale note (with the source diff); re-derived notes are not listed', () => {
     const { store, target } = setup();

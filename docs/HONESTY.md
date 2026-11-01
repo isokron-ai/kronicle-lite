@@ -34,7 +34,7 @@ First matching row wins. Row 0 applies to matches withheld from `hits`.
 | 0 | the stored text does not hash to its chained event (listed under `withheld`, no content, no receipt) | `never_act` | `integrity_failed` | block |
 | 1 | the block was tombstoned (`include_tombstoned: true`) | `never_act` | `tombstoned` | block |
 | 2 | the block was superseded | `never_act` | `superseded` | block |
-| 3 | (unreleased) the document is a derived note and a block it was derived from was superseded, moved or tombstoned, and the note was not re-derived from the current version (§6) | `never_act` | `stale_derived` | document |
+| 3 | (0.8.0) the document is a derived note and a block it was derived from was superseded, moved or tombstoned, and the note was not re-derived from the current version (§6) | `never_act` | `stale_derived` | document |
 | 4 | the document's recorded source file is gone | `never_act` | `source_missing` | document |
 | 5 | the source file exists but no longer holds this block's text | `never_act` | `not_in_source` | block |
 | 6 | the document is model-written memory (source kind `memory`, e.g. Claude Code auto memory) | `inspect_only` | `model_memory` | document |
@@ -76,7 +76,7 @@ still compare whole-file git blobs.
   but the new block is `never_act` / `not_in_source` (test:
   `test/honesty.test.ts`).
 - **Superseded, tombstoned and withheld are never `can_act`**, whatever their
-  text matches. Neither is a stale derived note (unreleased), whatever its
+  text matches. Neither is a stale derived note (0.8.0), whatever its
   own source says.
 - **Model-written memory is never `can_act`** (IsoKron: `model_asserted →
   inspect_only`).
@@ -161,7 +161,7 @@ windows.
 See THREAT-MODEL.md §"Secrets": write-time refusal (or explicit redaction)
 before anything is chained, independent read-time scrub on everything served.
 
-## 6. Derived notes (unreleased)
+## 6. Derived notes (0.8.0)
 
 A note an agent writes from what it read is a copy. When the source changes,
 the copy is wrong and, before this, came back next session unmarked
@@ -173,9 +173,13 @@ the copy is wrong and, before this, came back next session unmarked
   version). Lineage is also **inferred**: every block the writing actor read
   (recall hits, document reads; its own writes excluded) since its session
   started (the briefing behind the `cursor` it passes, else its latest
-  orient, else all of its reads) is recorded as `derived_from_inferred`.
-  Inference over-approximates on purpose and is never truncated; inferred
-  edges downgrade exactly like declared ones. Instruction-file imports
+  orient) is recorded as `derived_from_inferred`, one edge per block (the
+  latest version read). An actor that never oriented has no session: then
+  only the blocks it read in the last 24 hours count, at most the 200 most
+  recent, and a write that left reads out records
+  `derived_from_inferred_truncated: true`. Within those bounds inference
+  over-approximates on purpose; inferred edges downgrade exactly like
+  declared ones. Instruction-file imports
   infer nothing (they are the file's text).
 - An edge is **fresh** while its source's supersession lineage reaches a
   live block through format-only edits only (docs/FORMAT.md §3.8), or when

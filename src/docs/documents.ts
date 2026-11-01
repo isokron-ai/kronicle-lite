@@ -90,13 +90,15 @@ export interface LineageCounts {
   derived_from: number;
   /** Edges inferred from what the author read in its session. */
   derived_from_inferred: number;
+  /** The author had no session (never oriented) and the 24 h / 200-block bound left reads out. */
+  derived_from_inferred_truncated?: true;
 }
 
 /**
  * Unreleased: computes `derived_from_inferred` for a write (KronicleLite
  * wires it to the read log; see src/lineage/lineage.ts `infer`).
  */
-export type LineageInference = (actor_id: string, cursor: string | undefined, exclude_doc_id: string | null) => LineageRef[];
+export type LineageInference = (actor_id: string, cursor: string | undefined, exclude_doc_id: string | null) => { refs: LineageRef[]; truncated: boolean };
 
 export interface SupersedeBlockResult {
   old_block_id: string;
@@ -245,10 +247,11 @@ export class DocumentStore {
     return [...out.values()].sort((a, b) => a.block_id.localeCompare(b.block_id));
   }
 
-  private inferLineage(actor_id: string, cursor: string | undefined, infer: boolean | undefined, exclude_doc_id: string | null, explicit: readonly LineageRef[] | undefined): LineageRef[] {
-    if (infer === false || !this.lineageInference) return [];
+  private inferLineage(actor_id: string, cursor: string | undefined, infer: boolean | undefined, exclude_doc_id: string | null, explicit: readonly LineageRef[] | undefined): { refs: LineageRef[]; truncated: boolean } {
+    if (infer === false || !this.lineageInference) return { refs: [], truncated: false };
     const skip = new Set((explicit ?? []).map((r) => r.block_id));
-    return this.lineageInference(actor_id, cursor, exclude_doc_id).filter((r) => !skip.has(r.block_id));
+    const r = this.lineageInference(actor_id, cursor, exclude_doc_id);
+    return { refs: r.refs.filter((x) => !skip.has(x.block_id)), truncated: r.truncated };
   }
 
   /** Unreleased: a write is a read of what was written (local read log, never chained). */
@@ -503,7 +506,7 @@ export class DocumentStore {
     const markdown = normalizeMarkdown(args.markdown);
     const markdown_hash = blake3Hex(markdown);
     const explicit = this.checkLineage(args.derived_from);
-    const inferred = this.inferLineage(args.actor_id, args.cursor, args.infer_lineage, this.getDocument(args.slug)?.doc_id ?? null, explicit);
+    const { refs: inferred, truncated } = this.inferLineage(args.actor_id, args.cursor, args.infer_lineage, this.getDocument(args.slug)?.doc_id ?? null, explicit);
 
     const run = this.db.transaction((): PutDocumentResult => {
       const existing = this.getDocument(args.slug);
@@ -552,6 +555,7 @@ export class DocumentStore {
           // Unreleased, additive: lineage, only when there is any (a put without it hashes as before).
           ...(explicit !== undefined ? { derived_from: explicit as unknown as Record<string, unknown>[] } : {}),
           ...(inferred.length > 0 ? { derived_from_inferred: inferred as unknown as Record<string, unknown>[] } : {}),
+          ...(truncated ? { derived_from_inferred_truncated: true } : {}),
         },
       });
       for (const c of [...created, ...replaced]) {
@@ -672,7 +676,9 @@ export class DocumentStore {
         head,
         blocks: summaries,
         events: pending.length,
-        ...(explicit !== undefined || inferred.length > 0 ? { lineage: { derived_from: explicit?.length ?? 0, derived_from_inferred: inferred.length } } : {}),
+        ...(explicit !== undefined || inferred.length > 0 || truncated
+          ? { lineage: { derived_from: explicit?.length ?? 0, derived_from_inferred: inferred.length, ...(truncated ? { derived_from_inferred_truncated: true as const } : {}) } }
+          : {}),
       };
     });
     const result = run.immediate();
@@ -718,7 +724,7 @@ export class DocumentStore {
     const content = normalizeMarkdown(args.new_content).trim();
     if (content.length === 0) throw new DocumentError('empty_content', 'new_content is empty');
     const explicit = this.checkLineage(args.derived_from);
-    const inferred = this.inferLineage(args.actor_id, args.cursor, args.infer_lineage, this.getBlock(args.block_id)?.doc_id ?? null, explicit);
+    const { refs: inferred, truncated } = this.inferLineage(args.actor_id, args.cursor, args.infer_lineage, this.getBlock(args.block_id)?.doc_id ?? null, explicit);
     const run = this.db.transaction((): SupersedeBlockResult => {
       const old = this.requireLive(args.block_id);
       const doc = this.getDocumentById(old.doc_id)!;
@@ -744,6 +750,7 @@ export class DocumentStore {
           // Unreleased, additive: lineage of the new text (absent = none recorded).
           ...(explicit !== undefined && explicit.length > 0 ? { derived_from: explicit as unknown as Record<string, unknown>[] } : {}),
           ...(inferred.length > 0 ? { derived_from_inferred: inferred as unknown as Record<string, unknown>[] } : {}),
+          ...(truncated ? { derived_from_inferred_truncated: true } : {}),
         },
       });
       this.applyEvent(r1.event);
@@ -762,8 +769,8 @@ export class DocumentStore {
       this.applyEvent(r2.event);
       const head = this.emitRevised(doc, revision, args.actor_id, 'supersede_block');
       this.logWrite(args.actor_id, old.doc_id, [new_block_id]);
-      const n = { derived_from: explicit?.length ?? 0, derived_from_inferred: inferred.length };
-      return { old_block_id: old.block_id, new_block_id, content_hash, doc_slug: doc.slug, revision, head, ...(n.derived_from + n.derived_from_inferred > 0 ? { lineage: n } : {}) };
+      const n: LineageCounts = { derived_from: explicit?.length ?? 0, derived_from_inferred: inferred.length, ...(truncated ? { derived_from_inferred_truncated: true as const } : {}) };
+      return { old_block_id: old.block_id, new_block_id, content_hash, doc_slug: doc.slug, revision, head, ...(n.derived_from + n.derived_from_inferred > 0 || truncated ? { lineage: n } : {}) };
     });
     const result = run.immediate();
     return guarded.redactions.length > 0 ? { ...result, redactions: guarded.redactions } : result;

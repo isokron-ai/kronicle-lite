@@ -573,7 +573,11 @@ export const DocumentSourceSchema = z
   .describe('Provenance recorded in the document.put event.');
 
 /** Unreleased: lineage recorded on a write. */
-export const LineageCountsSchema = z.object({ derived_from: z.number().int().nonnegative(), derived_from_inferred: z.number().int().nonnegative() });
+export const LineageCountsSchema = z.object({
+  derived_from: z.number().int().nonnegative(),
+  derived_from_inferred: z.number().int().nonnegative(),
+  derived_from_inferred_truncated: z.literal(true).optional(),
+});
 
 export const PutDocumentResultSchema = z.object({
   doc_id: z.string(),

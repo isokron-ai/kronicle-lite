@@ -174,9 +174,9 @@ text, because "Allowed › X" and "Forbidden › X" mean different things.
 
 | event_type | payload fields |
 |---|---|
-| `document.put` | `doc_id, slug, title, revision, markdown, markdown_hash (BLAKE3), block_ids[], carried[{block_id, ordinal, heading_path}]`, optional `source` (0.4.0, §3.4), optional `project` (unreleased, §3.7), optional `derived_from[]` / `derived_from_inferred[]` (unreleased, §3.10) |
+| `document.put` | `doc_id, slug, title, revision, markdown, markdown_hash (BLAKE3), block_ids[], carried[{block_id, ordinal, heading_path}]`, optional `source` (0.4.0, §3.4), optional `project` (unreleased, §3.7), optional `derived_from[]` / `derived_from_inferred[]` / `derived_from_inferred_truncated` (0.8.0, §3.10) |
 | `document.revised` | `doc_id, slug, title, revision, markdown, markdown_hash, cause` |
-| `block.created` | `block_id, doc_id, doc_slug, revision, ordinal, kind, level, heading_path[], content, content_hash`; from `supersede_block`, optional `derived_from[]` / `derived_from_inferred[]` (unreleased, §3.10) |
+| `block.created` | `block_id, doc_id, doc_slug, revision, ordinal, kind, level, heading_path[], content, content_hash`; from `supersede_block`, optional `derived_from[]` / `derived_from_inferred[]` / `derived_from_inferred_truncated` (0.8.0, §3.10) |
 | `block.superseded` | `block_id, successor_block_id, doc_id, doc_slug, revision, reason` |
 | `block.tombstoned` | `block_id, doc_id, doc_slug, revision, reason` |
 | `document.renamed` (0.5.0) | `doc_id, from_slug, slug, revision, reason` — same document, new slug; revisions and blocks are keyed by `doc_id` and carry over. Unreleased: also written when an instruction file moves inside its project with its content intact (`reason: "moved: <old path> → <new path> (same content)"`), followed by a `document.put` recording the new `source.path` with every block carried |
@@ -372,7 +372,7 @@ focus, `pulse` included, for the events since the cursor) answers normally
 with `integrity: {ok: false, problem, seq}` and an INTEGRITY FAILURE line
 first.
 
-### 3.10 Derived-note lineage (unreleased, additive)
+### 3.10 Derived-note lineage (0.8.0, additive)
 
 A note written from other blocks records which exact versions it rests on:
 
@@ -388,9 +388,15 @@ A note written from other blocks records which exact versions it rests on:
   no longer live is accepted (the note is stale from the start).
 - `derived_from_inferred` — every block the writing actor read (recall hits,
   document reads; its own writes excluded) since its session started (the
-  briefing behind the cursor it passes, else its latest orient, else all of
-  its reads), outside the document being written. Sorted by `block_id`,
-  deduplicated, never truncated. Instruction-file imports infer nothing.
+  briefing behind the cursor it passes, else its latest orient), outside the
+  document being written. Sorted by `block_id`, deduplicated by block and by
+  lineage (two versions of one block read: only the later one).
+  Instruction-file imports infer nothing.
+- No session (the actor never oriented): never "everything ever read", but
+  the most recently read blocks within the last 24 hours, at most 200
+  (whichever set is smaller). When that bound leaves out any block the actor
+  ever read, the payload carries `derived_from_inferred_truncated: true`
+  (present only when true; the write's reply says the same in `lineage`).
 
 Both fields are present only when non-empty, except that an explicit
 `derived_from: []` on a `document.put` is kept: it says "derives from
@@ -477,7 +483,7 @@ Fail-closed, in order:
 | document git-bound and its source blob moved (0.4.0, §3.5) | `STALE_SOURCE / stale_source` (+ `source_drift`) |
 | otherwise | `VERIFIED / verified` |
 
-### 4.2 Read log (unreleased, additive, local)
+### 4.2 Read log (0.8.0, additive, local)
 
 `reads(actor_id, doc_id, block_id, content_hash, doc_revision, head_seq,
 read_at, via)` records which version each actor read: a row per recall hit
@@ -487,8 +493,8 @@ served to a known actor (receipts or not), a row per document read
 a read of the new block, a tombstone a read of the removal). Like
 `receipts.actor_id` it is not part of any hash, any signature or the export,
 and `import` / `rebuild` leave it alone. Receipts issued to an actor before
-the table existed count as reads too. It drives lineage inference (§3.10)
-and `pending` (docs/PUSH.md).
+the table existed count as reads too. It drives lineage inference (§3.10),
+`pending` and the shims' exec-time gate (docs/PUSH.md).
 
 ## 5. Cursors
 

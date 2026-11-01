@@ -114,6 +114,17 @@ interface Walk {
 
 const MAX_DERIVED_DEPTH = 4;
 
+/** Inference without a session (the actor never oriented): reads in this window… */
+export const INFER_FALLBACK_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** …and at most this many of the most recently read blocks. */
+export const INFER_FALLBACK_MAX = 200;
+
+/** What `infer` returns: the edges, and whether the no-session bound left reads out. */
+export interface InferredLineage {
+  refs: LineageRef[];
+  truncated: boolean;
+}
+
 export class Lineage {
   private readonly hopMemo = new Map<string, boolean>();
   private readonly stmts = new Map<string, Statement>();
@@ -310,23 +321,129 @@ export class Lineage {
   }
 
   /**
-   * Lineage to infer for a note `actor_id` writes now: every block it read
-   * (receipts and the read log; its own writes excluded) since `since`
-   * (ISO time; null = all of its reads), outside `exclude_doc_id`. Sorted,
-   * deduplicated. Never truncated: a conservative over-approximation.
+   * Lineage to infer for a note `actor_id` writes now: the blocks it read
+   * (receipts and the read log; its own writes excluded), outside
+   * `exclude_doc_id`, deduplicated by block and by lineage (when it read two
+   * versions of one block, only the latest is kept: the same staleness
+   * verdict with fewer edges). Sorted by block id.
+   *
+   * Bounded: `since` (ISO time) = its current session start (the briefing
+   * behind its cursor, else its latest orient): every block read since then.
+   * No session (the actor never oriented): never "everything ever read", but
+   * the most recently read blocks within the last 24 h, at most 200
+   * (`INFER_FALLBACK_WINDOW_MS`, `INFER_FALLBACK_MAX`); `truncated` is true
+   * when that bound left out any block the actor ever read.
    */
-  infer(actor_id: string, since: string | null, exclude_doc_id: string | null): LineageRef[] {
-    const t = since ?? '';
-    const rows = this.q(
-        `SELECT DISTINCT b.block_id, b.content_hash FROM (
-           SELECT block_id FROM receipts WHERE actor_id = ? AND issued_at >= ?
-           UNION SELECT block_id FROM reads WHERE actor_id = ? AND read_at >= ? AND block_id IS NOT NULL AND via != 'write'
-         ) r JOIN blocks b ON b.block_id = r.block_id
-         WHERE b.doc_id IS NOT ?
-         ORDER BY b.block_id`,
-      )
-      .all(actor_id, t, actor_id, t, exclude_doc_id) as LineageRef[];
-    return rows;
+  infer(actor_id: string, since: string | null, exclude_doc_id: string | null, opts: { now?: number } = {}): InferredLineage {
+    const READS = `SELECT block_id, issued_at AS at FROM receipts WHERE actor_id = ?
+           UNION ALL SELECT block_id, read_at AS at FROM reads WHERE actor_id = ? AND block_id IS NOT NULL AND via != 'write'`;
+    let rows: { block_id: string; content_hash: string; retired: number }[];
+    let truncated = false;
+    if (since !== null) {
+      rows = this.q(
+        `SELECT b.block_id, b.content_hash, (b.valid_to IS NOT NULL OR b.tombstoned_at IS NOT NULL) AS retired
+           FROM (SELECT DISTINCT block_id FROM (${READS}) WHERE at >= ?) r JOIN blocks b ON b.block_id = r.block_id
+          WHERE b.doc_id IS NOT ?`,
+      ).all(actor_id, actor_id, since, exclude_doc_id) as typeof rows;
+    } else {
+      const cutoff = new Date((opts.now ?? Date.now()) - INFER_FALLBACK_WINDOW_MS).toISOString();
+      const recent = this.q(
+        `SELECT b.block_id, b.content_hash, (b.valid_to IS NOT NULL OR b.tombstoned_at IS NOT NULL) AS retired, r.at
+           FROM (SELECT block_id, MAX(at) AS at FROM (${READS}) GROUP BY block_id HAVING MAX(at) >= ?) r
+           JOIN blocks b ON b.block_id = r.block_id
+          WHERE b.doc_id IS NOT ?
+          ORDER BY r.at DESC, b.block_id LIMIT ?`,
+      ).all(actor_id, actor_id, cutoff, exclude_doc_id, INFER_FALLBACK_MAX + 1) as (typeof rows[number] & { at: string })[];
+      if (recent.length > INFER_FALLBACK_MAX) truncated = true;
+      rows = recent.slice(0, INFER_FALLBACK_MAX);
+      if (!truncated) {
+        truncated =
+          this.q(
+            `SELECT 1 FROM (SELECT block_id, MAX(at) AS at FROM (${READS}) GROUP BY block_id HAVING MAX(at) < ?) r
+               JOIN blocks b ON b.block_id = r.block_id WHERE b.doc_id IS NOT ? LIMIT 1`,
+          ).get(actor_id, actor_id, cutoff, exclude_doc_id) !== undefined;
+      }
+    }
+    // Dedupe by lineage: drop a retired version when a later version of the same block was read too.
+    const ids = new Set(rows.map((r) => r.block_id));
+    const refs: LineageRef[] = [];
+    for (const r of rows) {
+      if (r.retired) {
+        const w = this.walk(r.block_id);
+        if (w && w.blocks.slice(1).some((b) => ids.has(b.block_id))) continue;
+      }
+      refs.push({ block_id: r.block_id, content_hash: r.content_hash });
+    }
+    refs.sort((a, b) => a.block_id.localeCompare(b.block_id));
+    return { refs, truncated };
+  }
+
+  // ───────────────────────────── reconciliation (pulse) ─────────────────────────────
+
+  /** Every block id of the supersession lineage through `block_id` (predecessors, itself, successors). */
+  lineageIds(block_id: string): string[] {
+    const back: string[] = [];
+    let cur = block_id;
+    for (let i = 0; i < 10_000; i++) {
+      const prev = this.q(`SELECT block_id FROM blocks WHERE superseded_by = ?`).get(cur) as { block_id: string } | undefined;
+      if (!prev) break;
+      back.push(prev.block_id);
+      cur = prev.block_id;
+    }
+    const fwd = this.walk(block_id)?.blocks.map((b) => b.block_id) ?? [block_id];
+    return [...back.reverse(), ...fwd];
+  }
+
+  /**
+   * Actors that read any version of these blocks (recall hits, document
+   * reads; writes excluded: writing a version is not relying on it), plus,
+   * for `note_doc_id`, the actors that read or wrote that note. Sorted.
+   */
+  readersOf(block_ids: readonly string[], note_doc_id: string | null = null): string[] {
+    const out = new Set<string>();
+    for (let i = 0; i < block_ids.length; i += 400) {
+      const chunk = block_ids.slice(i, i + 400);
+      const ph = chunk.map(() => '?').join(', ');
+      for (const r of this.q(
+        `SELECT DISTINCT actor_id FROM receipts WHERE actor_id IS NOT NULL AND block_id IN (${ph})
+         UNION SELECT DISTINCT actor_id FROM reads WHERE via != 'write' AND block_id IN (${ph})`,
+      ).all(...chunk, ...chunk) as { actor_id: string }[]) {
+        out.add(r.actor_id);
+      }
+    }
+    if (note_doc_id !== null) {
+      for (const r of this.q(
+        `SELECT DISTINCT actor_id FROM reads WHERE doc_id = ?
+         UNION SELECT DISTINCT r.actor_id FROM receipts r JOIN blocks b ON b.block_id = r.block_id WHERE b.doc_id = ? AND r.actor_id IS NOT NULL`,
+      ).all(note_doc_id, note_doc_id) as { actor_id: string }[]) {
+        out.add(r.actor_id);
+      }
+    }
+    return [...out].sort();
+  }
+
+  /**
+   * True when `actor_id` has read the CURRENT version of the lineage through
+   * `block_id` (the rule `pending` resolves by): a read of the live head or a
+   * format-only twin of it; for a removed block, a read of the document (or of
+   * the tombstoned block) after the removal. Its own writes count as reads.
+   */
+  readCurrent(actor_id: string, block_id: string): boolean {
+    const w = this.walk(block_id);
+    if (!w) return false;
+    const readAt = this.q(
+      `SELECT MAX(hs) AS hs FROM (
+         SELECT chain_seq AS hs FROM receipts WHERE actor_id = ? AND block_id = ?
+         UNION ALL SELECT head_seq AS hs FROM reads WHERE actor_id = ? AND block_id = ?
+       )`,
+    );
+    const seqOf = (id: string): number | null => (readAt.get(actor_id, id, actor_id, id) as { hs: number | null }).hs;
+    if (w.currentFrom >= 0) return w.blocks.slice(w.currentFrom).some((b) => seqOf(b.block_id) !== null);
+    const tomb = this.retireSeq(w.head.block_id);
+    if (tomb === null) return false;
+    const hr = seqOf(w.head.block_id);
+    const dr = (this.q(`SELECT MAX(head_seq) AS hs FROM reads WHERE actor_id = ? AND doc_id = ? AND block_id IS NULL`).get(actor_id, w.head.doc_id) as { hs: number | null }).hs;
+    return (hr !== null && hr >= tomb) || (dr !== null && dr >= tomb);
   }
 
   // ───────────────────────────── read log ─────────────────────────────
