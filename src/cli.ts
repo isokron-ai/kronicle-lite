@@ -3,6 +3,7 @@
  * kronicle-lite CLI
  *
  *   kronicle-lite serve [--data-dir DIR] [--actor ID]   stdio MCP server (dual-era: 2026-07-28 + 2025 initialize)
+ *   kronicle-lite serve --http [--port N] [--host H] [--bearer T | --bearer-file F]   Streamable HTTP (2026-07-28 only)
  *   kronicle-lite verify-chain [--data-dir DIR] [--from N] [--to N]
  *   kronicle-lite checkpoint [--data-dir DIR] [--from N] [--to N]
  *   kronicle-lite export [--data-dir DIR] [--out FILE]  JSONL of events (stdout default)
@@ -17,6 +18,7 @@ import { createReadStream, createWriteStream, readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 
 import { defaultDataDir } from './db/open.js';
+import { DEFAULT_HTTP_PORT, loadOrCreateBearer, readBearerFile, serveHttp } from './http.js';
 import { createServerFactory, renderSystemStateMarkdown } from './server.js';
 import { KronicleLite } from './store.js';
 import { FOCUSES, type Focus } from './orient/orient.js';
@@ -55,6 +57,11 @@ function str(v: string | true | undefined): string | undefined {
   return typeof v === 'string' ? v : undefined;
 }
 
+function list(v: string | true | undefined): string[] {
+  const s = str(v);
+  return s === undefined ? [] : s.split(',').map((x) => x.trim()).filter((x) => x.length > 0);
+}
+
 function num(v: string | true | undefined): number | undefined {
   const s = str(v);
   if (s === undefined) return undefined;
@@ -67,6 +74,9 @@ const HELP = `kronicle-lite ${VERSION} — hash-chained document store with sign
 
 Usage:
   kronicle-lite serve        [--data-dir DIR] [--actor ID]        run the stdio MCP server
+  kronicle-lite serve --http [--port N] [--host H] [--bearer T | --bearer-file F] [--allow-origin H]...
+                                                                 Streamable HTTP (2026-07-28), 127.0.0.1:${DEFAULT_HTTP_PORT}/mcp,
+                                                                 bearer from DIR/http-bearer.token (created 0600)
   kronicle-lite verify-chain [--data-dir DIR] [--from N] [--to N] recompute every hash; exit 1 on mismatch
   kronicle-lite checkpoint   [--data-dir DIR] [--from N] [--to N] sign a Merkle checkpoint
   kronicle-lite export       [--data-dir DIR] [--out FILE]        JSONL of all events (stdout by default)
@@ -97,6 +107,44 @@ async function main(argv: string[]): Promise<number> {
         version: VERSION,
         ...(str(flags['actor']) !== undefined ? { defaultActorId: str(flags['actor'])! } : {}),
       });
+      if (flags['http']) {
+        let bearer: string;
+        let bearerNote: string;
+        if (str(flags['bearer']) !== undefined) {
+          bearer = str(flags['bearer'])!;
+          bearerNote = 'bearer from --bearer';
+        } else if (str(flags['bearer-file']) !== undefined) {
+          bearer = readBearerFile(str(flags['bearer-file'])!);
+          bearerNote = `bearer from ${str(flags['bearer-file'])}`;
+        } else {
+          const b = loadOrCreateBearer(dataDir);
+          bearer = b.token;
+          bearerNote = `bearer from ${b.file}${b.created ? ' (created, mode 0600)' : ''}`;
+        }
+        const allowedOrigins = list(flags['allow-origin']);
+        const allowedHosts = list(flags['allow-host']);
+        const handle = await serveHttp({
+          factory,
+          bearer,
+          ...(str(flags['host']) !== undefined ? { host: str(flags['host'])! } : {}),
+          ...(num(flags['port']) !== undefined ? { port: num(flags['port'])! } : {}),
+          ...(allowedOrigins.length > 0 ? { allowedOrigins } : {}),
+          ...(allowedHosts.length > 0 ? { allowedHosts } : {}),
+          onerror: (err) => process.stderr.write(`http: ${err.message}\n`),
+        });
+        process.stderr.write(
+          `kronicle-lite ${VERSION} serving Streamable HTTP (2026-07-28) at ${handle.url}; ${bearerNote}; data dir ${dataDir}; key ${store.identity.signer.key_id}\n`,
+        );
+        await new Promise<void>((resolve) => {
+          const stop = () => {
+            handle.close().finally(resolve);
+          };
+          process.once('SIGINT', stop);
+          process.once('SIGTERM', stop);
+        });
+        store.close();
+        return 0;
+      }
       process.stderr.write(`kronicle-lite ${VERSION} serving on stdio; data dir ${dataDir}; key ${store.identity.signer.key_id}\n`);
       const handle = serveStdio(factory, { onerror: (err) => process.stderr.write(`stdio: ${err.message}\n`) });
       // Keep the process alive until stdin closes, then release the store.

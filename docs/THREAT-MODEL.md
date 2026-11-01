@@ -68,10 +68,44 @@ domain.
 **Availability.** A single writer, a single file. SQLite in WAL mode handles
 concurrent processes correctly but not a hostile one holding a lock.
 
+## HTTP transport (`serve --http`)
+
+The Streamable HTTP mode (0.3.0) does not change the trust domain; it changes
+who can reach the process. Be precise about what the knobs do.
+
+**Single tenant, one secret.** There is one bearer token, read from
+`<data dir>/http-bearer.token` (created with mode `0600` when absent) or
+passed with `--bearer` / `--bearer-file`. Every request must present it as
+`Authorization: Bearer <token>`; the comparison is constant-time. Holding the
+token is holding the whole store: there are no scopes, no per-tool
+permissions, no per-actor identity. `actor_id` is still a label the caller
+chooses. Rotate by deleting the file and restarting.
+
+**Loopback by default.** The server binds `127.0.0.1` unless `--host` says
+otherwise. The `Host` header must name the bound host or loopback and the
+`Origin` header, when a browser sends one, must be loopback or in
+`--allow-origin` — both are rejected before the bearer is even looked at
+(DNS-rebinding defence per the Streamable HTTP spec). Binding `0.0.0.0` or a
+LAN address is your decision; add the hostnames clients will use with
+`--allow-host`, and put TLS in front — the token travels in clear text
+otherwise. kronicle-lite does not do TLS.
+
+**Stateless, 2026-07-28 only.** No session id is minted or honored, `GET`
+and `DELETE` answer `405`, every request carries its own protocol version. A
+2025-era client that sends `initialize` gets `400` with
+`UnsupportedProtocolVersionError` naming `2026-07-28`; point it at stdio
+instead, which serves both eras.
+
+**What it is for.** A client on the same machine that cannot spawn a process,
+or a trusted single-user box reached over a tunnel you already protect. It is
+the base the hosted tier and the sea-lite team mode build on; it is not,
+by itself, a multi-user service. Treat the token like an SSH key.
+
 ## Assumed deployment
 
 - One user, one machine, one or more agents (Claude Code, Cursor, Claude
-  Desktop, scripts) attached over stdio.
+  Desktop, scripts) attached over stdio, or over loopback HTTP with the
+  bearer token.
 - The user wants to know when an agent's notes have been superseded or
   retired, and wants a record that is hard to corrupt by accident.
 - The user does not need to convince anyone else of anything.

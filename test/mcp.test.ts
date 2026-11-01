@@ -9,16 +9,17 @@
  *   results (resultType, ttlMs/cacheScope, _meta serverInfo).
  */
 
-import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
+import { Client, InMemoryTransport, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { loadOrCreateBearer, serveHttp, type HttpServeHandle } from '../src/http.js';
 import type { Receipt } from '../src/recall/receipt.js';
 import { CACHE_HINTS, createServer, createServerFactory, INSTRUCTIONS } from '../src/server.js';
 import { KronicleLite } from '../src/store.js';
@@ -479,5 +480,169 @@ describe.skipIf(!existsSync(CLI))('raw JSON-RPC over stdio: era behavior of the 
       await rpc.close();
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// ───────────────────────────── Streamable HTTP ─────────────────────────────
+
+describe.skipIf(!existsSync(CLI))('raw JSON-RPC over stdio: unsupported version at opening', () => {
+  it('answers UnsupportedProtocolVersionError (-32022) naming the supported list and stays open for a good opening', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'kl-badver-'));
+    const rpc = rawStdio(dir);
+    try {
+      rpc.send({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/list',
+        params: { _meta: { ...META, 'io.modelcontextprotocol/protocolVersion': '1900-01-01' } },
+      });
+      const bad = (await rpc.response(1)) as { error: { code: number; data: { supported: string[]; requested: string } } };
+      expect(bad.error.code).toBe(-32022);
+      expect(bad.error.data).toEqual({ supported: [MODERN], requested: '1900-01-01' });
+      rpc.send({ jsonrpc: '2.0', id: 2, method: 'server/discover', params: { _meta: META } });
+      const d = (await rpc.response(2)) as { result: { supportedVersions: string[] } };
+      expect(d.result.supportedVersions).toEqual([MODERN]);
+    } finally {
+      await rpc.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('Streamable HTTP (2026-07-28 only, bearer, loopback)', () => {
+  let store: KronicleLite;
+  let dir: string;
+  let http: HttpServeHandle;
+  let bearer: string;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'kl-http-'));
+    store = new KronicleLite({ memory: true });
+    const b = loadOrCreateBearer(dir);
+    bearer = b.token;
+    http = await serveHttp({ factory: createServerFactory(store, { defaultActorId: 'http-agent' }), bearer, port: 0 });
+  });
+
+  afterAll(async () => {
+    await http.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('bearer file is created once with mode 0600 and reused', () => {
+    const file = join(dir, 'http-bearer.token');
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(bearer.length).toBeGreaterThanOrEqual(32);
+    const again = loadOrCreateBearer(dir);
+    expect(again).toEqual({ token: bearer, created: false, file });
+  });
+
+  it('(c) a v2 client pinned to 2026-07-28 completes a round trip with the bearer', async () => {
+    const client = new Client({ name: 'http-test', version: '0.0.0' }, { versionNegotiation: { mode: { pin: MODERN } } });
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(http.url), { requestInit: { headers: { Authorization: `Bearer ${bearer}` } } }),
+    );
+    expect(client.getProtocolEra()).toBe('modern');
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name).sort()).toEqual(TOOL_NAMES);
+    const put = parse<{ head: { seq: number } }>(
+      await client.callTool({ name: 'put_document', arguments: { slug: 'h', title: 'H', markdown: 'over http' } }),
+    );
+    expect(put.head.seq).toBe(2);
+    const s = parse<{ actor_id: string; head: { seq: number } }>(
+      await client.callTool({ name: 'get_system_state', arguments: { response_format: 'json' } }),
+    );
+    expect(s).toMatchObject({ actor_id: 'http-agent', head: { seq: 2 } });
+    await client.close();
+  });
+
+  it('rejects: missing/wrong bearer → 401, bad Origin → 403, GET → 405, wrong path → 404', async () => {
+    const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'server/discover', params: { _meta: META } });
+    const headers = {
+      'Content-Type': 'application/json',
+      Accept: 'application/json, text/event-stream',
+      'MCP-Protocol-Version': MODERN,
+      'Mcp-Method': 'server/discover',
+    };
+    const noAuth = await fetch(http.url, { method: 'POST', headers, body });
+    expect(noAuth.status).toBe(401);
+    expect(noAuth.headers.get('www-authenticate')).toMatch(/Bearer/);
+    const wrongAuth = await fetch(http.url, { method: 'POST', headers: { ...headers, Authorization: 'Bearer nope-nope-nope-nope' }, body });
+    expect(wrongAuth.status).toBe(401);
+    const badOrigin = await fetch(http.url, {
+      method: 'POST',
+      headers: { ...headers, Authorization: `Bearer ${bearer}`, Origin: 'https://evil.example' },
+      body,
+    });
+    expect(badOrigin.status).toBe(403);
+    const get = await fetch(http.url, { headers: { Authorization: `Bearer ${bearer}` } });
+    expect(get.status).toBe(405);
+    const notFound = await fetch(http.url.replace('/mcp', '/nope'), { method: 'POST', headers: { ...headers, Authorization: `Bearer ${bearer}` }, body });
+    expect(notFound.status).toBe(404);
+  });
+
+  it('a 2025-era initialize POST (no _meta, no version header) is refused with -32022 naming 2026-07-28', async () => {
+    const res = await fetch(http.url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        Authorization: `Bearer ${bearer}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'old', version: '1' } },
+      }),
+    });
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { error: { code: number; data?: { supported?: string[] } } };
+    expect(json.error.code).toBe(-32022);
+    expect(json.error.data?.supported).toEqual([MODERN]);
+    expect(res.headers.get('mcp-session-id')).toBeNull();
+  });
+
+  it('an unsupported protocol version on any request is refused with 400 / -32022', async () => {
+    const res = await fetch(http.url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        'MCP-Protocol-Version': '1900-01-01',
+        'Mcp-Method': 'tools/list',
+        Authorization: `Bearer ${bearer}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 9,
+        method: 'tools/list',
+        params: { _meta: { ...META, 'io.modelcontextprotocol/protocolVersion': '1900-01-01' } },
+      }),
+    });
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { error: { code: number; data: { supported: string[] } } };
+    expect(json.error.code).toBe(-32022);
+    expect(json.error.data.supported).toEqual([MODERN]);
+  });
+
+  it('modern raw POST gets a plain JSON result with 2026 fields and no session id', async () => {
+    const res = await fetch(http.url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        'MCP-Protocol-Version': MODERN,
+        'Mcp-Method': 'tools/list',
+        Authorization: `Bearer ${bearer}`,
+        Origin: 'http://localhost',
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'tools/list', params: { _meta: META } }),
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('mcp-session-id')).toBeNull();
+    const json = (await res.json()) as { id: number; result: Record<string, unknown> };
+    expect(json.id).toBe(7);
+    expect(json.result).toMatchObject({ resultType: 'complete', ttlMs: CACHE_HINTS['tools/list'].ttlMs, cacheScope: 'public' });
   });
 });
