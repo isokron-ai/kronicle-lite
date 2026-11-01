@@ -383,7 +383,7 @@ describe.skipIf(!POSIX)('shim wrapper: world-changing path (real CLI)', () => {
     const b = spawnSync('terraform', ['apply'], { cwd: root, env: { ...env, KRONICLE_SHIM_TIMEOUT: '1' }, encoding: 'utf8', timeout: 20_000 });
     expect(b.status).toBe(0);
     expect(Date.now() - t0).toBeLessThan(8_000);
-    expect(readFileSync(join(shims, '.kronicle-shim', 'shim.log'), 'utf8')).toMatch(/ terraform check \d+ms outcome=timeout-allow rc=12[4-9] timeout=1s\n/);
+    expect(readFileSync(join(shims, '.kronicle-shim', 'shim.log'), 'utf8')).toMatch(/ terraform check \d+ms outcome=timeout-allow rc=(?:124|137|142) timeout=1s\n/);
     expect(readFileSync(log, 'utf8').split('\n').filter(Boolean)).toHaveLength(2);
     // loud on EVERY timeout, not only the first (unlike the other fail-open notes)
     const msg = /^kronicle-lite check TIMED OUT after 1s — `terraform apply -auto-approve` was NOT checked; see .*\.kronicle-shim\/shim\.log$/m;
@@ -418,7 +418,7 @@ describe.skipIf(!POSIX)('shim wrapper: world-changing path (real CLI)', () => {
     }
     expect(readFileSync(log, 'utf8')).toBe(''); // nothing ran
     expect(spawnSync('terraform', ['plan'], { cwd: root, env, encoding: 'utf8' }).status).toBe(0); // read-only still runs
-    expect(readFileSync(join(shims, '.kronicle-shim', 'shim.log'), 'utf8').match(/ terraform check \d+ms outcome=timeout-deny rc=12[4-9] timeout=1s/g)).toHaveLength(2);
+    expect(readFileSync(join(shims, '.kronicle-shim', 'shim.log'), 'utf8').match(/ terraform check \d+ms outcome=timeout-deny rc=(?:124|137|142) timeout=1s/g)).toHaveLength(2);
     // the CLI flag, and its validation
     const cli = kl(['shim', 'install', '--dir', join(root, 'shims2'), '--data-dir', join(root, 'nodata'), '--commands', 'terraform', '--on-timeout', 'deny', '--json']);
     expect(cli.status, cli.stderr).toBe(0);
