@@ -212,6 +212,8 @@ export class Lineage {
       bySource.set(e.source_block_id, { hash: e.source_content_hash, inferred: (prev?.inferred ?? true) && e.inferred === 1 });
     }
     const out: StaleSource[] = [];
+    // One entry per source lineage: the latest version the note was derived from.
+    const byHead = new Map<string, { at: number; len: number }>();
     const transitiveDocs = new Set<string>();
     for (const [sid, { hash, inferred }] of bySource) {
       const w = this.walk(sid);
@@ -227,7 +229,12 @@ export class Lineage {
       }
       const ch = this.firstChange(w, 0);
       const live = w.currentFrom >= 0;
-      out.push({
+      const prev = byHead.get(w.head.block_id);
+      if (prev && prev.len <= w.blocks.length) {
+        out[prev.at]!.inferred &&= inferred;
+        continue;
+      }
+      const entry: StaleSource = {
         source_block_id: sid,
         source_content_hash: hash,
         source_doc_slug: this.slugOf(src.doc_id),
@@ -237,8 +244,14 @@ export class Lineage {
         current_content_hash: live ? w.head.content_hash : null,
         old_text: snippet(src.content),
         new_text: live ? snippet(w.head.content) : null,
-        inferred,
-      });
+        inferred: prev ? inferred && out[prev.at]!.inferred : inferred,
+      };
+      if (prev) out[prev.at] = entry;
+      else {
+        byHead.set(w.head.block_id, { at: out.length, len: w.blocks.length });
+        out.push(entry);
+      }
+      if (prev) byHead.set(w.head.block_id, { at: prev.at, len: w.blocks.length });
     }
     // A note derived from a note that went stale is stale too (bounded depth).
     if (depth < MAX_DERIVED_DEPTH) {

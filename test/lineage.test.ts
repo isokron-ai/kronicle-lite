@@ -76,6 +76,13 @@ describe('derived_from (explicit)', () => {
     const nb = store.docs.liveBlocks(store.docs.getDocument('note')!.doc_id).find((b) => b.kind === 'paragraph')!;
     store.docs.supersedeBlock({ block_id: nb.block_id, new_content: 'Deploy target note: green-2.', reason: 're-derived', actor_id: 'agent', derived_from: [{ block_id: sup.new_block_id, content_hash: sup.content_hash }], infer_lineage: false });
     expect(noteHit(store)).toMatchObject({ authority: 'inspect_only', authority_reason: 'no_source' });
+    // A third version: one entry for the lineage, naming the latest version the note was derived from.
+    store.docs.supersedeBlock({ block_id: sup.new_block_id, new_content: 'Deploys go to the cluster `red-9` first.', reason: 'again', actor_id: 'human' });
+    const hit = noteHit(store);
+    expect(hit.authority_reason).toBe('stale_derived');
+    expect(hit.stale_derived).toHaveLength(1);
+    expect(hit.stale_derived![0]).toMatchObject({ source_block_id: sup.new_block_id, inferred: false });
+    expect(hit.stale_derived![0]!.new_text).toContain('red-9');
     store.close();
   });
 
