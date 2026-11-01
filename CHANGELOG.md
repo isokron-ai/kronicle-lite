@@ -134,6 +134,13 @@ backfilled on open.
   `cursor-secret` (sea-lite, 1/20 bench seeds) or end up signing with
   different keys (1–2 of 20 stress trials of 50 processes). After: 0
   crashes and one identity in 1000 concurrent starts (20 × 50).
+- The database side of the same race (seen on Windows CI as "database is
+  locked"): every connection sets `busy_timeout` (10 s) before its first
+  statement; switching to WAL is retried while another process holds the
+  file; schema creation, migrations and the seed rows run in one
+  `BEGIN IMMEDIATE` transaction (the write lock is taken up front, so two
+  processes never deadlock upgrading a read to a write), retried on
+  SQLITE_BUSY / SQLITE_LOCKED for up to 10 s.
 
 ### Changed — response diet
 
