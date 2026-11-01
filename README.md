@@ -293,18 +293,37 @@ path in the dynamic watch list. Install kronicle-lite globally for hooks
 uses. **Everywhere else** — Cursor, Codex, Copilot, a plain editor — run
 `kronicle-lite watch` in a terminal or as a user service.
 
+## Git-aware blocks (0.4.0)
+
+A document put from a file in a git repository can remember which blob it
+came from, so "the runbook says X" gets checked against the runbook file as
+it is now, not only against the store:
+
+```sh
+kronicle-lite put deploy docs/deploy.md --bind-git     # records {repo_root, commit, path, blob_sha}
+```
+
+Over MCP: `put_document {slug, title, markdown, source_path, bind_git: true}`.
+When the working-tree file changes (or is deleted), `verify` on a receipt
+for that document returns **`STALE_SOURCE`** and `audit_assumptions` grades
+claims about it **`stale_source`**, each with a diff stat (`+3 −1`) and the
+bound vs working blob; `get_system_state` lists the document under a
+**Source drift** heading. Re-put with `--bind-git` to rebind. It only uses
+`git rev-parse` / `git hash-object` / `git cat-file`; outside a repository
+(or without git) the put succeeds with a warning and nothing is bound.
+
 ## Tools
 
 | tool | what it does | writes chain |
 |---|---|---|
 | `get_system_state` | Orient. `since_cursor` → delta since then; drift banner; retractions; new cursor. `focus`: `orientation` (default), `recent_changes`, `retractions`, `pulse` (~50 tokens). `response_format`: `markdown` (default) or `json`. | no |
-| `audit_assumptions` | Grade claims `{symbol, value}` (block id, doc slug, or `head`) → `current \| stale \| contradicted \| retracted \| unknown` with the current truth and a reconcile line. | no |
+| `audit_assumptions` | Grade claims `{symbol, value}` (block id, doc slug, or `head`) → `current \| stale \| contradicted \| retracted \| unknown \| stale_source` with the current truth and a reconcile line. | no |
 | `recall` | FTS5 bm25 search over live blocks; each hit carries a receipt v2 bound to the chain head. `top_k`, `include_tombstoned`, `include_receipts`. | no (stores receipts) |
-| `verify` | Re-derive a receipt against the live store: signature, block existence, content hash, chain binding, supersession walk → `VERIFIED \| SUPERSEDED \| TOMBSTONED \| UNVERIFIED` + reason. | no |
+| `verify` | Re-derive a receipt against the live store: signature, block existence, content hash, chain binding, supersession walk, git-bound source → `VERIFIED \| SUPERSEDED \| TOMBSTONED \| UNVERIFIED \| STALE_SOURCE` + reason. | no |
 | `verify_chain` | Recompute every hash and link in a range; first mismatch; checkpoint results. | no |
 | `checkpoint_chain` | Sign a Merkle root over a seq range with the local key; `push: true` also anchors it off-box. | no (checkpoints, anchors tables) |
 | `anchor_status` | Last off-box anchor, events since, and whether the local chain still matches it (`remote: true` asks the service). | no |
-| `put_document` | Create or re-put a Markdown document by slug. Unchanged blocks keep their ids; changed ones are superseded; removed ones tombstoned. | yes |
+| `put_document` | Create or re-put a Markdown document by slug. Unchanged blocks keep their ids; changed ones are superseded; removed ones tombstoned. `bind_git` + `source_path` bind it to a file's git blob. | yes |
 | `supersede_block` | Replace one live block with new content and a reason. | yes |
 | `tombstone_block` | Retire one live block with a reason. | yes |
 

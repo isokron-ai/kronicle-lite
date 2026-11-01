@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-01T01:00:48.423Z",
+  "capturedAt": "2026-11-01T01:06:26.560Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -268,6 +268,12 @@
                   "minimum": 0,
                   "type": "integer"
                 },
+                "stale_source": {
+                  "description": "Present when any claim is stale_source.",
+                  "maximum": 9007199254740991,
+                  "minimum": 0,
+                  "type": "integer"
+                },
                 "unknown": {
                   "maximum": 9007199254740991,
                   "minimum": 0,
@@ -342,6 +348,130 @@
                       "null"
                     ]
                   },
+                  "source_drift": {
+                    "additionalProperties": false,
+                    "description": "With stale_source: the bound file changed.",
+                    "properties": {
+                      "bound_blob_sha": {
+                        "type": "string"
+                      },
+                      "bound_commit": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "detail": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "diff_stat": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "bound_from": {
+                                "description": "Where the bound side of the diff came from.",
+                                "enum": [
+                                  "git",
+                                  "stored_revision",
+                                  "none"
+                                ],
+                                "type": "string"
+                              },
+                              "deletions": {
+                                "maximum": 9007199254740991,
+                                "minimum": 0,
+                                "type": "integer"
+                              },
+                              "files_changed": {
+                                "maximum": 9007199254740991,
+                                "minimum": 0,
+                                "type": "integer"
+                              },
+                              "insertions": {
+                                "maximum": 9007199254740991,
+                                "minimum": 0,
+                                "type": "integer"
+                              },
+                              "summary": {
+                                "description": "git diff --stat style line.",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "files_changed",
+                              "insertions",
+                              "deletions",
+                              "summary",
+                              "bound_from"
+                            ],
+                            "type": "object"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "doc_id": {
+                        "type": "string"
+                      },
+                      "head_commit": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "path": {
+                        "description": "Path inside repo_root, /-separated.",
+                        "type": "string"
+                      },
+                      "repo_root": {
+                        "type": "string"
+                      },
+                      "revision": {
+                        "description": "Revision whose put recorded the binding.",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991,
+                        "type": "integer"
+                      },
+                      "slug": {
+                        "type": "string"
+                      },
+                      "state": {
+                        "enum": [
+                          "current",
+                          "changed",
+                          "missing",
+                          "unavailable"
+                        ],
+                        "type": "string"
+                      },
+                      "working_blob_sha": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "slug",
+                      "doc_id",
+                      "revision",
+                      "repo_root",
+                      "path",
+                      "bound_commit",
+                      "bound_blob_sha",
+                      "state",
+                      "working_blob_sha",
+                      "head_commit",
+                      "diff_stat",
+                      "detail"
+                    ],
+                    "type": "object"
+                  },
                   "symbol": {
                     "type": "string"
                   },
@@ -351,7 +481,8 @@
                       "stale",
                       "contradicted",
                       "retracted",
-                      "unknown"
+                      "unknown",
+                      "stale_source"
                     ],
                     "type": "string"
                   }
@@ -1203,6 +1334,141 @@
               ],
               "description": "null for focus=pulse."
             },
+            "source_drift": {
+              "anyOf": [
+                {
+                  "items": {
+                    "additionalProperties": false,
+                    "description": "A git-bound document compared with its working-tree source file.",
+                    "properties": {
+                      "bound_blob_sha": {
+                        "type": "string"
+                      },
+                      "bound_commit": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "detail": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "diff_stat": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "bound_from": {
+                                "description": "Where the bound side of the diff came from.",
+                                "enum": [
+                                  "git",
+                                  "stored_revision",
+                                  "none"
+                                ],
+                                "type": "string"
+                              },
+                              "deletions": {
+                                "maximum": 9007199254740991,
+                                "minimum": 0,
+                                "type": "integer"
+                              },
+                              "files_changed": {
+                                "maximum": 9007199254740991,
+                                "minimum": 0,
+                                "type": "integer"
+                              },
+                              "insertions": {
+                                "maximum": 9007199254740991,
+                                "minimum": 0,
+                                "type": "integer"
+                              },
+                              "summary": {
+                                "description": "git diff --stat style line.",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "files_changed",
+                              "insertions",
+                              "deletions",
+                              "summary",
+                              "bound_from"
+                            ],
+                            "type": "object"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "doc_id": {
+                        "type": "string"
+                      },
+                      "head_commit": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "path": {
+                        "description": "Path inside repo_root, /-separated.",
+                        "type": "string"
+                      },
+                      "repo_root": {
+                        "type": "string"
+                      },
+                      "revision": {
+                        "description": "Revision whose put recorded the binding.",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991,
+                        "type": "integer"
+                      },
+                      "slug": {
+                        "type": "string"
+                      },
+                      "state": {
+                        "enum": [
+                          "current",
+                          "changed",
+                          "missing",
+                          "unavailable"
+                        ],
+                        "type": "string"
+                      },
+                      "working_blob_sha": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "slug",
+                      "doc_id",
+                      "revision",
+                      "repo_root",
+                      "path",
+                      "bound_commit",
+                      "bound_blob_sha",
+                      "state",
+                      "working_blob_sha",
+                      "head_commit",
+                      "diff_stat",
+                      "detail"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Git-bound documents whose source file changed or was deleted since binding; null for focus=pulse."
+            },
             "stale_write_advisory": {
               "additionalProperties": false,
               "properties": {
@@ -1258,6 +1524,7 @@
             "drift_banner",
             "stale_write_advisory",
             "anchor",
+            "source_drift",
             "delta",
             "retractions",
             "digest",
@@ -1274,7 +1541,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Store a Markdown document under a slug. A new slug creates revision 1; an existing slug creates the next revision: unchanged blocks keep their ids, changed blocks are superseded (old → new), removed blocks are tombstoned. Emits document.put + block.* events and returns every block id with its BLAKE3 content hash and the new chain head. Pass your cursor so the response can tell you if you are writing on stale assumptions (advisory only).",
+        "description": "Store a Markdown document under a slug. A new slug creates revision 1; an existing slug creates the next revision: unchanged blocks keep their ids, changed blocks are superseded (old → new), removed blocks are tombstoned. Emits document.put + block.* events and returns every block id with its BLAKE3 content hash and the new chain head. Pass your cursor so the response can tell you if you are writing on stale assumptions (advisory only). bind_git:true with source_path (the file the markdown came from) records {repo_root, commit, path, blob_sha}; verify and audit_assumptions then report stale_source when that file changes. Outside git the put still succeeds, with a warning.",
         "inputSchema": {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
           "properties": {
@@ -1283,6 +1550,11 @@
               "maxLength": 200,
               "minLength": 1,
               "type": "string"
+            },
+            "bind_git": {
+              "default": false,
+              "description": "Bind the document to source_path in its git repository (git rev-parse / hash-object).",
+              "type": "boolean"
             },
             "cursor": {
               "description": "Your most recent cursor from get_system_state (full or compact). Used only to compute the stale-write advisory.",
@@ -1301,6 +1573,12 @@
             "slug": {
               "description": "lowercase letters, digits, . _ -",
               "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+              "type": "string"
+            },
+            "source_path": {
+              "description": "File the markdown came from (absolute, or relative to the server working directory).",
+              "maxLength": 4096,
+              "minLength": 1,
               "type": "string"
             },
             "title": {
@@ -1423,6 +1701,54 @@
             "slug": {
               "type": "string"
             },
+            "source": {
+              "additionalProperties": false,
+              "description": "Provenance recorded in the document.put event.",
+              "properties": {
+                "git": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "blob_sha": {
+                      "description": "git hash-object of the file at put time.",
+                      "type": "string"
+                    },
+                    "commit": {
+                      "description": "HEAD at put time; null in a repository without commits.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "path": {
+                      "description": "Path inside repo_root, /-separated.",
+                      "type": "string"
+                    },
+                    "repo_root": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "repo_root",
+                    "commit",
+                    "path",
+                    "blob_sha"
+                  ],
+                  "type": "object"
+                },
+                "kind": {
+                  "description": "instruction | memory | file",
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "path"
+              ],
+              "type": "object"
+            },
             "stale_write_advisory": {
               "additionalProperties": false,
               "properties": {
@@ -1466,6 +1792,13 @@
             },
             "title": {
               "type": "string"
+            },
+            "warnings": {
+              "description": "Non-fatal notes, e.g. bind_git outside a git repository.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
             }
           },
           "required": [
@@ -2098,7 +2431,8 @@
                 "chain_seq_unknown",
                 "chain_head_mismatch",
                 "superseded_by_newer_head",
-                "tombstoned"
+                "tombstoned",
+                "stale_source"
               ],
               "type": "string"
             },
@@ -2108,12 +2442,137 @@
                 "null"
               ]
             },
+            "source_drift": {
+              "additionalProperties": false,
+              "description": "With STALE_SOURCE: the git-bound source file changed since binding.",
+              "properties": {
+                "bound_blob_sha": {
+                  "type": "string"
+                },
+                "bound_commit": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "detail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "diff_stat": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "bound_from": {
+                          "description": "Where the bound side of the diff came from.",
+                          "enum": [
+                            "git",
+                            "stored_revision",
+                            "none"
+                          ],
+                          "type": "string"
+                        },
+                        "deletions": {
+                          "maximum": 9007199254740991,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "files_changed": {
+                          "maximum": 9007199254740991,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "insertions": {
+                          "maximum": 9007199254740991,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "summary": {
+                          "description": "git diff --stat style line.",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "files_changed",
+                        "insertions",
+                        "deletions",
+                        "summary",
+                        "bound_from"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "doc_id": {
+                  "type": "string"
+                },
+                "head_commit": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "path": {
+                  "description": "Path inside repo_root, /-separated.",
+                  "type": "string"
+                },
+                "repo_root": {
+                  "type": "string"
+                },
+                "revision": {
+                  "description": "Revision whose put recorded the binding.",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991,
+                  "type": "integer"
+                },
+                "slug": {
+                  "type": "string"
+                },
+                "state": {
+                  "enum": [
+                    "current",
+                    "changed",
+                    "missing",
+                    "unavailable"
+                  ],
+                  "type": "string"
+                },
+                "working_blob_sha": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "slug",
+                "doc_id",
+                "revision",
+                "repo_root",
+                "path",
+                "bound_commit",
+                "bound_blob_sha",
+                "state",
+                "working_blob_sha",
+                "head_commit",
+                "diff_stat",
+                "detail"
+              ],
+              "type": "object"
+            },
             "status": {
               "enum": [
                 "VERIFIED",
                 "SUPERSEDED",
                 "TOMBSTONED",
-                "UNVERIFIED"
+                "UNVERIFIED",
+                "STALE_SOURCE"
               ],
               "type": "string"
             },
@@ -2314,5 +2773,5 @@
     "title": "kronicle-lite",
     "version": "0.3.0"
   },
-  "sha256": "c7e42de8222f92baed55208340476284fb6c2d2a8e8e3163cafaefeb9a05e7be"
+  "sha256": "fa8d1d6f50b1c461af859c6520515c621c7aee09be19f516a03e366b42a48dee"
 }

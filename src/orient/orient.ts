@@ -13,7 +13,7 @@ import type { Chain, ChainHead } from '../chain/index.js';
 import { GENESIS_HASH } from '../chain/genesis.js';
 import { canonicalize } from '../crypto/canonical.js';
 import { sha256Hex } from '../crypto/hash.js';
-import type { DocumentStore } from '../docs/documents.js';
+import type { DocumentStore, SourceDrift } from '../docs/documents.js';
 import { CursorTokenError, parseAnyCursor, serializeCompactCursor, serializeCursor } from './cursor.js';
 import { foldDelta, type PolicyOptions, type TypedDelta } from './delta.js';
 import {
@@ -90,6 +90,8 @@ export interface SystemState {
   stale_write_advisory: StaleWriteAdvisory;
   /** 0.4.0: latest anchor, or null when never anchored. */
   anchor: AnchorSummary | null;
+  /** 0.4.0: git-bound documents whose source file changed or vanished; null for focus=pulse. */
+  source_drift: SourceDrift[] | null;
   delta: TypedDelta | null;
   retractions: Retraction[] | null;
   digest: Digest | null;
@@ -265,6 +267,7 @@ export class Orient {
     let delta: TypedDelta | null = null;
     let retractions: Retraction[] | null = null;
     let digest: Digest | null = null;
+    let source_drift: SourceDrift[] | null = null;
 
     if (focus !== 'pulse') {
       const events = this.chain.since(recovery.from_seq);
@@ -280,9 +283,10 @@ export class Orient {
       }
       retractions = computeRetractions(events);
       if (focus === 'orientation' || recovery.method === 'genesis') digest = this.digest();
+      source_drift = this.docs.listSourceDrift();
     }
 
-    const next_steps = nextSteps({ focus, recovery, drift_banner, retractions });
+    const next_steps = nextSteps({ focus, recovery, drift_banner, retractions, source_drift });
     const lastAnchor = this.chain.lastAnchor();
     const anchor: AnchorSummary | null = lastAnchor
       ? {
@@ -308,6 +312,7 @@ export class Orient {
       drift_banner,
       stale_write_advisory,
       anchor,
+      source_drift,
       delta,
       retractions,
       digest,
@@ -342,6 +347,7 @@ function nextSteps(args: {
   recovery: Recovery;
   drift_banner: DriftBanner;
   retractions: Retraction[] | null;
+  source_drift: SourceDrift[] | null;
 }): string[] {
   const steps: string[] = [];
   if (args.recovery.cursor_error) {
@@ -359,6 +365,11 @@ function nextSteps(args: {
   if (args.retractions && args.retractions.length > 0) {
     steps.push(
       `Reconcile ${args.retractions.length} retraction(s)${safety ? ` (${safety} safety)` : ''} BEFORE acting: for each, affirm the current truth (cite seq), name the old claim once, and drop it as a decision premise.`,
+    );
+  }
+  if (args.source_drift && args.source_drift.length > 0) {
+    steps.push(
+      `${args.source_drift.length} git-bound document(s) no longer match their source file (Source drift): re-read the file before relying on the stored copy, then re-put it with bind_git.`,
     );
   }
   if (args.recovery.method === 'genesis') {

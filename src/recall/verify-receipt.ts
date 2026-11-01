@@ -9,15 +9,22 @@
  *   5. CHAIN       events[chain_seq].this_hash == chain_head_hash (seq 0 ⇒ genesis)
  *   6. CURRENCY    recursive superseded_by walk: head is this block and live ⇒
  *                  VERIFIED; head tombstoned ⇒ TOMBSTONED; other head ⇒ SUPERSEDED
+ *   7. SOURCE      (0.4.0) git-bound document whose working-tree file no longer
+ *                  has the bound blob ⇒ STALE_SOURCE (+ source_drift), else VERIFIED
  */
 
 import type { Chain } from '../chain/index.js';
 import { GENESIS_HASH } from '../chain/genesis.js';
 import type { Db } from '../db/open.js';
-import type { DocumentStore } from '../docs/documents.js';
+import type { DocumentStore, SourceDrift } from '../docs/documents.js';
 import { ReceiptSchema, verifyReceiptSignature, type Receipt } from './receipt.js';
 
-export type VerifyStatus = 'VERIFIED' | 'SUPERSEDED' | 'TOMBSTONED' | 'UNVERIFIED';
+/**
+ * STALE_SOURCE (0.4.0, additive): the block is current in the store, but the
+ * document is git-bound and its source file no longer has the bound blob.
+ */
+export type VerifyStatus = 'VERIFIED' | 'SUPERSEDED' | 'TOMBSTONED' | 'UNVERIFIED' | 'STALE_SOURCE';
+export const VERIFY_STATUSES = ['VERIFIED', 'SUPERSEDED', 'TOMBSTONED', 'UNVERIFIED', 'STALE_SOURCE'] as const;
 
 export const VERIFY_REASONS = [
   'verified',
@@ -32,6 +39,7 @@ export const VERIFY_REASONS = [
   'chain_head_mismatch',
   'superseded_by_newer_head',
   'tombstoned',
+  'stale_source',
 ] as const;
 export type VerifyReason = (typeof VERIFY_REASONS)[number];
 
@@ -46,6 +54,8 @@ export interface VerifyResult {
   tombstone_reason?: string | null;
   /** Length of the supersession walk (0 = block is its own head). */
   supersession_depth?: number;
+  /** Present with STALE_SOURCE: what changed in the bound source file. */
+  source_drift?: SourceDrift;
   checked_at: string;
   chain_head: { seq: number; hash: string };
 }
@@ -127,6 +137,11 @@ export class ReceiptVerifier {
         { current_block_id: head.block_id, current_content_hash: head.content_hash, supersession_depth: depth },
         ids,
       );
+    }
+    // 7. SOURCE (0.4.0): a git-bound document whose file moved on.
+    const drift = this.docs.sourceDrift(block.doc_id);
+    if (drift && (drift.state === 'changed' || drift.state === 'missing')) {
+      return fail('stale_source', 'STALE_SOURCE', { supersession_depth: 0, source_drift: drift }, ids);
     }
     return fail('verified', 'VERIFIED', { supersession_depth: 0 }, ids);
   }

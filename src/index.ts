@@ -23,6 +23,7 @@ export {
   PATH_SLUG_RE,
   type DocumentSource,
   type GitBinding,
+  type SourceDrift,
   type BlockRow,
   type DocumentRow,
   type PutDocumentResult,
@@ -32,12 +33,13 @@ export {
 export { parseMarkdown, renderBlocks, normalizeMarkdown, type ParsedBlock, type BlockKind } from './docs/parser.js';
 export * from './recall/receipt.js';
 export { Recall, toMatchExpression, type RecallInput, type RecallResult, type RecallHit } from './recall/recall.js';
-export { ReceiptVerifier, VERIFY_REASONS, type VerifyResult, type VerifyStatus, type VerifyReason } from './recall/verify-receipt.js';
+export { ReceiptVerifier, VERIFY_REASONS, VERIFY_STATUSES, type VerifyResult, type VerifyStatus, type VerifyReason } from './recall/verify-receipt.js';
 export * from './orient/index.js';
 export * as anchor from './anchor/index.js';
 export * as instructions from './instructions/index.js';
 export { InstructionWatcher, syncInstructionSet, resolveWatchSet, type WatchOptions, type WatchEvent } from './instructions/watch.js';
 export { syncInstructionFile, type SyncResult } from './instructions/sync.js';
+export { bindGit, checkGitBinding, diffStat, type BindResult, type SourceCheck, type DiffStat } from './git/binding.js';
 export {
   pushCheckpoint,
   tryPushCheckpoint,

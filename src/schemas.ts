@@ -22,7 +22,8 @@
 
 import { z } from 'zod';
 
-import { VERIFY_REASONS } from './recall/verify-receipt.js';
+import { VERIFY_REASONS, VERIFY_STATUSES } from './recall/verify-receipt.js';
+import { AUDIT_VERDICTS } from './orient/audit.js';
 import { ReceiptSchema } from './recall/receipt.js';
 import { FOCUSES, RECOVERY_METHODS } from './orient/orient.js';
 import { RETRACTION_KINDS } from './orient/retraction.js';
@@ -118,6 +119,31 @@ export const TypedDeltaSchema = z.object({
   }),
 });
 
+export const DiffStatSchema = z.object({
+  files_changed: z.number().int().nonnegative(),
+  insertions: z.number().int().nonnegative(),
+  deletions: z.number().int().nonnegative(),
+  summary: z.string().describe('git diff --stat style line.'),
+  bound_from: z.enum(['git', 'stored_revision', 'none']).describe('Where the bound side of the diff came from.'),
+});
+
+export const SourceDriftSchema = z
+  .object({
+    slug: z.string(),
+    doc_id: z.string(),
+    revision: z.number().int().positive().describe('Revision whose put recorded the binding.'),
+    repo_root: z.string(),
+    path: z.string().describe('Path inside repo_root, /-separated.'),
+    bound_commit: z.string().nullable(),
+    bound_blob_sha: z.string(),
+    state: z.enum(['current', 'changed', 'missing', 'unavailable']),
+    working_blob_sha: z.string().nullable(),
+    head_commit: z.string().nullable(),
+    diff_stat: DiffStatSchema.nullable(),
+    detail: z.string().nullable(),
+  })
+  .describe('A git-bound document compared with its working-tree source file.');
+
 export const AnchorSummarySchema = z
   .object({
     anchor_id: z.string(),
@@ -142,13 +168,15 @@ export const SystemStateSchema = z.object({
   drift_banner: DriftBannerSchema,
   stale_write_advisory: StaleWriteAdvisorySchema,
   anchor: AnchorSummarySchema.nullable().describe('null when the chain was never anchored.'),
+  source_drift: z
+    .array(SourceDriftSchema)
+    .nullable()
+    .describe('Git-bound documents whose source file changed or was deleted since binding; null for focus=pulse.'),
   delta: TypedDeltaSchema.nullable().describe('null for focus=retractions and focus=pulse.'),
   retractions: z.array(RetractionSchema).nullable().describe('null for focus=pulse.'),
   digest: DigestSchema.nullable().describe('Present on cold start and focus=orientation.'),
   next_steps: z.array(z.string()),
 });
-
-const AUDIT_VERDICTS = ['current', 'stale', 'contradicted', 'retracted', 'unknown'] as const;
 
 export const AuditSummarySchema = z.object({
   checked_at: z.string(),
@@ -161,6 +189,7 @@ export const AuditSummarySchema = z.object({
       kind: z.enum(['block', 'document', 'chain', 'unknown']),
       current: z.record(z.string(), z.unknown()).nullable().describe('The current truth for the symbol, when known.'),
       reconcile: z.string().nullable(),
+      source_drift: SourceDriftSchema.optional().describe('With stale_source: the bound file changed.'),
     }),
   ),
   counts: z.object({
@@ -169,6 +198,7 @@ export const AuditSummarySchema = z.object({
     contradicted: z.number().int().nonnegative(),
     retracted: z.number().int().nonnegative(),
     unknown: z.number().int().nonnegative(),
+    stale_source: z.number().int().nonnegative().optional().describe('Present when any claim is stale_source.'),
   }),
 });
 
@@ -198,7 +228,7 @@ export const RecallResultSchema = z.object({
 });
 
 export const VerifyResultSchema = z.object({
-  status: z.enum(['VERIFIED', 'SUPERSEDED', 'TOMBSTONED', 'UNVERIFIED']),
+  status: z.enum(VERIFY_STATUSES),
   reason: z.enum(VERIFY_REASONS),
   receipt_id: z.string().nullable(),
   block_id: z.string().nullable(),
@@ -206,6 +236,7 @@ export const VerifyResultSchema = z.object({
   current_content_hash: z.string().optional(),
   tombstone_reason: z.string().nullable().optional(),
   supersession_depth: z.number().int().nonnegative().optional(),
+  source_drift: SourceDriftSchema.optional().describe('With STALE_SOURCE: the git-bound source file changed since binding.'),
   checked_at: z.string(),
   chain_head: ChainHeadSchema,
 });
@@ -303,6 +334,21 @@ export const BlockSummarySchema = z.object({
   supersedes: z.string().optional().describe('The block this one replaced, when status=superseded.'),
 });
 
+export const DocumentSourceSchema = z
+  .object({
+    kind: z.string().describe('instruction | memory | file'),
+    path: z.string(),
+    git: z
+      .object({
+        repo_root: z.string(),
+        commit: z.string().nullable().describe('HEAD at put time; null in a repository without commits.'),
+        path: z.string().describe('Path inside repo_root, /-separated.'),
+        blob_sha: z.string().describe('git hash-object of the file at put time.'),
+      })
+      .optional(),
+  })
+  .describe('Provenance recorded in the document.put event.');
+
 export const PutDocumentResultSchema = z.object({
   doc_id: z.string(),
   slug: z.string(),
@@ -312,6 +358,8 @@ export const PutDocumentResultSchema = z.object({
   head: ChainHeadSchema,
   blocks: z.array(BlockSummarySchema),
   events: z.number().int().nonnegative().describe('Events appended by this call (0 on idempotent replay).'),
+  source: DocumentSourceSchema.optional(),
+  warnings: z.array(z.string()).optional().describe('Non-fatal notes, e.g. bind_git outside a git repository.'),
   stale_write_advisory: StaleWriteAdvisorySchema,
 });
 

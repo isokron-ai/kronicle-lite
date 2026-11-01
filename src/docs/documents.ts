@@ -18,6 +18,7 @@ import { randomUUID } from 'node:crypto';
 
 import type { Chain, ChainEvent, ChainHead } from '../chain/index.js';
 import { blake3Hex } from '../crypto/hash.js';
+import { checkGitBinding, type DiffStat, type SourceState } from '../git/binding.js';
 import type { Db } from '../db/open.js';
 import { normalizeMarkdown, parseMarkdown, renderBlocks, type BlockKind, type ParsedBlock } from './parser.js';
 
@@ -141,6 +142,23 @@ export interface GitBinding {
   blob_sha: string;
 }
 
+/** Result of comparing a git-bound document with its working-tree file (0.4.0). */
+export interface SourceDrift {
+  slug: string;
+  doc_id: string;
+  /** Revision whose put recorded the binding. */
+  revision: number;
+  repo_root: string;
+  path: string;
+  bound_commit: string | null;
+  bound_blob_sha: string;
+  state: SourceState;
+  working_blob_sha: string | null;
+  head_commit: string | null;
+  diff_stat: DiffStat | null;
+  detail: string | null;
+}
+
 export interface DocSourceRow {
   doc_id: string;
   slug: string;
@@ -223,6 +241,41 @@ export class DocumentStore {
         : this.db.prepare(`SELECT * FROM doc_sources WHERE kind = ? ORDER BY slug`).all(kind)
     ) as DocSourceRow[];
     return rows.map((r) => ({ ...r, source: JSON.parse(r.source_json) as DocumentSource }));
+  }
+
+  /**
+   * Compare a git-bound document with its working-tree file. null when the
+   * document has no git binding. Runs `git hash-object` (and `git cat-file`
+   * for the diff stat when the file changed).
+   */
+  sourceDrift(doc_id: string): SourceDrift | null {
+    const src = this.getSource(doc_id);
+    const g = src?.source.git;
+    if (!src || !g || typeof g.repo_root !== 'string' || typeof g.path !== 'string' || typeof g.blob_sha !== 'string') return null;
+    const check = checkGitBinding(g, this.getRevisionMarkdown(doc_id, src.revision));
+    return {
+      slug: src.slug,
+      doc_id,
+      revision: src.revision,
+      repo_root: g.repo_root,
+      path: g.path,
+      bound_commit: g.commit ?? null,
+      bound_blob_sha: g.blob_sha,
+      ...check,
+    };
+  }
+
+  /** Every git-bound document whose source drifted (changed or missing), up to `limit` checked. */
+  listSourceDrift(limit = 50): SourceDrift[] {
+    const out: SourceDrift[] = [];
+    let checked = 0;
+    for (const s of this.listSources()) {
+      if (!s.source.git) continue;
+      if (checked++ >= limit) break;
+      const d = this.sourceDrift(s.doc_id);
+      if (d && (d.state === 'changed' || d.state === 'missing')) out.push(d);
+    }
+    return out;
   }
 
   /** BLAKE3 of the current revision's markdown, or null for an unknown slug. */

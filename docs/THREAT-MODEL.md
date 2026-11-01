@@ -114,6 +114,17 @@ or a trusted single-user box reached over a tunnel you already protect. It is
 the base the hosted tier and the sea-lite team mode build on; it is not,
 by itself, a multi-user service. Treat the token like an SSH key.
 
+## Git binding (0.4.0)
+
+`bind_git` runs `git rev-parse` and `git hash-object` on the path you give.
+Over MCP that path is resolved by the server process: a client can learn
+whether a file exists and its blob hash (never its content) anywhere the
+server user can read. On stdio that is the same user as the client; over
+`serve --http` it is whoever holds the bearer token, which already reads
+and writes the whole store. `STALE_SOURCE` says the file changed since it
+was bound; it does not say who changed it, and a working tree is as
+writable as the database next to it.
+
 ## Assumed deployment
 
 - One user, one machine, one or more agents (Claude Code, Cursor, Claude

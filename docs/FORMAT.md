@@ -228,8 +228,11 @@ percent-encoded: `kronicle://docs/instructions%2Fclaude-md`.
 (a put without it hashes exactly as in 0.3.0):
 
 ```json
-{ "kind": "instruction" | "memory" | "file", "path": "CLAUDE.md" }
+{ "kind": "instruction" | "memory" | "file", "path": "CLAUDE.md",
+  "git": { "repo_root": "/abs/repo", "commit": "<40 hex> | null", "path": "docs/deploy.md", "blob_sha": "<40 hex>" } }
 ```
+
+`git` is present when the put was made with `bind_git` (§3.5).
 
 `path` is project-relative, `~/`-relative or absolute, always
 `/`-separated. The `doc_sources` table projects the latest put's `source`
@@ -237,6 +240,27 @@ per document (a later put without one clears it) and is rebuilt by `import`
 like every other projection table. A supersession or tombstone in an
 `instructions/` or `memory/` document is reported by orient as a retraction
 of kind `instruction`.
+
+### 3.5 Git binding (0.4.0, additive)
+
+`put --bind-git` / `put_document {bind_git: true, source_path}` records, for
+the source file, `repo_root = git rev-parse --show-toplevel`, `commit = git
+rev-parse --verify HEAD` (null before the first commit), `path` (inside
+`repo_root`, `/`-separated) and `blob_sha = git hash-object -- <path>` (the
+working-tree blob at put time, committed or not). Outside a repository the
+put succeeds without `git` and returns a warning.
+
+At check time the working-tree blob is recomputed the same way. When it
+differs (`changed`) or the file is gone (`missing`), receipt `verify`
+returns `STALE_SOURCE / stale_source` (in place of `VERIFIED` only: a
+superseded or tombstoned block keeps its status), `audit_assumptions`
+returns `stale_source` (in place of `current`), and orient lists the
+document under `source_drift`. Each carries a diff stat (insertions,
+deletions) between the bound content — `git cat-file blob <blob_sha>` when
+the object exists, else the stored revision's markdown — and the working
+file. A vanished repository or missing `git` is `unavailable`, not drift.
+Re-putting with `bind_git` rebinds; a put without `source` clears the
+binding.
 
 ## 4. Receipts (v2)
 
@@ -289,6 +313,7 @@ Fail-closed, in order:
 | `events[chain_seq].this_hash == chain_head_hash` (seq 0 ⇒ genesis) | `UNVERIFIED / chain_seq_unknown` or `chain_head_mismatch` |
 | lineage head tombstoned | `TOMBSTONED / tombstoned` |
 | lineage head is a different block | `SUPERSEDED / superseded_by_newer_head` (+ `current_block_id`, `current_content_hash`) |
+| document git-bound and its source blob moved (0.4.0, §3.5) | `STALE_SOURCE / stale_source` (+ `source_drift`) |
 | otherwise | `VERIFIED / verified` |
 
 ## 5. Cursors

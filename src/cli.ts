@@ -11,7 +11,7 @@
  *   kronicle-lite export [--data-dir DIR] [--out FILE]  JSONL of events (stdout default)
  *   kronicle-lite import [--data-dir DIR] --in FILE     into an empty store
  *   kronicle-lite keys [--data-dir DIR]                 show key id + public key
- *   kronicle-lite put SLUG FILE.md [--title T] [--data-dir DIR]
+ *   kronicle-lite put SLUG FILE.md [--title T] [--data-dir DIR] [--bind-git]
  *   kronicle-lite put --from-instructions [PATHS…] [--cwd DIR] [--json] [--stdin-hook]
  *   kronicle-lite watch [PATHS…] [--interval MS] [--debounce MS] [--poll] [--cwd DIR] [--list [--json]]
  *   kronicle-lite orient [--data-dir DIR] [--actor ID] [--cursor C] [--focus F]
@@ -26,6 +26,8 @@ import { anchorStatus, tryPushCheckpoint, verifyRemote, type AnchorCallOptions }
 import { AnchorApiError, AnchorUnreachableError } from './anchor/client.js';
 import { AnchorConfigError } from './anchor/config.js';
 import { defaultDataDir } from './db/open.js';
+import type { DocumentSource } from './docs/documents.js';
+import { bindGit } from './git/binding.js';
 import { DEFAULT_HTTP_PORT, loadOrCreateBearer, readBearerFile, serveHttp } from './http.js';
 import { createServerFactory, renderSystemStateMarkdown } from './server.js';
 import { KronicleLite } from './store.js';
@@ -120,6 +122,8 @@ Usage:
   kronicle-lite import       [--data-dir DIR] --in FILE           rebuild an EMPTY store from JSONL
   kronicle-lite keys         [--data-dir DIR]                     print key id + public key PEM
   kronicle-lite put SLUG FILE.md [--title T] [--data-dir DIR]     store a document
+                 [--bind-git]                                    record {repo_root, commit, path, blob_sha}; verify and
+                                                                 audit report stale_source when the file changes
   kronicle-lite put --from-instructions [PATHS…] [--cwd DIR] [--json]
                                                                  chain CLAUDE.md, AGENTS.md, .claude/rules/**/*.md,
                                                                  .cursor/rules/** and Claude Code auto memory (one shot)
@@ -349,13 +353,22 @@ async function main(argv: string[]): Promise<number> {
       const [slug, file] = positional;
       if (!slug || !file) throw new Error('put requires SLUG and FILE.md');
       const store = new KronicleLite({ dataDir });
+      const warnings: string[] = [];
+      let source: DocumentSource | undefined;
+      if (flags['bind-git'] === true) {
+        const b = bindGit(file);
+        source = b.binding ? { kind: 'file', path: b.binding.path, git: b.binding } : { kind: 'file', path: file.split(/[\\/]+/).join('/') };
+        if (b.warning) warnings.push(b.warning);
+      }
       const r = store.docs.putDocument({
         slug,
         title: str(flags['title']) ?? basename(file).replace(/\.md$/i, ''),
         markdown: readFileSync(file, 'utf8'),
         actor_id: str(flags['actor']) ?? 'cli',
+        ...(source !== undefined ? { source } : {}),
       });
-      process.stdout.write(JSON.stringify(r, null, 2) + '\n');
+      for (const w of warnings) process.stderr.write(`warning: ${w}\n`);
+      process.stdout.write(JSON.stringify({ ...r, ...(source !== undefined ? { source } : {}), ...(warnings.length > 0 ? { warnings } : {}) }, null, 2) + '\n');
       store.close();
       return 0;
     }

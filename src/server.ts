@@ -18,6 +18,8 @@ import { z } from 'zod';
 
 import { anchorStatus, tryPushCheckpoint, verifyLastAnchor } from './anchor/anchor.js';
 import { ChainConflictError } from './chain/index.js';
+import { bindGit } from './git/binding.js';
+import type { DocumentSource } from './docs/documents.js';
 import { DocumentError } from './docs/documents.js';
 import { FOCUSES, type SystemState } from './orient/orient.js';
 import {
@@ -331,12 +333,16 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
         'Store a Markdown document under a slug. A new slug creates revision 1; an existing slug creates the next revision: ' +
         'unchanged blocks keep their ids, changed blocks are superseded (old → new), removed blocks are tombstoned. Emits ' +
         'document.put + block.* events and returns every block id with its BLAKE3 content hash and the new chain head. ' +
-        'Pass your cursor so the response can tell you if you are writing on stale assumptions (advisory only).',
+        'Pass your cursor so the response can tell you if you are writing on stale assumptions (advisory only). ' +
+        'bind_git:true with source_path (the file the markdown came from) records {repo_root, commit, path, blob_sha}; ' +
+        'verify and audit_assumptions then report stale_source when that file changes. Outside git the put still succeeds, with a warning.',
       inputSchema: z.object({
         slug: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,127}$/).describe('lowercase letters, digits, . _ -'),
         title: z.string().min(1).max(300),
         markdown: z.string().max(2_000_000),
         idempotency_key: z.string().min(1).max(200).optional().describe('Replay-safe key; repeating it returns the first result.'),
+        source_path: z.string().min(1).max(4096).optional().describe('File the markdown came from (absolute, or relative to the server working directory).'),
+        bind_git: z.boolean().default(false).describe('Bind the document to source_path in its git repository (git rev-parse / hash-object).'),
         cursor: CURSOR,
         actor_id: ACTOR,
       }),
@@ -347,14 +353,33 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
       try {
         const actor_id = actorOf(args.actor_id);
         const stale_write_advisory = store.orient.staleWriteAdvisory(actor_id, args.cursor);
+        if (args.bind_git && !args.source_path) {
+          return errorResult(new DocumentError('invalid_source', 'bind_git requires source_path'));
+        }
+        const warnings: string[] = [];
+        let source: DocumentSource | undefined;
+        if (args.source_path !== undefined) {
+          source = { kind: 'file', path: args.source_path.split(/[\\/]+/).join('/') };
+          if (args.bind_git) {
+            const b = bindGit(args.source_path);
+            if (b.binding) source = { kind: 'file', path: b.binding.path, git: b.binding };
+            if (b.warning) warnings.push(b.warning);
+          }
+        }
         const result = store.docs.putDocument({
           slug: args.slug,
           title: args.title,
           markdown: args.markdown,
           actor_id,
           ...(args.idempotency_key !== undefined ? { idempotency_key: args.idempotency_key } : {}),
+          ...(source !== undefined ? { source } : {}),
         });
-        return json({ ...result, stale_write_advisory });
+        return json({
+          ...result,
+          ...(source !== undefined ? { source } : {}),
+          ...(warnings.length > 0 ? { warnings } : {}),
+          stale_write_advisory,
+        });
       } catch (err) {
         return errorResult(err);
       }
@@ -495,6 +520,17 @@ export function renderSystemStateMarkdown(s: SystemState): string {
   } else if (s.retractions) {
     lines.push('');
     lines.push('## Retractions: none');
+  }
+
+  if (s.source_drift && s.source_drift.length > 0) {
+    lines.push('');
+    lines.push(`## Source drift (${s.source_drift.length}) — the bound file changed; re-read it before relying on the stored copy`);
+    for (const d of s.source_drift) {
+      const stat = d.diff_stat ? ` (+${d.diff_stat.insertions} −${d.diff_stat.deletions})` : '';
+      lines.push(
+        `- \`${d.slug}\` ← ${d.path}: ${d.state === 'missing' ? 'file deleted' : `blob ${d.bound_blob_sha.slice(0, 12)} → ${d.working_blob_sha?.slice(0, 12) ?? '?'}`}${stat}; bound at ${d.bound_commit ? d.bound_commit.slice(0, 12) : 'no commit'}, HEAD ${d.head_commit ? d.head_commit.slice(0, 12) : 'none'}`,
+      );
+    }
   }
 
   if (s.digest) {

@@ -87,6 +87,24 @@ on; kronicle-lite's own DB, key and Merkle code replace the duplicates).
 - CLI arg parser: boolean flags never swallow the next positional;
   `--flag=value` accepted.
 
+### Added — git-aware blocks
+
+- `put --bind-git` / `put_document {bind_git: true, source_path}` record
+  `{repo_root, commit, path, blob_sha}` for the source file in the
+  `document.put` `source.git` field (FORMAT §3.5), via `git rev-parse` and
+  `git hash-object` (no libgit2).
+- Receipt `verify` gains status `STALE_SOURCE` / reason `stale_source`
+  and `audit_assumptions` the verdict `stale_source` when the working-tree
+  blob differs from the bound one (or the file is gone), with
+  `source_drift` (bound vs working blob, HEAD, diff stat from a built-in
+  Myers line diff against `git cat-file` or the stored revision). Only a
+  would-be `VERIFIED` / `current` is downgraded. `counts.stale_source`
+  appears only when non-zero, so the 0.3.0 counts shape is unchanged.
+- `get_system_state` gains `source_drift` (null for pulse); Markdown lists
+  drifted documents under "Source drift" and adds a next step.
+- Graceful outside git or without git: the put succeeds with a warning and
+  no binding; a vanished repository is `unavailable`, not drift.
+
 ## [0.3.0] — 2026-11-01
 
 MCP spec **2026-07-28** and the TypeScript SDK **v2**
