@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { chmodSync, existsSync, mkdirSync } from 'node:fs';
+import { chmodSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -10,6 +10,7 @@ import {
   loadOrCreateIdentity,
   type ServerIdentity,
 } from '../crypto/keys.js';
+import { ensureDir } from '../util/once-file.js';
 import { ADDED_COLUMNS, SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
 
 export type Db = Database.Database;
@@ -42,7 +43,7 @@ export function openDatabase(opts: OpenOptions = {}): Opened {
     dataDir = null;
   } else {
     dataDir = opts.dataDir ?? defaultDataDir();
-    mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+    ensureDir(dataDir, 0o700);
     const dbFile = join(dataDir, 'kronicle-lite.db');
     const fresh = !existsSync(dbFile);
     db = new Database(dbFile);

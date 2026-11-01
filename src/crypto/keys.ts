@@ -20,9 +20,9 @@ import {
   verify as edVerify,
   type KeyObject,
 } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { CorruptFileError, ensureDir, readOrCreateOnce } from '../util/once-file.js';
 import { sha256Hex } from './hash.js';
 
 export interface Signer {
@@ -95,34 +95,40 @@ export function ephemeralIdentity(): ServerIdentity {
   };
 }
 
-/** Load or create the identity files under `dataDir`. */
+/**
+ * Load or create the identity files under `dataDir`. Safe when several
+ * processes start at once on a fresh data dir: each file is published
+ * atomically and exclusively (first creator wins, the rest read its bytes),
+ * so every process ends up with the same key and secret.
+ */
 export function loadOrCreateIdentity(dataDir: string): ServerIdentity {
-  mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  ensureDir(dataDir, 0o700);
   const keyPath = join(dataDir, 'signing-key.pem');
   const secretPath = join(dataDir, 'cursor-secret');
 
-  let priv: KeyObject;
-  if (existsSync(keyPath)) {
-    priv = createPrivateKey(readFileSync(keyPath, 'utf8'));
-  } else {
-    const pair = generateKeyPairSync('ed25519');
-    priv = pair.privateKey;
-    writeFileSync(
-      keyPath,
-      priv.export({ type: 'pkcs8', format: 'pem' }) as string,
-      { mode: 0o600 },
-    );
-  }
+  const priv = readOrCreateOnce(
+    keyPath,
+    () => generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }) as string,
+    (text) => {
+      if (!text.includes('-----END')) return null;
+      try {
+        return createPrivateKey(text);
+      } catch {
+        return null;
+      }
+    },
+  ).value;
 
   let secret: string;
-  if (existsSync(secretPath)) {
-    secret = readFileSync(secretPath, 'utf8').trim();
-    if (!/^[0-9a-f]{64}$/.test(secret)) {
-      throw new Error(`${secretPath} is corrupt; expected 64 hex chars`);
-    }
-  } else {
-    secret = randomBytes(32).toString('hex');
-    writeFileSync(secretPath, secret + '\n', { mode: 0o600 });
+  try {
+    secret = readOrCreateOnce(
+      secretPath,
+      () => randomBytes(32).toString('hex') + '\n',
+      (text) => (/^[0-9a-f]{64}$/.test(text.trim()) ? text.trim() : null),
+    ).value;
+  } catch (err) {
+    if (err instanceof CorruptFileError) throw new Error(`${secretPath} is corrupt; expected 64 hex chars`);
+    throw err;
   }
 
   return { signer: signerFromPrivateKey(priv), cursor_secret: secret, data_dir: dataDir };

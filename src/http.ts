@@ -17,9 +17,11 @@
 import { createMcpHandler, type McpServerFactory } from '@modelcontextprotocol/server';
 import { hostHeaderValidation, originValidation, toNodeHandler } from '@modelcontextprotocol/node';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, readFileSync } from 'node:fs';
 import { createServer as createHttpServer, type IncomingMessage, type Server as NodeHttpServer, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
+
+import { CorruptFileError, readOrCreateOnce } from './util/once-file.js';
 
 export const DEFAULT_HTTP_PORT = 7417;
 export const DEFAULT_HTTP_PATH = '/mcp';
@@ -58,15 +60,22 @@ const LOOPBACK = ['localhost', '127.0.0.1', '[::1]'];
  */
 export function loadOrCreateBearer(dataDir: string): { token: string; created: boolean; file: string } {
   const file = join(dataDir, BEARER_FILE_NAME);
-  if (existsSync(file)) {
-    const token = readFileSync(file, 'utf8').trim();
-    if (token.length === 0) throw new Error(`${file} is empty; delete it to regenerate or pass --bearer`);
-    return { token, created: false, file };
+  let r: { value: string; created: boolean };
+  try {
+    // Concurrent first starts agree on one token (see util/once-file.ts).
+    r = readOrCreateOnce(file, () => randomBytes(32).toString('base64url') + '\n', (t) => (t.trim().length > 0 ? t.trim() : null), { waitMs: 500 });
+  } catch (err) {
+    if (err instanceof CorruptFileError) throw new Error(`${file} is empty; delete it to regenerate or pass --bearer`);
+    throw err;
   }
-  const token = randomBytes(32).toString('base64url');
-  writeFileSync(file, token + '\n', { mode: 0o600, flag: 'wx' });
-  chmodSync(file, 0o600);
-  return { token, created: true, file };
+  if (r.created) {
+    try {
+      chmodSync(file, 0o600);
+    } catch {
+      // best effort (no-op on Windows)
+    }
+  }
+  return { token: r.value, created: r.created, file };
 }
 
 export function readBearerFile(file: string): string {
