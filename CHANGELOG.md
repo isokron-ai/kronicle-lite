@@ -101,7 +101,7 @@ are additive; one local column (`receipts.actor_id`) is added on open.
 - Catalog re-pinned: `0c25eb80d24f3cecab677dabcfc139f970c0440391a53539d5a820bb265e5e64`
   (core: `47b3f289201a66ec3983fc82e60d355af1da1869a6563ed00efb55f5e0227b42`).
 
-## [0.5.0] — unreleased
+## [0.5.0] — 2026-11-01
 
 Fixes from an adoption audit (B3, B4, G3, G4, G5, G6, H2 and the first-run
 items). No hash recipe, receipt, checkpoint or cursor layout changed: every
