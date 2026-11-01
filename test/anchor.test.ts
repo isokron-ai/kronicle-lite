@@ -146,7 +146,7 @@ describe('FORMAT §1.2 / §2 reproduce on a 0.4.0 database (guards the anchor ro
   });
 });
 
-describe.each(backends)('anchoring against the $name backend', ({ start }) => {
+describe.each(backends)('anchoring against the $name backend', { timeout: 60_000 }, ({ start }) => {
   let b: AnchorBackend;
   beforeAll(async () => {
     b = await start();
@@ -406,7 +406,8 @@ describe.each(backends)('anchoring against the $name backend', ({ start }) => {
   });
 });
 
-describe('anchor service unreachable never breaks local operation', () => {
+// Refused loopback connects take ~2 s each on Windows (SYN retries); give these room.
+describe('anchor service unreachable never breaks local operation', { timeout: 60_000 }, () => {
   let html: Server;
   let htmlUrl: string;
   let hang: Server;

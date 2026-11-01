@@ -1,0 +1,4 @@
+# Check out LF everywhere (incl. Windows CI) so fixtures, docs and the
+# catalog snapshot are byte-identical across platforms.
+* text=auto eol=lf
+*.png binary

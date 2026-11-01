@@ -65,6 +65,7 @@ describe('doctor', () => {
       'catalog',
       'anchor-reachable',
       'mcp-clients',
+      ...(POSIX ? [] : ['windows']),
     ]);
     expect(check(r, 'chain').detail).toMatch(/full chain link and hash; 1 checkpoint\(s\) valid/);
     expect(check(r, 'fts')).toMatchObject({ status: 'ok' });

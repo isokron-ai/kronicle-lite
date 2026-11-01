@@ -7,7 +7,7 @@
 
 import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
-import { rmSync, unlinkSync } from 'node:fs';
+import { renameSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -143,7 +143,8 @@ describe('bind_git', () => {
     // A vanished repository is "unavailable", not drift.
     const { root, file: f2 } = repo();
     const { put } = putBound(store, f2);
-    rmSync(root, { recursive: true, force: true });
+    // Move the repository away rather than delete it (git object files are read-only on Windows).
+    renameSync(root, `${root}-gone`);
     expect(store.docs.sourceDrift(put.doc_id)).toMatchObject({ state: 'unavailable' });
     expect(store.orient.getSystemState({ actor_id: 'y' }).source_drift).toEqual([]);
     store.close();

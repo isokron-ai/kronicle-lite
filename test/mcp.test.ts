@@ -334,7 +334,7 @@ describe.skipIf(!existsSync(CLI))('MCP server over stdio (built CLI, modern clie
 
   afterAll(async () => {
     await client.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
   it('probes with server/discover, lands on 2026-07-28, and answers tools/list and tools/call', async () => {
@@ -438,7 +438,7 @@ describe.skipIf(!existsSync(CLI))('raw JSON-RPC over stdio: era behavior of the 
       expect(refused.error).toBeDefined();
     } finally {
       await rpc.close();
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -482,7 +482,7 @@ describe.skipIf(!existsSync(CLI))('raw JSON-RPC over stdio: era behavior of the 
       expect(late.error.code).toBe(-32022);
     } finally {
       await rpc.close();
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 });
@@ -508,7 +508,7 @@ describe.skipIf(!existsSync(CLI))('raw JSON-RPC over stdio: unsupported version 
       expect(d.result.supportedVersions).toEqual([MODERN]);
     } finally {
       await rpc.close();
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 });
@@ -530,12 +530,13 @@ describe('Streamable HTTP (2026-07-28 only, bearer, loopback)', () => {
   afterAll(async () => {
     await http.close();
     store.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
   it('bearer file is created once with mode 0600 and reused', () => {
     const file = join(dir, 'http-bearer.token');
-    expect(statSync(file).mode & 0o777).toBe(0o600);
+    // POSIX only: Windows does not enforce file modes (chmod 0600 is a no-op there).
+    if (process.platform !== 'win32') expect(statSync(file).mode & 0o777).toBe(0o600);
     expect(bearer.length).toBeGreaterThanOrEqual(32);
     const again = loadOrCreateBearer(dir);
     expect(again).toEqual({ token: bearer, created: false, file });
