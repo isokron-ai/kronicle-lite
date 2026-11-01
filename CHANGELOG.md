@@ -58,6 +58,48 @@ uses semantic versioning once past 0.x.
 - Contract: additive only. Every existing field keeps its meaning;
   `retractions[].kind` gains the value `derived`.
 
+### Added — exec-time pulse shims (any client)
+
+- `kronicle-lite shim install|status|ack|uninstall [--dir D] [--commands …]
+  [--world "make release,docker push"] [--data-dir …] [--mode deny|warn]`:
+  tiny wrappers on PATH for `git`, `terraform`, `tofu`, `kubectl`, `helm`,
+  `npm`, `pnpm`, `yarn` (plus `oc`, `make` and user commands on request)
+  that check kronicle-lite at the moment the real binary runs. Covers
+  clients without hooks (Cursor, Codex, Hermes, humans, CI) and the cases a
+  pre-call check cannot see (a change during `build && deploy`, deploys
+  inside `make release`, `bash -c`, wrapper scripts). Council round 2
+  "PATH shims" + "action permits".
+- POSIX sh wrappers decide with shell builtins only: read-only invocations
+  (`git status`, `terraform plan`, `kubectl get`) exec the real binary with
+  ~1 ms overhead and no node start. World-changing ones (`git push|subtree
+  push|lfs push`, `terraform|tofu apply|destroy`, `kubectl apply|delete|
+  patch|replace|rollout …`, `helm install|upgrade|uninstall|rollback`,
+  `npm|pnpm|yarn publish`, `run deploy|release|…`, user patterns; tool
+  global options skipped as in cc-anchor's pulse matcher) run the pulse
+  (~0.2 s) and are refused with exit 77 and the retraction diff on stderr
+  while a blocking retraction is unreconciled. `kronicle-lite shim ack
+  --through SEQ` clears the gate per project, never past SEQ.
+- Fail open (noted once, logged) when kronicle-lite is missing, broken or
+  times out (`KRONICLE_SHIM_TIMEOUT`, default 10 s); fail closed on a store
+  integrity failure, in warn mode too. Real binary resolved on PATH minus
+  the shim dir; self-recursion guarded (same-process exec chain via
+  `KRONICLE_SHIM_EXEC`, nesting depth 8 via `KRONICLE_SHIM_DEPTH`).
+  Install refuses system directories, non-shim files and symlinks;
+  uninstall removes only marker-carrying files.
+- Windows: `.cmd`/`.ps1` wrappers delegate to `kronicle-lite shim exec`
+  (same decision in TypeScript; one node start per call; not yet run on a
+  Windows machine).
+- `kronicle-lite pulse [--cursor C | --state D] [--mode] [--json] [-- CMD…]`:
+  the check as one CLI call for any hook — orient `focus=retractions` plus
+  the integrity pass → `allow | deny | warn | seed`; exit 0 / 77 / 3 (no store).
+- docs/PUSH.md § Shims (matcher table, acknowledgement, recursion, Cursor /
+  Codex / Hermes set-up); README section. Tests: a 105-case decision table
+  run through the TypeScript classifier and the generated sh under dash and
+  bash, wrapper end-to-end in temp dirs (argv byte-exact, PATH spellings,
+  exec-wrapper and child-wrapper recursion, deny/ack/warn, per-project ack,
+  integrity in both modes, fail-open on no store / missing CLI / timeout,
+  install safety), and the read-only overhead measurement.
+
 ### Bench (agent-memory-bench Track A, branch `kl-lineage`, 20 seeds)
 
 - **S1 next-session stale copy served unmarked: 20/20 → 0/20**

@@ -188,3 +188,189 @@ The wake contract and the orient skill carry the rule instead: call
 (deploy, migrate, publish, `git push`, sending messages, paying), not only
 before kronicle write tools. With nothing new, the answer is one line
 (under 100 bytes); otherwise reconcile the retractions first.
+
+That rule depends on the agent following it. For the commands that matter
+most, a [shim](#shims-exec-time-pulse-for-any-client) enforces it at
+exec time in any client, hooks or not.
+
+## Shims: exec-time pulse for any client
+
+*Unreleased.* A push hook needs a client with hooks, and a check made before
+a Bash call cannot see a change that lands while the call runs
+(`build && migrate && deploy`), nor a deploy hidden in `make release`,
+`bash -c "$CMD"` or a wrapper script. A shim checks at the moment the real
+binary is executed, whatever started it: Claude Code, Cursor, Codex, Hermes,
+a CI script or a human.
+
+```sh
+kronicle-lite shim install [--dir D] [--commands git,terraform,tofu,kubectl,helm,npm,pnpm,yarn]
+                           [--world "make release,docker push,gh release create"]
+                           [--data-dir DIR] [--mode deny|warn] [--windows]
+export PATH="D:$PATH"          # D FIRST on PATH (default D: ~/.kronicle-lite/shims)
+kronicle-lite shim status      # per tool: active on PATH? real binary? anything blocking in this project?
+kronicle-lite shim ack --through SEQ   # after reconciling a denial (the denial prints SEQ)
+kronicle-lite shim uninstall   # removes only files carrying the shim marker, plus D/.kronicle-shim
+```
+
+`status`, `ack` and `uninstall` use the first shim dir on PATH when `--dir`
+is left out. Install refuses system directories (`/`, `/bin`, `/usr/…`,
+`/etc`, `/dev`, …), never overwrites a file that is not one of its shims,
+and never writes through a symlink.
+
+### What a shim does
+
+1. **Decide** with shell builtins only (no node, no subshell): is this
+   invocation world-changing? If not, `exec` the real binary. Overhead for
+   `git status` through the shim: about 1 ms (median of 60 runs, Linux,
+   dash; `test/shim.test.ts` prints it).
+2. **Pulse** when it is: run `kronicle-lite pulse --state D/.kronicle-shim
+   --cwd "$PWD" -- <command>` with the shim dir removed from PATH, bounded
+   by `timeout` (or perl's `alarm` where there is no `timeout`;
+   `KRONICLE_SHIM_TIMEOUT` seconds, default 10). About 0.2 s, mostly node
+   start-up.
+3. **Exit 77** with the reason on stderr when the pulse refuses; otherwise
+   `exec` the real binary with the original argv, stdin and exit code.
+
+| pulse outcome | shim |
+|---|---|
+| exit 0 (allow, warn, first check) | runs the command |
+| exit 77 (unreconciled retractions, or an integrity failure) | refuses: exit 77, nothing runs |
+| anything else: no store (exit 3), CLI missing, crash, timeout (124/137/142) | **fail open**: runs the command; one line on stderr the first time (`D/.kronicle-shim/unavailable` marks it; cleared on the next good check), every occurrence logged in `D/.kronicle-shim/shim.log`, the reason in `last-error` |
+
+An **integrity failure** (an event or live block no longer matches the
+chain) refuses world-changing commands in `deny` **and** `warn` mode: fail
+closed, until `kronicle-lite verify-chain` / `doctor` / `rebuild` clear it.
+(cc-anchor's PreToolUse pulse with `pulse_mode: warn` only warns; the shim
+is the last line, so it does not.)
+
+### What counts as world-changing
+
+Same matcher semantics as cc-anchor's pulse (`scripts/pulse.jq`): the
+tool's own global options are skipped before the verb, and only the verb
+position counts (`git commit -m "git push"` is a commit). A shim sees argv
+after the shell removed quotes, so `"git" "push"` is `git push`.
+
+| tool | world-changing | read-only exceptions | global options skipped (with a value) |
+|---|---|---|---|
+| `git` | `push`, `subtree push`, `lfs push` | `--help` anywhere | `-C`, `-c`, `--git-dir`, `--work-tree`, `--namespace`, `--exec-path`, `--super-prefix`, `--config-env` (`--x=v` forms always) |
+| `terraform`, `tofu` | `apply`, `destroy` | `--help` | `-chdir=…` |
+| `kubectl`, `oc` | `apply`, `delete`, `patch`, `replace`, `rollout`, `create`, `scale`, `set`, `edit`, `label`, `annotate`, `drain`, `cordon`, `uncordon`, `taint`, `autoscale`, `expose` | `rollout status`, `rollout history`, `--help` | `-n`, `--namespace`, `--context`, `--kubeconfig`, `--cluster`, `--user`, `-s`, `--server`, `--as`, `--token`, … |
+| `helm` | `install`, `upgrade`, `uninstall` (`delete`, `del`, `un`), `rollback` | `--help` | `-n`, `--namespace`, `--kube-context`, `--kubeconfig`, … |
+| `npm`, `pnpm`, `yarn` | `publish` (`yarn npm publish`); `run`/`run-script` SCRIPT and, for pnpm/yarn, a bare SCRIPT whose name contains the word `deploy`, `migrate`, `publish` or `release` (`deploy:prod`, `db-migrate`; not `predeploy`) | `--help` | `--prefix`, `-w`, `--workspace`, `-C`, `--dir`, `--filter`, `--cwd`, `--registry`, … |
+| `make` (opt-in) | any target with one of those words (`make release`, `make -C sub deploy`) | `--help`; `VAR=value` arguments | — |
+| `--world "TOOL WORD…"` | that verb sequence as a prefix (`docker push`, `gh release create`, `aws s3 *`: `*` = any one word) | | |
+| `--world "TOOL"`, or a `--commands` name with no rules | every invocation (a deploy script) | | |
+
+Conservative where it is cheap: when the word before the verb is an option
+the table does not know, it may have taken the verb position as its value
+(`npm --registry https://r publish`, `kubectl --new-flag v apply`), so the
+next word is tried as the verb too. A false positive costs one pulse; a
+miss costs a stale deploy. The table is `src/shim/rules.ts`; the decision
+table in `test/shim-rules.test.ts` (100+ cases) runs through both the
+TypeScript classifier and the generated sh (dash and bash) and requires them
+to agree.
+
+Not seen: git aliases (`git p` for `git push`), commands run by absolute
+path (`/usr/bin/git push`), and anything that edits PATH first. A shim is a
+guard rail for agents that act in good faith, not a security boundary.
+
+### Acknowledging
+
+The shim keeps one cursor per project (the project of the working
+directory: the same key `orient --cwd` uses) in `D/.kronicle-shim/cursors/`,
+starting from the head at install time.
+
+- **Denied** (blocking retractions since the cursor: severity `safety` or
+  `behavioral`; format-only edits are never retractions): the cursor does
+  **not** move, so a plain retry is refused again. Re-read the documents,
+  then `kronicle-lite shim ack --through SEQ` (SEQ = the head the denial
+  printed). A change after SEQ still blocks: acknowledging 42 never
+  clears 43. Acknowledging in one project does not clear another.
+- **Allowed**: the cursor moves to the head. Informational retractions are
+  printed on stderr and do not block.
+- **Warn mode**: the denial text is printed, the cursor moves, the command
+  runs.
+
+### `kronicle-lite pulse` (the check itself)
+
+```sh
+kronicle-lite pulse [--data-dir DIR] [--cwd DIR] [--cursor C | --state D] [--mode deny|warn] [--json] [--all-projects] [-- CMD…]
+```
+
+Usable from any hook. Exit 0 = allow (also warn and a first check), 77 =
+refused (message on stderr), 3 = no store / store unreadable. Without
+`--cursor` or `--state` it records the head (`decision: "seed"`); with
+`--cursor C` it judges the retractions since C and leaves storing the
+returned `cursor` to the caller; with `--state D` it keeps the per-project
+cursors itself. `--json` prints one object:
+
+| field | meaning |
+|---|---|
+| `decision` | `allow` \| `deny` \| `warn` \| `seed` |
+| `reason` | `clear` \| `retractions` \| `integrity` \| `seeded` \| `genesis` (unreadable cursor: re-seeded) |
+| `blocking[]`, `informational[]` | retractions (same shape as orient's `retractions[]`) |
+| `cursor` | carry it: the head when allowed / warned, the unchanged cursor when denied |
+| `ack_through` | denied for retractions: acknowledge through this seq |
+| `integrity` | orient's integrity summary (`ok: false` ⇒ `decision: "deny"`) |
+| `message` | the text a shim prints on stderr (null: nothing to say) |
+| `head`, `from_seq`, `recovery`, `project_keys`, `hidden_retractions` | as in orient |
+
+### Recursion and PATH resolution
+
+The real binary is the first executable `TOOL` on PATH outside the shim
+dir, as installed (physical and logical path) and as reached (`${0%/*}`),
+so a trailing slash, a duplicate or a symlinked alias of the dir on PATH
+does not loop. When an `exec` lands on a shim again in the same process (a
+wrapper earlier on PATH that `exec`s the tool by name), the shim sees
+`KRONICLE_SHIM_EXEC=<its own pid>:…`, skips the dirs already tried and does
+not pulse twice; a wrapper that calls the tool in a child process stops
+after 8 nested shim calls (`KRONICLE_SHIM_DEPTH`, exit 126). Real binary
+not found: exit 127.
+
+### Windows
+
+`--windows` (default on Windows) writes `TOOL.cmd` and `TOOL.ps1`, which
+run `kronicle-lite shim exec --dir D --tool TOOL -- ARGS…`: the same
+decision in TypeScript, the pulse in-process, then the real binary
+(PATHEXT-aware, skipping any file that carries the shim marker). That is
+one node start per call, read-only or not; the zero-overhead path is
+POSIX only. Not yet exercised on a Windows machine.
+
+### Client set-up
+
+The shim works wherever the agent's shell inherits a PATH with `D` first.
+
+- **Claude Code**: start `claude` from a shell whose profile puts `D`
+  first. Shims complement the cc-anchor PreToolUse pulse (which sees the
+  whole Bash call and can split chains) at the exec boundary.
+- **Cursor** (agent terminal = integrated terminal), `settings.json`:
+
+  ```json
+  {
+    "terminal.integrated.env.osx":   { "PATH": "/Users/me/.kronicle-lite/shims:${env:PATH}" },
+    "terminal.integrated.env.linux": { "PATH": "/home/me/.kronicle-lite/shims:${env:PATH}" }
+  }
+  ```
+
+- **Codex CLI**: start `codex` from a shell with `D` first (its shell tool
+  inherits the environment by default). If `~/.codex/config.toml` sets
+  `[shell_environment_policy]`, keep PATH inherited, or set it in full
+  there (values are not expanded):
+
+  ```toml
+  [shell_environment_policy]
+  set = { PATH = "/home/me/.kronicle-lite/shims:/usr/local/bin:/usr/bin:/bin" }
+  ```
+
+- **Hermes** (local terminal backend): start `hermes` from a shell with `D`
+  first. With a docker / ssh / remote terminal backend, install the shims
+  inside that environment (`npx kronicle-lite shim install` there, pointing
+  `--data-dir` at a store it can read).
+- **Any agent or CI job**: `export PATH="$HOME/.kronicle-lite/shims:$PATH"`
+  before it starts; check with `kronicle-lite shim status` from the same
+  environment ("active" per tool).
+
+Tell the agent what exit 77 means in its instructions, e.g.: *"A command
+that exits 77 with `kronicle-lite shim: did NOT run` was refused because a
+document you rely on changed: re-read it, check the command's values, run
+the `kronicle-lite shim ack` line it printed, then run the command again."*
