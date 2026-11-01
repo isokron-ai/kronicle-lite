@@ -15,11 +15,21 @@ to land. Open an issue if one matters to you.
   `watch` and `put --from-instructions` with retraction kind
   `instruction`; `bind_git` with `STALE_SOURCE` / `stale_source` and a
   Source drift section; `kronicle-lite doctor`; Windows CI.
-- **0.6.0 (unreleased) — honest labels.** `can_act / inspect_only /
+- **0.5.0 — integrity and diet.** Every read re-hashes the text it serves
+  (tampered text is withheld), project-keyed instructions, retractions with
+  old/new text, `demo`, `rebuild`, tools/list 43 KB → 12 KB.
+- **0.6.0 — honest labels.** `can_act / inspect_only /
   never_act` on every recall hit (block-level evidence only for
   `can_act`), honest absence, attention rerank, secret guard on every write
   path with an independent read-time scrub, `serve --core`, recall content
   caps. See docs/HONESTY.md.
+- **0.7.0 — never hide a real change.** Format-only edits (whitespace,
+  reflow, emphasis, list markers) stay quiet; every other change is a
+  retraction (38-case adversarial corpus, property and mutation tests).
+  Section moves retract; corrupt events report `integrity.ok=false`;
+  project-scoped recall; decision text through compaction; one-line
+  "nothing changed"; atomic first start (Linux, macOS, Windows);
+  docs/PUSH.md hook contract.
 
 ## Next
 
