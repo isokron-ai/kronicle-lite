@@ -1,6 +1,6 @@
 {
   "name": "kronicle-lite",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Local-first MCP server: hash-chained document store with signed retrieval receipts and an agent orient (staleness/drift) protocol.",
   "license": "Apache-2.0",
   "type": "module",

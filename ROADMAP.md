@@ -15,6 +15,11 @@ to land. Open an issue if one matters to you.
   `watch` and `put --from-instructions` with retraction kind
   `instruction`; `bind_git` with `STALE_SOURCE` / `stale_source` and a
   Source drift section; `kronicle-lite doctor`; Windows CI.
+- **0.6.0 (unreleased) — honest labels.** `can_act / inspect_only /
+  never_act` on every recall hit (block-level evidence only for
+  `can_act`), honest absence, attention rerank, secret guard on every write
+  path with an independent read-time scrub, `serve --core`, recall content
+  caps. See docs/HONESTY.md.
 
 ## Next
 

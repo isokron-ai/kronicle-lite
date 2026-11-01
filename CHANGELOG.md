@@ -4,6 +4,103 @@ All notable changes to kronicle-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
+## [0.6.0] — unreleased
+
+Honest labels: deterministic, LLM-free checks ported from IsoKron
+(`packages/reality` retrieval-honesty-tags and the C-1 inherit ladder,
+`sb1-substrate-shapes` certify-absence, `library-retrieval`
+attention-decay recall, `sextant-scrub`). Additive only: no hash recipe,
+receipt, checkpoint, cursor or event layout changed; the 0.3.0 export
+fixture imports, verifies and re-exports byte-for-byte. New result fields
+are additive; one local column (`receipts.actor_id`) is added on open.
+
+### Added — authority on every recall hit
+
+- Each hit carries `authority` (`can_act | inspect_only | never_act`),
+  `authority_reason` and `authority_basis` (`block | document | none`);
+  the result carries `authority_floor` (meet of the hits; `null` when
+  empty, so an empty result is never permission). `withheld` entries say
+  `never_act / integrity_failed`.
+- Only block-level evidence reaches `can_act`: the block's exact text
+  (same kind, same BLAKE3) found at recall time in the document's recorded
+  source file (git binding, absolute or `~/` path, or an instruction file's
+  project root). Document-level provenance caps at `inspect_only`; a
+  block superseded after binding is `never_act / not_in_source` even while
+  the file's blob still matches. Superseded, tombstoned, missing-source and
+  withheld are never `can_act`; model-written memory (`source.kind:
+  memory`) caps at `inspect_only`. Rule table: new `docs/HONESTY.md`.
+
+### Added — honest absence
+
+- Every recall result carries `absence {searched, not_searched,
+  index_fresh, verdict, reason}`. `absent_in_searched` only from a fresh
+  index with nothing withheld; `cannot_certify` when the index is stale
+  (projection behind the chain's last document event) or cold (full-text
+  index short of the block count), a match was withheld, or the query had
+  no searchable terms. Scopes: `live_blocks`, `tombstoned_blocks`,
+  `superseded_blocks`; no global "not found".
+- `get_system_state`: `scope.verdict` (`complete | partial`). A briefing
+  that hid other projects' instruction retractions says "Retractions: none
+  in this project (partial view)" and adds a next step that they were not
+  reviewed.
+
+### Added — attention rerank
+
+- `recall` takes `cursor` and `actor_id`: hits the actor already read
+  since the orient that issued its cursor (else its latest orient) are
+  ranked lower (relevance × 0.5, stable), never hidden; `already_read` per
+  hit, `attention {actor_id, session_since, already_read}` per result.
+  `score` stays raw bm25. Reads are recorded in the new local
+  `receipts.actor_id` column (not in the signed receipt).
+- `Orient.sessionStart(actor, cursor?)`, `FlightRecorder.briefingAt()`.
+
+### Added — secret guard
+
+- Write time: `put_document`, `supersede_block`, `tombstone_block`
+  (reason), `kronicle-lite put`, `put --from-instructions`, `watch` and
+  `import` scan for API keys and tokens (AWS, GitHub, GitLab, Anthropic,
+  OpenAI, Slack, Stripe, Google, npm, Vault, Doppler), private keys, JWTs,
+  password-bearing connection strings, bearer headers and sensitive
+  assignments, and refuse before anything is chained
+  (`secret_detected`, findings `{field, detector, line}`, never the
+  secret). Overrides: `redact_secrets: true` / `--redact-secrets` chains a
+  `[REDACTED:<detector>]` copy and returns `redactions`; `import
+  --allow-secrets` imports verbatim (chained bytes cannot be redacted).
+  A refused instruction file syncs as `error`; in redact mode an unchanged
+  file stays `unchanged`.
+- Read time, an independent broader ruleset: `recall` content (hit gains
+  `read_scrubbed` and loses `can_act`), orient retraction text and delta
+  payloads, `audit_assumptions`, `kronicle://docs/{slug}`.
+- Why: the chain is append-only; a tombstone hides a block but cannot
+  erase a chained secret from the events, exports or backups
+  (THREAT-MODEL.md "Secrets"). IsoKron's entropy detector and CLI
+  grammars are not ported (noisy on Markdown and code).
+
+### Added — small contexts
+
+- `serve --core` (`profile: 'core'`, `CORE_TOOLS`): six tools —
+  `get_system_state`, `audit_assumptions`, `recall`, `verify`,
+  `put_document`, `supersede_block`. `tools/list` 9,865 bytes vs 13,628
+  for the full profile (JSON of `{tools}` over stdio). Pinned separately:
+  `.mcp-catalog/kronicle-lite-core.json`, `CORE_CATALOG_FINGERPRINT`.
+- `recall` `max_chars` (default 16000): content over budget is cut
+  (short hits stay whole) with `truncated {shown_chars, total_chars,
+  read: "kronicle://docs/<slug>"}` per hit and `truncated {hits,
+  max_chars, hint}` per result. Receipts still cover the whole block.
+
+### Changed
+
+- `kronicle-lite demo` gains step 7: a put holding an AWS key is refused
+  with nothing chained, an empty recall answers `absent_in_searched` with
+  the scopes it did not search, and a hit shows `inspect_only (no_source)`.
+  The chain-edit step is now 8.
+- `tools/list` (full profile): 12,441 → 13,628 bytes (the new recall
+  inputs, `redact_secrets`, and the new top-level result fields).
+- Flight-recorder `delta_hash` is computed over the briefing as served,
+  i.e. after the read-time scrub.
+- Catalog re-pinned: `0c25eb80d24f3cecab677dabcfc139f970c0440391a53539d5a820bb265e5e64`
+  (core: `47b3f289201a66ec3983fc82e60d355af1da1869a6563ed00efb55f5e0227b42`).
+
 ## [0.5.0] — unreleased
 
 Fixes from an adoption audit (B3, B4, G3, G4, G5, G6, H2 and the first-run

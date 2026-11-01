@@ -21,7 +21,7 @@ import { KronicleLite } from './store.js';
 
 export const CATALOG_FINGERPRINT = '0c25eb80d24f3cecab677dabcfc139f970c0440391a53539d5a820bb265e5e64';
 /** Package version the fingerprint above was pinned for. */
-export const CATALOG_VERSION = '0.5.0';
+export const CATALOG_VERSION = '0.6.0';
 /** 0.6.0: the `serve --core` catalog (.mcp-catalog/kronicle-lite-core.json). */
 export const CORE_CATALOG_FINGERPRINT = '47b3f289201a66ec3983fc82e60d355af1da1869a6563ed00efb55f5e0227b42';
 
