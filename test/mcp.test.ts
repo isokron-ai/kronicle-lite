@@ -586,8 +586,36 @@ describe('Streamable HTTP (2026-07-28 only, bearer, loopback)', () => {
     expect(notFound.status).toBe(404);
   });
 
-  it('a 2025-era initialize POST (no _meta, no version header) is refused with -32022 naming 2026-07-28', async () => {
-    const res = await fetch(http.url, {
+  it('0.5.0: a 2025-era client (Cursor-style initialize) is served statelessly over HTTP, behind the same bearer', async () => {
+    const client = new Client({ name: 'cursor-like', version: '0.0.0' }, { supportedProtocolVersions: ['2025-06-18'] });
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(http.url), { requestInit: { headers: { Authorization: `Bearer ${bearer}` } } }),
+    );
+    expect(client.getProtocolEra()).toBe('legacy');
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name).sort()).toEqual(TOOL_NAMES);
+    const s = parse<{ actor_id: string }>(await client.callTool({ name: 'get_system_state', arguments: { response_format: 'json', focus: 'pulse' } }));
+    expect(s.actor_id).toBe('http-agent');
+    await client.close();
+    // Raw: the initialize answer carries the 2025 revision and no session id; no bearer is still 401.
+    const init = {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'old', version: '1' } },
+    };
+    const headers = { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' };
+    const res = await fetch(http.url, { method: 'POST', headers: { ...headers, Authorization: `Bearer ${bearer}` }, body: JSON.stringify(init) });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('mcp-session-id')).toBeNull();
+    const text = await res.text();
+    expect(text).toMatch(/"protocolVersion":"2025-06-18"/);
+    expect((await fetch(http.url, { method: 'POST', headers, body: JSON.stringify(init) })).status).toBe(401);
+  });
+
+  it('--modern-only: a 2025-era initialize POST (no _meta, no version header) is refused with -32022 naming 2026-07-28', async () => {
+    const strict = await serveHttp({ factory: createServerFactory(store), bearer, port: 0, modernOnly: true });
+    const res = await fetch(strict.url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -606,6 +634,7 @@ describe('Streamable HTTP (2026-07-28 only, bearer, loopback)', () => {
     expect(json.error.code).toBe(-32022);
     expect(json.error.data?.supported).toEqual([MODERN]);
     expect(res.headers.get('mcp-session-id')).toBeNull();
+    await strict.close();
   });
 
   it('an unsupported protocol version on any request is refused with 400 / -32022', async () => {

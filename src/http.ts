@@ -1,11 +1,13 @@
 /**
- * Streamable HTTP serving (spec 2026-07-28 only).
+ * Streamable HTTP serving (2026-07-28, plus 2025-era clients since 0.5.0).
  *
  * One endpoint, POST only, stateless: no session id is minted or honored, GET
  * and DELETE answer 405, per-request `_meta` carries the protocol version and
- * client capabilities. 2025-era (`initialize`) clients are rejected with the
- * modern `UnsupportedProtocolVersionError` (-32022) naming the supported
- * revisions; use stdio for those clients.
+ * client capabilities. 2025-era (`initialize`) clients — Cursor's among them —
+ * are served by the SDK's stateless legacy leg (`legacy: 'stateless'`): each
+ * request gets a fresh server instance from the same factory, behind the same
+ * Host/Origin/bearer checks. `modernOnly` restores the 0.3.0/0.4.0 behavior
+ * (reject them with `UnsupportedProtocolVersionError`, -32022).
  *
  * Trust model: single tenant, one bearer token, loopback by default. Origin
  * and Host are validated against an allowlist (DNS-rebinding defence). See
@@ -34,6 +36,8 @@ export interface HttpServeOptions {
   allowedOrigins?: string[];
   /** Extra Host header hostnames to accept besides loopback. */
   allowedHosts?: string[];
+  /** 0.5.0: refuse 2025-era clients (-32022) instead of serving them statelessly. Default false. */
+  modernOnly?: boolean;
   onerror?: (err: Error) => void;
 }
 
@@ -104,7 +108,7 @@ export function createHttpListener(opts: HttpServeOptions): {
   const validateOrigin = originValidation(allowedOrigins);
 
   const handler = createMcpHandler(opts.factory, {
-    legacy: 'reject',
+    legacy: opts.modernOnly === true ? 'reject' : 'stateless',
     ...(opts.onerror ? { onerror: opts.onerror } : {}),
   });
   const node = toNodeHandler(handler, opts.onerror ? { onerror: opts.onerror } : {});
