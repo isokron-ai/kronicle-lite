@@ -111,6 +111,12 @@ includes "pulse before every world-changing command"). Then typing `orient`
 re-grounds the agent against the chain. To push changes that land while the
 agent works, add a `PostToolUse` hook on `kronicle-lite orient --cursor C
 --focus retractions --json` ([docs/PUSH.md](docs/PUSH.md)).
+Unreleased: to gate world-changing commands on changes the agent has not
+re-read yet, add a `PreToolUse` hook on `kronicle-lite pending --actor
+<agent> --json` and block while `pending_count > 0` (docs/PUSH.md
+"Pending"). Notes the agent writes after reading something are linked to
+what it read; when a source changes, the note is served `never_act` /
+`stale_derived` (docs/HONESTY.md §6).
 
 ### Cursor
 

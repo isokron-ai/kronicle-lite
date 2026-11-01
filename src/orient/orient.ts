@@ -30,7 +30,8 @@ import { scrubDeep } from '../secrets/guard.js';
 import { FlightRecorder } from './flight-recorder.js';
 import { __mutants, type FormatRule } from './cosmetic.js';
 import { computeRetractions, type Retraction } from './retraction.js';
-import { snippet } from './textdiff.js';
+import { snippet, wordDiff } from './textdiff.js';
+import type { Lineage, PendingItem, StaleSource } from '../lineage/lineage.js';
 
 export const FOCUSES = ['orientation', 'recent_changes', 'retractions', 'pulse'] as const;
 export type Focus = (typeof FOCUSES)[number];
@@ -74,6 +75,11 @@ export interface OrientInput {
   include_format_only?: boolean | undefined;
   /** @deprecated earlier name of include_format_only. */
   include_cosmetic?: boolean | undefined;
+  /**
+   * Unreleased: whose reads `pending` is computed for (default: actor_id). A
+   * hook that orients under its own actor (docs/PUSH.md) passes the agent's.
+   */
+  pending_actor?: string | undefined;
 }
 
 /** Unreleased: a supersession whose Markdown tree and text are unchanged (orient/cosmetic.ts). */
@@ -185,9 +191,24 @@ export interface SystemState {
   cosmetic_edits?: FormatOnlyEdit[] | null;
   /** Unreleased (next): this actor's own notes written since the cursor, bounded; null unless focus is orientation / recent_changes. */
   carried_notes?: CarriedNote[] | null;
+  /**
+   * Unreleased: changes to blocks `pending_actor` (default: actor_id) read or
+   * wrote, or to sources of notes it read or wrote, that it has not
+   * reconciled by reading the CURRENT version (docs/PUSH.md). Every focus,
+   * pulse included. Capped at 20 items; `pending_count` is the total.
+   */
+  pending?: PendingItem[] | null;
+  pending_count?: number | null;
+  /** Unreleased: whose reads `pending` was computed for (null when not computed). */
+  pending_actor?: string | null;
+  /** Unreleased: pending items about other projects' documents, not listed or counted in pending_count. */
+  pending_hidden?: number | null;
   digest: Digest | null;
   next_steps: string[];
 }
+
+/** Unreleased: cap on pending items listed in a briefing (pending_count is the total). */
+export const PENDING_LIMIT = 20;
 
 export interface OrientOptions {
   rules?: DriftRules;
@@ -205,6 +226,8 @@ export class Orient {
     private readonly docs: DocumentStore,
     private readonly secret: string,
     opts: OrientOptions = {},
+    /** Unreleased: derived-note lineage and per-actor pending (null: neither is computed). */
+    private readonly lineage: Lineage | null = null,
   ) {
     this.recorder = new FlightRecorder(db);
     this.rules = opts.rules ?? DEFAULT_DRIFT_RULES;
@@ -402,6 +425,70 @@ export class Orient {
   }
 
   /**
+   * Unreleased: one retraction per derived note whose source changed in
+   * `events` and that is stale now (re-derived notes are not listed).
+   * Format-only source edits never make a note stale.
+   */
+  derivedRetractions(events: readonly ChainEvent[]): { doc_id: string; retraction: Retraction }[] {
+    const lineage = this.lineage;
+    if (!lineage || !lineage.anyLineage()) return [];
+    const memo = new Map<string, StaleSource[]>();
+    const seen = new Set<string>();
+    const out: { doc_id: string; retraction: Retraction }[] = [];
+    for (const ev of events) {
+      if (ev.event_type !== 'block.superseded' && ev.event_type !== 'block.tombstoned') continue;
+      const block_id = ev.payload['block_id'];
+      if (typeof block_id !== 'string') continue;
+      const notes = lineage.derivedFrom(block_id);
+      if (notes.length === 0) continue;
+      if (ev.event_type === 'block.superseded') {
+        const a = this.docs.getBlock(block_id);
+        const succ = ev.payload['successor_block_id'];
+        const b = typeof succ === 'string' ? this.docs.getBlock(succ) : null;
+        if (a && b && lineage.hopFormatOnly(a, b)) continue;
+      }
+      for (const doc_id of notes) {
+        const stale = lineage.staleness(doc_id, memo);
+        const entry = stale.find((s) => !s.via && (lineage.walk(s.source_block_id)?.blocks.some((b) => b.block_id === block_id) ?? false));
+        if (!entry) continue;
+        const key = `${doc_id}|${entry.source_block_id}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const note = this.docs.getDocumentById(doc_id);
+        if (!note) continue;
+        const first = this.docs.liveBlocks(doc_id).find((b) => b.kind !== 'heading' && checkBlockRow(this.chain, b) === null) ?? null;
+        const noteText = first ? snippet(first.content) : null;
+        const src = this.docs.getBlock(entry.source_block_id);
+        const cur = entry.current_block_id ? this.docs.getBlock(entry.current_block_id) : null;
+        const removed = entry.current_block_id === null;
+        const srcLoc = entry.source_doc_slug ? ` (${entry.source_doc_slug})` : '';
+        const now = removed ? 'REMOVED' : entry.change === 'moved' ? `"${entry.new_text}" MOVED to another section` : `"${entry.new_text}"`;
+        out.push({
+          doc_id,
+          retraction: {
+            seq: ev.seq,
+            event_type: ev.event_type,
+            kind: 'derived',
+            severity: removed ? 'safety' : 'behavioral',
+            block_id: first?.block_id ?? null,
+            doc_slug: note.slug,
+            successor_block_id: null,
+            reason: `derived from ${entry.source_doc_slug ?? entry.source_block_id}, which changed`,
+            reason_line: `You previously relied on note ${noteText ? `"${noteText}" ` : ''}(${note.slug}), derived from "${entry.old_text ?? entry.source_block_id}"${srcLoc}; that source is now ${now} (seq ${ev.seq}). The note is STALE: re-derive it from the current source before acting.`,
+            heading_path: first ? splitHeadingPath(first.heading_path) : null,
+            old_text: noteText,
+            new_text: null,
+            diff: src && cur ? `source ${entry.source_doc_slug ?? ''}: ${wordDiff(src.content, cur.content)}`.replace(/^source : /, 'source: ') : null,
+            format_only: false,
+            derived_from_change: entry,
+          },
+        });
+      }
+    }
+    return out;
+  }
+
+  /**
    * Re-hash the events this briefing covers (at least the last 1000) and the
    * newest live blocks against their chained block.created events. Cheap
    * enough for every orient; `verify-chain` / `doctor` do the full pass.
@@ -475,16 +562,18 @@ export class Orient {
       // events without a document stay visible.
       const keys = input.project && input.project.keys.length > 0 ? new Set(input.project.keys) : null;
       const projOf = new Map<string, string | null>();
-      const inScope = (e: ChainEvent): boolean => {
+      const inScopeDoc = (doc_id: string): boolean => {
         if (!keys) return true;
-        const doc_id = e.payload['doc_id'];
-        if (typeof doc_id !== 'string') return true;
         let k = projOf.get(doc_id);
         if (k === undefined) {
           k = this.docs.projectKeyOf(doc_id);
           projOf.set(doc_id, k);
         }
         return k === null || keys.has(k);
+      };
+      const inScope = (e: ChainEvent): boolean => {
+        const doc_id = e.payload['doc_id'];
+        return typeof doc_id !== 'string' || inScopeDoc(doc_id);
       };
       const events = keys ? allEvents.filter(inScope) : allEvents;
       const lookup = (id: string) => this.blockText(id);
@@ -499,16 +588,19 @@ export class Orient {
         delta = { ...foldDelta(events, recovery.from_seq, head.seq, { ...this.policy, budget_tokens: 0 }), entries: [] };
       }
       const computed = computeRetractions(events, lookup);
+      // Unreleased: derived notes (in scope) whose sources changed in the window (sources in any project).
+      const derivedAll = this.derivedRetractions(allEvents);
+      const derived = derivedAll.filter((d) => inScopeDoc(d.doc_id)).map((d) => d.retraction);
       if (keys && input.project) {
         const hiddenEvents = allEvents.length - events.length;
-        const hidden = hiddenEvents > 0 ? computeRetractions(allEvents.filter((e) => !inScope(e)), lookup).filter((r) => !r.format_only).length : 0;
+        const hidden = (hiddenEvents > 0 ? computeRetractions(allEvents.filter((e) => !inScope(e)), lookup).filter((r) => !r.format_only).length : 0) + (derivedAll.length - derived.length);
         scope = { project_keys: input.project.keys, hidden_retractions: hidden, verdict: hidden > 0 ? 'partial' : 'complete', hidden_events: hiddenEvents };
       }
       // The ONLY suppression: format-only edits move to their own list. A hint
       // (likely_typo) is a label and never moves anything.
       const suppressible = (r: Retraction) => r.format_only || (__mutants.has('gate_trusts_label') && r.hint === 'likely_typo');
       const includeFormat = input.include_format_only === true || input.include_cosmetic === true;
-      retractions = includeFormat ? computed : computed.filter((r) => !suppressible(r));
+      retractions = [...(includeFormat ? computed : computed.filter((r) => !suppressible(r))), ...derived];
       format_only_edits = computed
         .filter(suppressible)
         .map((r) => ({ seq: r.seq, doc_slug: r.doc_slug, block_id: r.block_id, successor_block_id: r.successor_block_id, rules: r.format_rules ?? ['markup'], diff: r.diff }));
@@ -529,7 +621,20 @@ export class Orient {
       const pi = this.quickIntegrity(recovery.from_seq, head, { windowOnly: true, eventsOnly: true });
       if (!pi.ok) integrity = pi;
     }
-    const next_steps = nextSteps({ focus, recovery, drift_banner, retractions, source_drift, integrity, scope });
+    // Unreleased: version-bound reconciliation, every focus (pulse included).
+    let pending: PendingItem[] | null = null;
+    let pending_count: number | null = null;
+    let pending_actor: string | null = null;
+    let pending_hidden: number | null = null;
+    if (this.lineage) {
+      pending_actor = input.pending_actor ?? input.actor_id;
+      const keys = input.project && input.project.keys.length > 0 ? input.project.keys : null;
+      const p = this.lineage.pending(pending_actor, { project_keys: keys, limit: PENDING_LIMIT });
+      pending = scrubDeep(p.items).value;
+      pending_count = p.count;
+      pending_hidden = p.hidden;
+    }
+    const next_steps = nextSteps({ focus, recovery, drift_banner, retractions, source_drift, integrity, scope, pending_count });
     const lastAnchor = this.chain.lastAnchor();
     const anchor: AnchorSummary | null = lastAnchor
       ? {
@@ -563,6 +668,10 @@ export class Orient {
       format_only_edits,
       cosmetic_edits: format_only_edits,
       carried_notes,
+      pending,
+      pending_count,
+      pending_actor,
+      pending_hidden,
       digest,
       next_steps,
     };
@@ -583,6 +692,7 @@ export class Orient {
           retraction_count: retractions?.length ?? 0,
           format_only_count: format_only_edits?.length ?? 0,
           drift_surfaced: drift_banner.surfaced,
+          pending_count: pending_count ?? 0,
           budget_tokens: budget,
         },
       });
@@ -599,8 +709,13 @@ function nextSteps(args: {
   source_drift: SourceDrift[] | null;
   integrity: IntegritySummary | null;
   scope?: SystemState['scope'];
+  pending_count?: number | null;
 }): string[] {
   const steps: string[] = [];
+  const pendingStep =
+    (args.pending_count ?? 0) > 0
+      ? `${args.pending_count} change(s) to things you read are not reconciled (pending): re-read the CURRENT version of each (recall it, or read the document) before acting; acknowledging an older version does not clear a newer change.`
+      : null;
   if (args.integrity && !args.integrity.ok) {
     steps.push(
       `INTEGRITY FAILURE (${args.integrity.problem}): the store was edited outside kronicle-lite. Do not rely on recalled text; tell the operator to run kronicle-lite verify-chain.`,
@@ -610,6 +725,7 @@ function nextSteps(args: {
     steps.push('Your since_cursor was rejected; position was recovered server-side. Replace it with the new cursor below.');
   }
   if (args.focus === 'pulse') {
+    if (pendingStep) steps.push(pendingStep);
     steps.push(
       args.drift_banner.surfaced
         ? 'Drift threshold crossed: call get_system_state with focus=recent_changes to read what changed.'
@@ -623,6 +739,7 @@ function nextSteps(args: {
       `Reconcile ${args.retractions.length} retraction(s)${safety ? ` (${safety} safety)` : ''} BEFORE acting: for each, affirm the current truth (cite seq), name the old claim once, and drop it as a decision premise.`,
     );
   }
+  if (pendingStep) steps.push(pendingStep);
   if (args.scope && args.scope.verdict === 'partial') {
     steps.push(
       `${args.scope.hidden_retractions} retraction(s) from other projects were hidden and not reviewed: this briefing is not a clean bill for those projects (pass all_projects: true to see them).`,

@@ -174,9 +174,9 @@ text, because "Allowed › X" and "Forbidden › X" mean different things.
 
 | event_type | payload fields |
 |---|---|
-| `document.put` | `doc_id, slug, title, revision, markdown, markdown_hash (BLAKE3), block_ids[], carried[{block_id, ordinal, heading_path}]`, optional `source` (0.4.0, §3.4), optional `project` (unreleased, §3.7) |
+| `document.put` | `doc_id, slug, title, revision, markdown, markdown_hash (BLAKE3), block_ids[], carried[{block_id, ordinal, heading_path}]`, optional `source` (0.4.0, §3.4), optional `project` (unreleased, §3.7), optional `derived_from[]` / `derived_from_inferred[]` (unreleased, §3.10) |
 | `document.revised` | `doc_id, slug, title, revision, markdown, markdown_hash, cause` |
-| `block.created` | `block_id, doc_id, doc_slug, revision, ordinal, kind, level, heading_path[], content, content_hash` |
+| `block.created` | `block_id, doc_id, doc_slug, revision, ordinal, kind, level, heading_path[], content, content_hash`; from `supersede_block`, optional `derived_from[]` / `derived_from_inferred[]` (unreleased, §3.10) |
 | `block.superseded` | `block_id, successor_block_id, doc_id, doc_slug, revision, reason` |
 | `block.tombstoned` | `block_id, doc_id, doc_slug, revision, reason` |
 | `document.renamed` (0.5.0) | `doc_id, from_slug, slug, revision, reason` — same document, new slug; revisions and blocks are keyed by `doc_id` and carry over. Unreleased: also written when an instruction file moves inside its project with its content intact (`reason: "moved: <old path> → <new path> (same content)"`), followed by a `document.put` recording the new `source.path` with every block carried |
@@ -372,6 +372,47 @@ focus, `pulse` included, for the events since the cursor) answers normally
 with `integrity: {ok: false, problem, seq}` and an INTEGRITY FAILURE line
 first.
 
+### 3.10 Derived-note lineage (unreleased, additive)
+
+A note written from other blocks records which exact versions it rests on:
+
+```json
+"derived_from":          [{ "block_id": "<uuid>", "content_hash": "<BLAKE3 hex>" }],
+"derived_from_inferred": [{ "block_id": "<uuid>", "content_hash": "<BLAKE3 hex>" }]
+```
+
+- `derived_from` — declared by the writer (`put_document` / `supersede_block`
+  `derived_from`, CLI `--derived-from ID:HASH,…`). Each `content_hash` must
+  be that block's (a block id names one version); unknown blocks or a wrong
+  hash are refused with `invalid_lineage`, nothing chained. A block that is
+  no longer live is accepted (the note is stale from the start).
+- `derived_from_inferred` — every block the writing actor read (recall hits,
+  document reads; its own writes excluded) since its session started (the
+  briefing behind the cursor it passes, else its latest orient, else all of
+  its reads), outside the document being written. Sorted by `block_id`,
+  deduplicated, never truncated. Instruction-file imports infer nothing.
+
+Both fields are present only when non-empty, except that an explicit
+`derived_from: []` on a `document.put` is kept: it says "derives from
+nothing". A put without either hashes exactly as before. Projection
+(`doc_lineage(doc_id, source_block_id, source_content_hash, inferred,
+chain_seq)`, compared by the projection check like every other table):
+
+- `document.put` with `derived_from` present (even `[]`): the document's
+  rows are replaced by it plus `derived_from_inferred`;
+- any other `document.put`, and `block.created` with lineage fields: rows are
+  added (`INSERT OR IGNORE`; the first recording seq is kept).
+
+Read-time evaluation (src/lineage/lineage.ts; no chain change): an edge is
+**fresh** when its source block's supersession lineage (§3.3) reaches a live
+block through format-only edits only (§3.8, same section), or when the note
+also has an edge to a block of that current version. Otherwise it is
+**stale** with `change`: `superseded`, `moved` (another section), `tombstoned`
+or `missing`. A note derived from a stale note is stale (`via`, depth ≤ 4).
+Recall labels a stale note's hits `never_act` / `stale_derived`
+(docs/HONESTY.md row 3); orient lists a retraction of kind `derived`
+(docs/PUSH.md).
+
 ## 4. Receipts (v2)
 
 A receipt is issued for each `recall()` hit:
@@ -435,6 +476,19 @@ Fail-closed, in order:
 | the chain has a `block.superseded` / `block.tombstoned` event for a block the projection calls live (0.5.0) | `UNVERIFIED / projection_mismatch` |
 | document git-bound and its source blob moved (0.4.0, §3.5) | `STALE_SOURCE / stale_source` (+ `source_drift`) |
 | otherwise | `VERIFIED / verified` |
+
+### 4.2 Read log (unreleased, additive, local)
+
+`reads(actor_id, doc_id, block_id, content_hash, doc_revision, head_seq,
+read_at, via)` records which version each actor read: a row per recall hit
+served to a known actor (receipts or not), a row per document read
+(`block_id` NULL) plus one per live block of it, and a row per write
+(`via: write`; a put is a whole-document read of what it wrote, a supersede
+a read of the new block, a tombstone a read of the removal). Like
+`receipts.actor_id` it is not part of any hash, any signature or the export,
+and `import` / `rebuild` leave it alone. Receipts issued to an actor before
+the table existed count as reads too. It drives lineage inference (§3.10)
+and `pending` (docs/PUSH.md).
 
 ## 5. Cursors
 

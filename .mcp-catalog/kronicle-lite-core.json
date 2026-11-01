@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-01T16:16:33.948Z",
+  "capturedAt": "2026-11-01T18:06:17.148Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -228,6 +228,30 @@
             "next_steps": {
               "type": "array"
             },
+            "pending": {
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "pending_actor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pending_count": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "pending_hidden": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "recovery": {
               "type": "object"
             },
@@ -355,6 +379,9 @@
               "type": "integer"
             },
             "head": {
+              "type": "object"
+            },
+            "lineage": {
               "type": "object"
             },
             "redactions": {
@@ -587,6 +614,9 @@
             "head": {
               "type": "object"
             },
+            "lineage": {
+              "type": "object"
+            },
             "new_block_id": {
               "type": "string"
             },
@@ -738,5 +768,5 @@
     "title": "kronicle-lite",
     "version": "0.7.0"
   },
-  "sha256": "d2068f6237e490717e1bfc5719ecd582b081717b1a900e304edfcc61da920fa5"
+  "sha256": "65245f5a33d781ba611716bc18cd42234088e874e95d67f6676ba8ec799a1611"
 }

@@ -12,6 +12,7 @@
  */
 
 import type { ChainEvent } from '../chain/index.js';
+import type { StaleSource } from '../lineage/lineage.js';
 import { isInstructionSlug } from '../docs/documents.js';
 import { classifyEdit, type FormatRule } from './cosmetic.js';
 import { snippet, wordDiff } from './textdiff.js';
@@ -23,8 +24,15 @@ export type RetractionSeverity = 'safety' | 'behavioral' | 'informational';
  * CLAUDE.md, AGENTS.md, rule file or auto-memory index changed on disk and
  * was re-imported. Severity follows the underlying event.
  */
-export type RetractionKind = 'tombstone' | 'supersession' | 'retraction' | 'instruction';
-export const RETRACTION_KINDS = ['tombstone', 'supersession', 'retraction', 'instruction'] as const;
+/**
+ * `derived` (unreleased, additive): a note derived from a block that changed
+ * in this window (docs/FORMAT.md §3.10). `doc_slug` / `old_text` are the
+ * NOTE's; `derived_from_change` names the source change; `diff` is the
+ * source's word diff. Not a chain event of its own: `seq` / `event_type` are
+ * the source change's.
+ */
+export type RetractionKind = 'tombstone' | 'supersession' | 'retraction' | 'instruction' | 'derived';
+export const RETRACTION_KINDS = ['tombstone', 'supersession', 'retraction', 'instruction', 'derived'] as const;
 
 export interface Retraction {
   seq: number;
@@ -69,6 +77,8 @@ export interface Retraction {
    * `heading_path` is the old path.
    */
   new_heading_path?: string[];
+  /** Unreleased, with kind `derived`: the source change that made the note stale. */
+  derived_from_change?: StaleSource;
 }
 
 /** Block text for a retraction, from the projection (orient passes one in). */

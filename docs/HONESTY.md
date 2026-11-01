@@ -34,19 +34,20 @@ First matching row wins. Row 0 applies to matches withheld from `hits`.
 | 0 | the stored text does not hash to its chained event (listed under `withheld`, no content, no receipt) | `never_act` | `integrity_failed` | block |
 | 1 | the block was tombstoned (`include_tombstoned: true`) | `never_act` | `tombstoned` | block |
 | 2 | the block was superseded | `never_act` | `superseded` | block |
-| 3 | the document's recorded source file is gone | `never_act` | `source_missing` | document |
-| 4 | the source file exists but no longer holds this block's text | `never_act` | `not_in_source` | block |
-| 5 | the document is model-written memory (source kind `memory`, e.g. Claude Code auto memory) | `inspect_only` | `model_memory` | document |
-| 6 | the source file holds this block's exact text now | `can_act` | `block_matches_source` | block |
-| 7 | a source is recorded but could not be checked (repository or file unreadable, file over 4 MiB, repository not on this machine) | `inspect_only` | `source_unavailable` | document |
-| 8 | a source is recorded but no block-level check is possible (relative path with no project root) | `inspect_only` | `document_source_only` | document |
-| 9 | no source recorded (put by an agent or a human) | `inspect_only` | `no_source` | none |
+| 3 | (unreleased) the document is a derived note and a block it was derived from was superseded, moved or tombstoned, and the note was not re-derived from the current version (§6) | `never_act` | `stale_derived` | document |
+| 4 | the document's recorded source file is gone | `never_act` | `source_missing` | document |
+| 5 | the source file exists but no longer holds this block's text | `never_act` | `not_in_source` | block |
+| 6 | the document is model-written memory (source kind `memory`, e.g. Claude Code auto memory) | `inspect_only` | `model_memory` | document |
+| 7 | the source file holds this block's exact text now | `can_act` | `block_matches_source` | block |
+| 8 | a source is recorded but could not be checked (repository or file unreadable, file over 4 MiB, repository not on this machine) | `inspect_only` | `source_unavailable` | document |
+| 9 | a source is recorded but no block-level check is possible (relative path with no project root) | `inspect_only` | `document_source_only` | document |
+| 10 | no source recorded (put by an agent or a human) | `inspect_only` | `no_source` | none |
 
 After the table: if the read-time secret scrub changed the text being
 served, `can_act` is capped to `inspect_only` with reason `read_scrubbed`
 (the text shown is not the chained text the evidence was about).
 
-### The block-level check (row 6)
+### The block-level check (row 7)
 
 At recall time, for each document with a recorded source, the source file is
 read once and split into blocks with the same parser `put` uses. A hit
@@ -60,7 +61,7 @@ latest `document.put`:
 | absolute `path` | that path |
 | `~/…` path | under the home directory |
 | relative `path` with `project.root` (instruction files) | `<project.root>/<path>` |
-| relative `path`, no root | none: row 8 |
+| relative `path`, no root | none: row 9 |
 
 No git process runs for this check; `verify` and orient's "Source drift"
 still compare whole-file git blobs.
@@ -75,7 +76,8 @@ still compare whole-file git blobs.
   but the new block is `never_act` / `not_in_source` (test:
   `test/honesty.test.ts`).
 - **Superseded, tombstoned and withheld are never `can_act`**, whatever their
-  text matches.
+  text matches. Neither is a stale derived note (unreleased), whatever its
+  own source says.
 - **Model-written memory is never `can_act`** (IsoKron: `model_asserted →
   inspect_only`).
 - `can_act ⇒ basis = block`, status live, source check matched, no scrub
@@ -158,3 +160,39 @@ windows.
 
 See THREAT-MODEL.md §"Secrets": write-time refusal (or explicit redaction)
 before anything is chained, independent read-time scrub on everything served.
+
+## 6. Derived notes (unreleased)
+
+A note an agent writes from what it read is a copy. When the source changes,
+the copy is wrong and, before this, came back next session unmarked
+(agent-memory-bench Track A S1: 20/20, every tool). Lineage fixes that:
+
+- `put_document` / `supersede_block` (and `put` / `supersede` on the CLI)
+  take `derived_from: [{block_id, content_hash}]` — the exact versions the
+  text rests on (`content_hash` must be the block's; a block id names one
+  version). Lineage is also **inferred**: every block the writing actor read
+  (recall hits, document reads; its own writes excluded) since its session
+  started (the briefing behind the `cursor` it passes, else its latest
+  orient, else all of its reads) is recorded as `derived_from_inferred`.
+  Inference over-approximates on purpose and is never truncated; inferred
+  edges downgrade exactly like declared ones. Instruction-file imports
+  infer nothing (they are the file's text).
+- An edge is **fresh** while its source's supersession lineage reaches a
+  live block through format-only edits only (docs/FORMAT.md §3.8), or when
+  the note also has an edge to the current version (it was re-derived:
+  re-put or supersede after reading the current version). Otherwise it is
+  **stale**: superseded, moved (re-sectioned), tombstoned, or missing. A
+  note derived from a stale note is stale too (`via`).
+- A stale note's hits are `never_act` / `stale_derived` (row 3) and carry
+  `stale_derived: [{source_block_id, source_content_hash, source_doc_slug,
+  change, seq, current_block_id, current_content_hash, old_text, new_text,
+  inferred, via?}]`, placed right after `content`.
+- `get_system_state` lists a retraction of kind `derived` for each note made
+  stale by a change in the window (the note's slug and text, the source's
+  diff, `derived_from_change`), and `pending` lists it for every actor that
+  read or wrote the note until that actor reads the source's current
+  version (docs/PUSH.md).
+- A `put` with an explicit `derived_from` (even `[]`) replaces the note's
+  lineage: the author's statement of what the text now rests on. This is the
+  only way an edge to a removed source ever goes away. Every other write
+  (inferred edges, `supersede_block`) adds to it.

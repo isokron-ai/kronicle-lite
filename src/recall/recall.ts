@@ -21,12 +21,13 @@ import type { Signer } from '../crypto/keys.js';
 import type { Db } from '../db/open.js';
 import { splitHeadingPath, type BlockRow, type DocumentSource } from '../docs/documents.js';
 import { checkBlockRow, type RowProblem } from '../docs/integrity.js';
-import { scrubForRead } from '../secrets/guard.js';
+import { scrubDeep, scrubForRead } from '../secrets/guard.js';
 import { certifyRecallAbsence, indexFreshness, type Absence, type RecallScope } from './absence.js';
 import { attentionRerank } from './attention.js';
 import { authorityFloor, resolveAuthority, type Authority, type AuthorityBasis, type AuthorityReason } from './honesty.js';
 import { queryHash, signReceipt, type Receipt } from './receipt.js';
 import { SourceChecker } from './source-check.js';
+import type { Lineage, StaleSource } from '../lineage/lineage.js';
 
 /** Default content budget per recall response (characters of hit content). */
 export const DEFAULT_MAX_CHARS = 16_000;
@@ -64,6 +65,12 @@ export interface RecallHit {
   kind: string;
   heading_path: string[];
   content: string;
+  /**
+   * Unreleased: this hit's document is a derived note and these sources
+   * changed since the versions it was derived from (absent when fresh or not
+   * derived). authority is then never_act / stale_derived.
+   */
+  stale_derived?: StaleSource[];
   content_hash: string;
   score: number;
   status: 'live' | 'superseded' | 'tombstoned';
@@ -140,6 +147,8 @@ export class Recall {
     private readonly chain: Chain,
     private readonly signer: Signer,
     private readonly workspace = 'local',
+    /** Unreleased: derived-note staleness and the read log (null: neither). */
+    private readonly lineage: Lineage | null = null,
   ) {}
 
   recall(input: RecallInput): RecallResult {
@@ -191,6 +200,8 @@ export class Recall {
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
     );
     const sources = new SourceChecker();
+    const staleMemo = new Map<string, StaleSource[]>();
+    const served: { block_id: string; doc_id: string; content_hash: string }[] = [];
     const hits: RecallHit[] = [];
     const withheld: WithheldHit[] = [];
     const tx = this.db.transaction(() => {
@@ -228,12 +239,15 @@ export class Recall {
         const status: RecallHit['status'] = r.tombstoned_at ? 'tombstoned' : r.valid_to ? 'superseded' : 'live';
         const scrub = scrubForRead(r.content);
         const source = r.source_json !== null ? (JSON.parse(r.source_json) as DocumentSource) : null;
+        const stale = this.lineage ? this.lineage.staleness(r.doc_id, staleMemo) : [];
         const honesty = resolveAuthority({
           status,
           source_kind: r.source_kind,
           source_check: source !== null && status === 'live' ? sources.check(source, r) : 'unchecked',
           read_scrubbed: scrub.detectors.length > 0,
+          stale_derived: stale.length > 0,
         });
+        served.push({ block_id: r.block_id, doc_id: r.doc_id, content_hash: r.content_hash });
         hits.push({
           block_id: r.block_id,
           doc_slug: r.slug,
@@ -243,6 +257,7 @@ export class Recall {
           kind: r.kind,
           heading_path: splitHeadingPath(r.heading_path),
           content: scrub.text,
+          ...(stale.length > 0 ? { stale_derived: scrubDeep(stale).value } : {}),
           content_hash: r.content_hash,
           score: r.score,
           status,
@@ -257,6 +272,8 @@ export class Recall {
           ...(scrub.detectors.length > 0 ? { read_scrubbed: scrub.detectors } : {}),
         });
       }
+      // Unreleased: the read log (version-bound reconciliation), receipts or not.
+      if (actor !== null && this.lineage) this.lineage.recordBlockReads(actor, served, 'recall');
     });
     tx();
 

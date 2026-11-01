@@ -202,4 +202,39 @@ CREATE TABLE IF NOT EXISTS doc_sources (
   source_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS doc_sources_kind_idx ON doc_sources (kind, slug);
+
+-- Unreleased, additive projection: derived-note lineage, from the optional
+-- \`derived_from\` / \`derived_from_inferred\` fields of document.put and
+-- block.created (supersede_block) payloads (docs/FORMAT.md §3.10). A put that
+-- carries an explicit \`derived_from\` (even []) replaces the document's rows;
+-- every other lineage field adds to them. Rebuilt from the chain like the rest.
+CREATE TABLE IF NOT EXISTS doc_lineage (
+  doc_id              TEXT NOT NULL,
+  source_block_id     TEXT NOT NULL,
+  source_content_hash TEXT NOT NULL,
+  inferred            INTEGER NOT NULL,
+  chain_seq           INTEGER NOT NULL,
+  PRIMARY KEY (doc_id, source_block_id, inferred)
+);
+CREATE INDEX IF NOT EXISTS doc_lineage_source_idx ON doc_lineage (source_block_id);
+
+-- Unreleased, additive, local only (never chained or hashed, like
+-- receipts.actor_id): which version of what each actor read or wrote, for
+-- version-bound reconciliation (docs/PUSH.md "pending"). block_id NULL = a
+-- whole-document read (its live blocks get their own rows too).
+-- via: recall | document | write.
+CREATE TABLE IF NOT EXISTS reads (
+  actor_id     TEXT NOT NULL,
+  doc_id       TEXT NOT NULL,
+  block_id     TEXT,
+  content_hash TEXT NOT NULL,
+  doc_revision INTEGER NOT NULL,
+  head_seq     INTEGER NOT NULL,
+  read_at      TEXT NOT NULL,
+  via          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS reads_actor_idx ON reads (actor_id, read_at);
+CREATE INDEX IF NOT EXISTS reads_actor_block_idx ON reads (actor_id, block_id);
+-- Unreleased: walk a supersession lineage backwards (format-only predecessors).
+CREATE INDEX IF NOT EXISTS blocks_superseded_by_idx ON blocks (superseded_by) WHERE superseded_by IS NOT NULL;
 `;

@@ -164,6 +164,8 @@ export function syncInstructionFile(store: KronicleLite, entry: InstructionEntry
       actor_id,
       source: { kind: entry.kind, path: entry.recordPath, ...(entry.project ? { project: entry.project } : {}) },
       ...(opts.secrets !== undefined ? { secrets: opts.secrets } : {}),
+      // A file import is the file's text, not something the importing actor derived from its reads.
+      infer_lineage: false,
     });
     let created = 0;
     let superseded = 0;
@@ -329,6 +331,7 @@ function followRename(
     actor_id,
     source: { kind: to.kind, path: to.recordPath, ...(to.project ? { project: to.project } : {}) },
     ...(secrets !== undefined ? { secrets } : {}),
+    infer_lineage: false,
   });
   let created = 0;
   let superseded = 0;

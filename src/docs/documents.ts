@@ -75,7 +75,28 @@ export interface PutDocumentResult {
   events: number;
   /** 0.6.0: present when secrets: 'redact' replaced something before chaining. */
   redactions?: SecretFinding[];
+  /** Unreleased: lineage recorded on this write (counts), when any. */
+  lineage?: LineageCounts;
 }
+
+/** Unreleased: a derived-note lineage edge (docs/FORMAT.md §3.10). */
+export interface LineageRef {
+  block_id: string;
+  content_hash: string;
+}
+
+export interface LineageCounts {
+  /** Explicit `derived_from` edges recorded. */
+  derived_from: number;
+  /** Edges inferred from what the author read in its session. */
+  derived_from_inferred: number;
+}
+
+/**
+ * Unreleased: computes `derived_from_inferred` for a write (KronicleLite
+ * wires it to the read log; see src/lineage/lineage.ts `infer`).
+ */
+export type LineageInference = (actor_id: string, cursor: string | undefined, exclude_doc_id: string | null) => LineageRef[];
 
 export interface SupersedeBlockResult {
   old_block_id: string;
@@ -86,6 +107,8 @@ export interface SupersedeBlockResult {
   head: ChainHead;
   /** 0.6.0: present when secrets: 'redact' replaced something before chaining. */
   redactions?: SecretFinding[];
+  /** Unreleased: lineage recorded on this write (counts), when any. */
+  lineage?: LineageCounts;
 }
 
 export interface TombstoneBlockResult {
@@ -98,7 +121,7 @@ export interface TombstoneBlockResult {
 export class DocumentError extends Error {
   override readonly name = 'DocumentError';
   constructor(
-    readonly code: 'unknown_block' | 'block_not_live' | 'unknown_document' | 'invalid_slug' | 'empty_content' | 'invalid_source',
+    readonly code: 'unknown_block' | 'block_not_live' | 'unknown_document' | 'invalid_slug' | 'empty_content' | 'invalid_source' | 'invalid_lineage',
     message: string,
   ) {
     super(message);
@@ -194,10 +217,58 @@ export function splitHeadingPath(s: string): string[] {
 type Pending = { event_type: string; payload: Record<string, unknown> };
 
 export class DocumentStore {
+  /** Unreleased: set by KronicleLite; null = no automatic lineage inference. */
+  lineageInference: LineageInference | null = null;
+
   constructor(
     private readonly db: Db,
     private readonly chain: Chain,
   ) {}
+
+  /**
+   * Unreleased: check explicit `derived_from` edges (the block exists and the
+   * hash is its content hash; a block that is no longer live is accepted: the
+   * note is then stale from the start). Deduplicated by block id.
+   */
+  private checkLineage(refs: readonly LineageRef[] | undefined): LineageRef[] | undefined {
+    if (refs === undefined) return undefined;
+    const out = new Map<string, LineageRef>();
+    for (const r of refs) {
+      if (!r || typeof r.block_id !== 'string' || typeof r.content_hash !== 'string') throw new DocumentError('invalid_lineage', 'derived_from entries need block_id and content_hash');
+      const b = this.getBlock(r.block_id);
+      if (!b) throw new DocumentError('invalid_lineage', `derived_from: no block ${r.block_id}`);
+      if (b.content_hash !== r.content_hash) {
+        throw new DocumentError('invalid_lineage', `derived_from: block ${r.block_id} has content_hash ${b.content_hash}, not ${r.content_hash} (a block id names one version; pass the hash recall returned)`);
+      }
+      out.set(r.block_id, { block_id: r.block_id, content_hash: r.content_hash });
+    }
+    return [...out.values()].sort((a, b) => a.block_id.localeCompare(b.block_id));
+  }
+
+  private inferLineage(actor_id: string, cursor: string | undefined, infer: boolean | undefined, exclude_doc_id: string | null, explicit: readonly LineageRef[] | undefined): LineageRef[] {
+    if (infer === false || !this.lineageInference) return [];
+    const skip = new Set((explicit ?? []).map((r) => r.block_id));
+    return this.lineageInference(actor_id, cursor, exclude_doc_id).filter((r) => !skip.has(r.block_id));
+  }
+
+  /** Unreleased: a write is a read of what was written (local read log, never chained). */
+  private logWrite(actor_id: string, doc_id: string, block_ids: readonly string[] | 'document'): void {
+    const doc = this.getDocumentById(doc_id);
+    if (!doc) return;
+    const head = this.chain.head().seq;
+    const now = new Date().toISOString();
+    const ins = this.db.prepare(`INSERT INTO reads (actor_id, doc_id, block_id, content_hash, doc_revision, head_seq, read_at, via) VALUES (?, ?, ?, ?, ?, ?, ?, 'write')`);
+    if (block_ids === 'document') {
+      const rev = this.getRevision(doc_id, doc.current_revision);
+      ins.run(actor_id, doc_id, null, rev?.content_hash ?? '', doc.current_revision, head, now);
+      for (const b of this.liveBlocks(doc_id)) ins.run(actor_id, doc_id, b.block_id, b.content_hash, doc.current_revision, head, now);
+      return;
+    }
+    for (const id of block_ids) {
+      const b = this.getBlock(id);
+      if (b) ins.run(actor_id, doc_id, b.block_id, b.content_hash, doc.current_revision, head, now);
+    }
+  }
 
   // ───────────────────────────── reads ─────────────────────────────
 
@@ -409,6 +480,16 @@ export class DocumentStore {
      * when `source.project` is set (instruction files carry their own).
      */
     project?: { key: string; root: string } | null;
+    /**
+     * Unreleased: explicit lineage (docs/FORMAT.md §3.10). Present (even [])
+     * = the author's statement of what the note now rests on: it replaces the
+     * document's earlier lineage. Absent = earlier lineage is kept.
+     */
+    derived_from?: LineageRef[];
+    /** Unreleased: the author's cursor (its session start bounds lineage inference). */
+    cursor?: string;
+    /** Unreleased: infer lineage from the author's reads (default true when an inference is wired). */
+    infer_lineage?: boolean;
   }): PutDocumentResult {
     const guarded = guardFields({ title: args.title, markdown: args.markdown }, args.secrets ?? 'refuse', `document ${args.slug}`);
     args = { ...args, ...guarded.fields };
@@ -421,6 +502,8 @@ export class DocumentStore {
     const parsed = parseMarkdown(args.markdown);
     const markdown = normalizeMarkdown(args.markdown);
     const markdown_hash = blake3Hex(markdown);
+    const explicit = this.checkLineage(args.derived_from);
+    const inferred = this.inferLineage(args.actor_id, args.cursor, args.infer_lineage, this.getDocument(args.slug)?.doc_id ?? null, explicit);
 
     const run = this.db.transaction((): PutDocumentResult => {
       const existing = this.getDocument(args.slug);
@@ -466,6 +549,9 @@ export class DocumentStore {
           // put without a source hashes exactly as in 0.3.0.
           ...(args.source !== undefined ? { source: args.source as unknown as Record<string, unknown> } : {}),
           ...(args.project && !args.source?.project ? { project: { key: args.project.key, root: args.project.root } } : {}),
+          // Unreleased, additive: lineage, only when there is any (a put without it hashes as before).
+          ...(explicit !== undefined ? { derived_from: explicit as unknown as Record<string, unknown>[] } : {}),
+          ...(inferred.length > 0 ? { derived_from_inferred: inferred as unknown as Record<string, unknown>[] } : {}),
         },
       });
       for (const c of [...created, ...replaced]) {
@@ -575,6 +661,7 @@ export class DocumentStore {
         });
       }
       summaries.sort((a, b) => a.ordinal - b.ordinal || a.status.localeCompare(b.status));
+      this.logWrite(args.actor_id, doc_id, 'document');
 
       return {
         doc_id,
@@ -585,6 +672,7 @@ export class DocumentStore {
         head,
         blocks: summaries,
         events: pending.length,
+        ...(explicit !== undefined || inferred.length > 0 ? { lineage: { derived_from: explicit?.length ?? 0, derived_from_inferred: inferred.length } } : {}),
       };
     });
     const result = run.immediate();
@@ -620,11 +708,17 @@ export class DocumentStore {
     actor_id: string;
     /** 0.6.0: see putDocument. */
     secrets?: SecretPolicy;
+    /** Unreleased: lineage of the new text; added to the document's lineage (never replaces it). */
+    derived_from?: LineageRef[];
+    cursor?: string;
+    infer_lineage?: boolean;
   }): SupersedeBlockResult {
     const guarded = guardFields({ new_content: args.new_content, reason: args.reason }, args.secrets ?? 'refuse', `block content`);
     args = { ...args, ...guarded.fields };
     const content = normalizeMarkdown(args.new_content).trim();
     if (content.length === 0) throw new DocumentError('empty_content', 'new_content is empty');
+    const explicit = this.checkLineage(args.derived_from);
+    const inferred = this.inferLineage(args.actor_id, args.cursor, args.infer_lineage, this.getBlock(args.block_id)?.doc_id ?? null, explicit);
     const run = this.db.transaction((): SupersedeBlockResult => {
       const old = this.requireLive(args.block_id);
       const doc = this.getDocumentById(old.doc_id)!;
@@ -647,6 +741,9 @@ export class DocumentStore {
           heading_path: splitHeadingPath(old.heading_path),
           content,
           content_hash,
+          // Unreleased, additive: lineage of the new text (absent = none recorded).
+          ...(explicit !== undefined && explicit.length > 0 ? { derived_from: explicit as unknown as Record<string, unknown>[] } : {}),
+          ...(inferred.length > 0 ? { derived_from_inferred: inferred as unknown as Record<string, unknown>[] } : {}),
         },
       });
       this.applyEvent(r1.event);
@@ -664,7 +761,9 @@ export class DocumentStore {
       });
       this.applyEvent(r2.event);
       const head = this.emitRevised(doc, revision, args.actor_id, 'supersede_block');
-      return { old_block_id: old.block_id, new_block_id, content_hash, doc_slug: doc.slug, revision, head };
+      this.logWrite(args.actor_id, old.doc_id, [new_block_id]);
+      const n = { derived_from: explicit?.length ?? 0, derived_from_inferred: inferred.length };
+      return { old_block_id: old.block_id, new_block_id, content_hash, doc_slug: doc.slug, revision, head, ...(n.derived_from + n.derived_from_inferred > 0 ? { lineage: n } : {}) };
     });
     const result = run.immediate();
     return guarded.redactions.length > 0 ? { ...result, redactions: guarded.redactions } : result;
@@ -711,6 +810,7 @@ export class DocumentStore {
       });
       this.applyEvent(r.event);
       const head = this.emitRevised(doc, revision, args.actor_id, 'tombstone_block');
+      this.logWrite(args.actor_id, old.doc_id, [old.block_id]);
       return { block_id: old.block_id, doc_slug: doc.slug, revision, head };
     });
     return run.immediate();
@@ -756,6 +856,16 @@ export class DocumentStore {
   }
 
   // ───────────────────────────── projection ─────────────────────────────
+
+  /** Unreleased: insert the lineage fields of one event (malformed entries are skipped, never thrown). */
+  private applyLineage(doc_id: string, p: Record<string, unknown>, seq: number): void {
+    const explicit = lineageRefs(p['derived_from']);
+    const inferred = lineageRefs(p['derived_from_inferred']);
+    if (typeof doc_id !== 'string' || explicit.length + inferred.length === 0) return;
+    const ins = this.db.prepare(`INSERT OR IGNORE INTO doc_lineage (doc_id, source_block_id, source_content_hash, inferred, chain_seq) VALUES (?, ?, ?, ?, ?)`);
+    for (const r of explicit) ins.run(doc_id, r.block_id, r.content_hash, 0, seq);
+    for (const r of inferred) ins.run(doc_id, r.block_id, r.content_hash, 1, seq);
+  }
 
   /** Apply one chain event to the derived tables. Idempotent per event. */
   applyEvent(ev: ChainEvent): void {
@@ -805,6 +915,9 @@ export class DocumentStore {
           } else {
             this.db.prepare(`DELETE FROM doc_sources WHERE doc_id = ?`).run(doc_id);
           }
+          // Unreleased: an explicit derived_from (even []) replaces the lineage; inferred edges add.
+          if (Array.isArray(p['derived_from'])) this.db.prepare(`DELETE FROM doc_lineage WHERE doc_id = ?`).run(doc_id);
+          this.applyLineage(doc_id, p, ev.seq);
         }
         return;
       }
@@ -828,6 +941,8 @@ export class DocumentStore {
             ev.seq,
             ev.occurred_at,
           );
+        // Unreleased: supersede_block lineage adds to the document's.
+        this.applyLineage(p['doc_id'] as string, p, ev.seq);
         return;
       }
       case 'block.superseded': {
@@ -855,6 +970,11 @@ export class DocumentStore {
         return; // unknown types (checkpoints, future vocab) have no projection
     }
   }
+}
+
+function lineageRefs(v: unknown): LineageRef[] {
+  if (!Array.isArray(v)) return [];
+  return v.filter((r): r is LineageRef => typeof r === 'object' && r !== null && typeof (r as LineageRef).block_id === 'string' && typeof (r as LineageRef).content_hash === 'string');
 }
 
 function headingLevelOf(b: BlockRow): number {

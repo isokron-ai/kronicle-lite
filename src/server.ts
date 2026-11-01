@@ -90,6 +90,16 @@ const CURSOR = z.string().optional().describe('Your latest cursor (for the stale
 
 const REDACT = z.boolean().default(false).describe('Store a redacted copy instead of refusing a detected secret.');
 
+/**
+ * Unreleased: explicit lineage (full profile only; `--core` stays lean and
+ * relies on inference from what you read this session).
+ */
+const DERIVED_FROM = z
+  .array(z.strictObject({ block_id: z.uuid(), content_hash: z.string().regex(/^[0-9a-f]{64}$/) }))
+  .max(200)
+  .optional()
+  .describe('Blocks (from recall) this text was derived from; when one changes, this note is marked stale. Inferred from your reads when omitted.');
+
 type ToolResult = {
   content: { type: 'text'; text: string }[];
   structuredContent?: Record<string, unknown>;
@@ -136,6 +146,12 @@ function errorResult(err: unknown): ToolResult {
   }
   const message = err instanceof Error ? err.message : String(err);
   return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: 'internal', message }) }] };
+}
+
+/** The optional `derived_from` argument (absent from the core profile's schema). */
+function derivedFrom(args: object): { block_id: string; content_hash: string }[] | undefined {
+  const v = (args as { derived_from?: unknown }).derived_from;
+  return Array.isArray(v) ? (v as { block_id: string; content_hash: string }[]) : undefined;
 }
 
 /** Factory form for the SDK serving entries: one fresh McpServer per connection (stdio) or request (HTTP). */
@@ -392,6 +408,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
           source_path: z.string().min(1).max(4096).optional().describe('File the markdown came from.'),
           bind_git: z.boolean().default(false),
           redact_secrets: REDACT,
+          ...(core ? {} : { derived_from: DERIVED_FROM }),
           cursor: CURSOR,
           actor_id: ACTOR,
         }),
@@ -426,6 +443,8 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
           ...(source !== undefined ? { source } : {}),
           ...(args.redact_secrets ? { secrets: 'redact' as const } : {}),
           ...(opts.project && opts.project.keys.length > 0 ? { project: { key: opts.project.keys[0]!, root: opts.project.root ?? '' } } : {}),
+          ...(derivedFrom(args) !== undefined ? { derived_from: derivedFrom(args)! } : {}),
+          ...(args.cursor !== undefined ? { cursor: args.cursor } : {}),
         });
         return json({
           ...result,
@@ -450,6 +469,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
           new_content: z.string().min(1).max(200_000),
           reason: z.string().min(1).max(1000),
           redact_secrets: REDACT,
+          ...(core ? {} : { derived_from: DERIVED_FROM }),
           cursor: CURSOR,
           actor_id: ACTOR,
         }),
@@ -468,6 +488,8 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
           reason: args.reason,
           actor_id,
           ...(args.redact_secrets ? { secrets: 'redact' as const } : {}),
+          ...(derivedFrom(args) !== undefined ? { derived_from: derivedFrom(args)! } : {}),
+          ...(args.cursor !== undefined ? { cursor: args.cursor } : {}),
         });
         return json({ ...result, stale_write_advisory });
       } catch (err) {
@@ -537,6 +559,8 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
       if (problem) throw new Error(`integrity failure (${problem}) in ${slug}@${rev.revision}: the stored text does not match the chain; run kronicle-lite verify-chain`);
       // 0.6.0: read-time secret scrub (independent of the write-time guard).
       const markdown = scrubDeep(rev.markdown).value;
+      // Unreleased: a document read is a read of its current version (pending reconciliation).
+      store.lineage.recordDocumentRead(defaultActor, doc.doc_id, 'document');
       return { contents: [{ uri: uri.href, mimeType: 'text/markdown', text: markdown }] };
     },
   );

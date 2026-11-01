@@ -59,7 +59,7 @@ Fields a hook reads:
 | `head.seq` | chain head when the briefing was made |
 | `recovery.method`, `recovery.cursor_error` | see above |
 | `retractions[]` | things the agent may have relied on that changed; empty when nothing did |
-| `retractions[].seq`, `.kind`, `.severity` | `kind`: `instruction` \| `supersession` \| `tombstone` \| `retraction`; `severity`: `safety` \| `behavioral` \| `informational` |
+| `retractions[].seq`, `.kind`, `.severity` | `kind`: `instruction` \| `supersession` \| `tombstone` \| `retraction` \| `derived` (unreleased, below); `severity`: `safety` \| `behavioral` \| `informational` |
 | `retractions[].doc_slug`, `.heading_path` | where |
 | `retractions[].old_text`, `.new_text`, `.diff` | bounded snippets (≤ 160 chars) and a word diff `[-old-]{+new+}` (≤ 400 chars); `new_text` and `diff` are `null` for a removal |
 | `retractions[].hint` | `"likely_typo"` on an edit shaped like a one-letter typo fix: a label only (severity and delivery unchanged; such edits include Karen→Karin) |
@@ -68,6 +68,8 @@ Fields a hook reads:
 | `format_only_edits[]` (alias `cosmetic_edits`) | edits with the same Markdown tree and byte-identical text (reflow, whitespace, emphasis or list-marker style): recorded, **not** in `retractions`, so a hook does not push them. `--include-format-only` folds them back into `retractions` with `format_only: true`. Nothing else is ever left out |
 | `integrity.ok`, `integrity.problem`, `integrity.seq` | `false`: the store was edited outside kronicle-lite (see "integrity failure" above) |
 | `drift_banner.surfaced` | the actor has not oriented for a while |
+| `retractions[]` with `kind: "derived"` (unreleased) | a NOTE derived from a block that changed in this window and was not re-derived: `doc_slug` / `old_text` are the note's, `diff` is the source's word diff (`source <slug>: [-old-]{+new+}`), `derived_from_change` names the source version, its current version and the change (`superseded` \| `moved` \| `tombstoned` \| `missing`); `seq` / `event_type` are the source change's. Severity `safety` when the source was removed, else `behavioral` |
+| `pending[]`, `pending_count`, `pending_actor`, `pending_hidden` (unreleased) | see "Pending" below; every focus, `pulse` included |
 
 `focus=retractions` is the cheap path: no delta entries, no digest, no git
 calls (`source_drift` is `null`, meaning "not checked"), and the integrity
@@ -75,6 +77,65 @@ pass re-hashes the events since the cursor (not the last 1000) plus the
 live blocks, so a store edited behind kronicle-lite's back still surfaces on
 this path. About 0.33 s per call on a 300-file store, most of it Node
 start-up.
+
+## Pending: version-bound reconciliation (unreleased, additive)
+
+Delivery is not reconciliation. A retraction pushed into the context can be
+skimmed, compacted away or never acted on, and the cursor has moved on
+anyway. `pending` is the other half: per actor, every change to a block the
+actor read (or wrote), or to a source of a note it read or wrote, that the
+actor has **not re-read at the current version**.
+
+- A read is a recall hit, a document read (`kronicle://docs/<slug>`, CLI
+  `get`), or the actor's own write; each records the exact block version
+  (docs/FORMAT.md §4.2).
+- An item is resolved only when the actor reads a block of the CURRENT
+  version: the live lineage head, or a format-only twin of it. For a removal:
+  reading the document (or the tombstoned block, recall
+  `include_tombstoned`) after the removal. Reading an older version never
+  clears a newer change (v1 → v2 → v3: reading v2 leaves the item, now
+  `read: v2`, `current: v3`). Receiving the push never clears it.
+- Format-only edits are never pending. Another actor's reads never count.
+- `derived` items: a note the actor read or wrote whose source changed;
+  resolved when the actor reads the source's current version (the note stays
+  `stale_derived` in recall until someone re-derives it). When the actor
+  also read the source directly, the source item lists the note under
+  `derived_notes` instead of a second item.
+- Project-scoped like retractions: items about other projects' documents are
+  counted in `pending_hidden`, not listed.
+
+Fields (on `get_system_state`, every `orient --json` focus, and
+`kronicle-lite pending --actor A --json`):
+
+| field | meaning |
+|---|---|
+| `pending_count` | unresolved items in scope (the gate keys on `> 0`) |
+| `pending[]` | up to 20 items (`pending` CLI: `--limit`, default 50), safety first, then by seq |
+| `pending[].kind` | `supersession` \| `tombstone` \| `instruction` (an `instructions/` / `memory/` document) \| `derived` |
+| `pending[].change`, `.severity`, `.seq` | `superseded` \| `moved` \| `tombstoned` \| `missing`; `safety` (removed) or `behavioral`; seq of the first real change after the version read |
+| `pending[].doc_slug`, `.heading_path` | where the changed block lives (for `derived`: the source's document) |
+| `pending[].read` | `{block_id, content_hash, head_seq}`: the version read (for `derived`: the version the note was derived from) |
+| `pending[].current` | `{block_id, content_hash}`, or `null` when removed |
+| `pending[].old_text`, `.new_text`, `.diff` | bounded snippets and word diff, read version → current |
+| `pending[].derived_notes` | notes the actor relied on that were derived from this block |
+| `pending[].resolve` | one sentence: what to re-read |
+| `pending_actor` | whose reads were checked: `--pending-actor A` (MCP: the caller's `actor_id`), else `--actor` |
+| `pending_hidden` | items about other projects' documents |
+
+A hook that orients under its own actor (`push-hook`) passes
+`--pending-actor <the agent's actor>`; nothing about that actor's flight
+recorder changes. The cheapest gate is one call:
+
+```sh
+kronicle-lite pending --data-dir DIR --actor AGENT --cwd PROJECT --json
+# {"format":"kronicle-lite/1","actor_id":"AGENT","head":{…},"pending_count":N,"pending_hidden":H,"pending":[…]}
+```
+
+Exit 0 with JSON whenever kronicle answers (non-zero = unavailable: fail
+open as above). A `PreToolUse` gate for `deploy|migrate|publish|git push`
+blocks (or asks) while `pending_count > 0`, quoting each item's `resolve`;
+the agent clears it by re-reading, never by acknowledging. Existing fields
+are unchanged: a hook that ignores `pending` behaves exactly as before.
 
 ## A minimal PostToolUse hook
 
@@ -114,7 +175,11 @@ try {
 
 The same call works as a `PreToolUse` gate for `Bash` commands matching
 `deploy|migrate|publish|git push`: when `retractions` is non-empty, return
-the lines as context (or ask) before the command runs.
+the lines as context (or ask) before the command runs. Unreleased: key the
+gate on `pending_count` instead (add `--pending-actor <agent>`, or call
+`kronicle-lite pending --actor <agent> --json`): it stays non-zero until the
+agent has re-read the current version, even after the push was delivered or
+compacted away.
 
 ## No hooks (Cursor, Codex, Hermes, plain MCP clients)
 

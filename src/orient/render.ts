@@ -24,8 +24,23 @@ export function isQuietBriefing(s: SystemState): boolean {
     (s.format_only_edits?.length ?? 0) === 0 &&
     (s.carried_notes?.length ?? 0) === 0 &&
     (s.source_drift?.length ?? 0) === 0 &&
-    (s.scope?.hidden_retractions ?? 0) === 0
+    (s.scope?.hidden_retractions ?? 0) === 0 &&
+    (s.pending_count ?? 0) === 0
   );
+}
+
+/** Unreleased: the pending (unreconciled) lines, at most `max`. */
+export function pendingLines(s: Pick<SystemState, 'pending' | 'pending_count'>, max = 8): string[] {
+  const items = s.pending ?? [];
+  if (items.length === 0) return [];
+  const out = items.slice(0, max).map((p) => {
+    const what = p.kind === 'derived' ? `note ${(p.derived_notes ?? []).join(', ')} derived from ${p.doc_slug ?? 'a block'}` : `${p.doc_slug ?? 'a document'}${p.heading_path.length > 0 ? ` › ${p.heading_path.join(' › ')}` : ''}`;
+    const change = p.current === null ? `you read "${p.old_text ?? p.read.block_id}"; REMOVED` : p.diff ? `changed: ${p.diff}` : `"${p.old_text}" → "${p.new_text}"`;
+    return `- **[${p.severity}]** ${what}${p.seq ? ` (seq ${p.seq})` : ''}: ${change}. ${p.resolve}.`;
+  });
+  const more = (s.pending_count ?? items.length) - Math.min(items.length, max);
+  if (more > 0) out.push(`- …and ${more} more (kronicle-lite pending --actor <you> --json lists them).`);
+  return out;
 }
 
 export function renderSystemStateMarkdown(s: SystemState): string {
@@ -40,6 +55,7 @@ export function renderSystemStateMarkdown(s: SystemState): string {
     if (integrityLine) out.unshift(integrityLine);
     if (s.recovery.cursor_error) out.push(`Your cursor was rejected (${s.recovery.cursor_error}); position recovered server-side (${s.recovery.method}).`);
     if (s.drift_banner.surfaced) out.push('Call get_system_state with focus=recent_changes before acting.');
+    if ((s.pending_count ?? 0) > 0) out.push(`Pending (${s.pending_count}): changes to what you read, not yet re-read at the current version — re-read before acting:`, ...pendingLines(s, 3));
     out.push(`Next cursor: \`${s.cursor_compact}\``);
     return out.join('\n');
   }
@@ -78,6 +94,12 @@ export function renderSystemStateMarkdown(s: SystemState): string {
   }
   if (s.scope && s.scope.hidden_retractions > 0) {
     lines.push(`_${s.scope.hidden_retractions} retraction(s) from other projects hidden and not reviewed (all_projects: true shows them)._`);
+  }
+
+  if ((s.pending_count ?? 0) > 0) {
+    lines.push('');
+    lines.push(`## Pending (${s.pending_count}) — re-read the current version before acting (an older version does not clear a newer change)`);
+    lines.push(...pendingLines(s));
   }
 
   if (s.carried_notes && s.carried_notes.length > 0) {
