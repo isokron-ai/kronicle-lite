@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { mkdirSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -43,7 +43,17 @@ export function openDatabase(opts: OpenOptions = {}): Opened {
   } else {
     dataDir = opts.dataDir ?? defaultDataDir();
     mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-    db = new Database(join(dataDir, 'kronicle-lite.db'));
+    const dbFile = join(dataDir, 'kronicle-lite.db');
+    const fresh = !existsSync(dbFile);
+    db = new Database(dbFile);
+    // 0.4.0: a new database is private like the keys next to it (WAL/SHM inherit its mode). No-op on Windows.
+    if (fresh) {
+      try {
+        chmodSync(dbFile, 0o600);
+      } catch {
+        // best effort
+      }
+    }
     identity = loadOrCreateIdentity(dataDir);
     // First run: config.json with the default anchor_url only (no license key).
     ensureDefaultConfig(dataDir);

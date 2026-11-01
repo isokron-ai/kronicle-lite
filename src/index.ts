@@ -39,6 +39,8 @@ export * as anchor from './anchor/index.js';
 export * as instructions from './instructions/index.js';
 export { InstructionWatcher, syncInstructionSet, resolveWatchSet, type WatchOptions, type WatchEvent } from './instructions/watch.js';
 export { syncInstructionFile, type SyncResult } from './instructions/sync.js';
+export { runDoctor, renderDoctor, findMcpClients, type DoctorReport, type DoctorCheck, type DoctorOptions, type CheckStatus } from './doctor.js';
+export { CATALOG_FINGERPRINT, CATALOG_VERSION, liveCatalogFingerprint } from './catalog.js';
 export { bindGit, checkGitBinding, diffStat, type BindResult, type SourceCheck, type DiffStat } from './git/binding.js';
 export {
   pushCheckpoint,

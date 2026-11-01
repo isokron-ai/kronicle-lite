@@ -105,6 +105,24 @@ on; kronicle-lite's own DB, key and Merkle code replace the duplicates).
 - Graceful outside git or without git: the put succeeds with a warning and
   no binding; a vanished repository is `unavailable`, not drift.
 
+### Added — `kronicle-lite doctor`
+
+- `kronicle-lite doctor [--json] [--no-network] [--full] [--cwd DIR]`,
+  read-only, exit 0/1: Node version; data dir `0700` and key files `0600`
+  (secret files readable by others fail); `PRAGMA integrity_check`; chain
+  verify over the last 1000 events plus every checkpoint (`--full` for the
+  whole chain); FTS5 `integrity-check` and row count vs `blocks`; live MCP
+  catalog fingerprint (served in-process) vs `CATALOG_FINGERPRINT` pinned
+  for this version, and vs `.mcp-catalog/` when run in a checkout;
+  `config.json` sanity; last anchor vs local root; anchor reachability
+  (non-fatal); MCP clients configured with kronicle-lite in
+  `~/.claude.json` (user + local scopes), `.mcp.json`, `.cursor/mcp.json`,
+  `~/.cursor/mcp.json`, `~/.codex/config.toml` (read-only, with their
+  `--data-dir`); a Windows note that POSIX modes are no-ops there.
+- `src/catalog.ts`: `CATALOG_FINGERPRINT`, `CATALOG_VERSION`,
+  `liveCatalogFingerprint()`; a test keeps them equal to the snapshot.
+- New databases are created `0600` (WAL/SHM inherit it).
+
 ## [0.3.0] — 2026-11-01
 
 MCP spec **2026-07-28** and the TypeScript SDK **v2**

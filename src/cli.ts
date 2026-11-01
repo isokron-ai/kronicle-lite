@@ -14,6 +14,7 @@
  *   kronicle-lite put SLUG FILE.md [--title T] [--data-dir DIR] [--bind-git]
  *   kronicle-lite put --from-instructions [PATHS…] [--cwd DIR] [--json] [--stdin-hook]
  *   kronicle-lite watch [PATHS…] [--interval MS] [--debounce MS] [--poll] [--cwd DIR] [--list [--json]]
+ *   kronicle-lite doctor [--json] [--no-network] [--full] [--cwd DIR]
  *   kronicle-lite orient [--data-dir DIR] [--actor ID] [--cursor C] [--focus F]
  */
 
@@ -27,6 +28,7 @@ import { AnchorApiError, AnchorUnreachableError } from './anchor/client.js';
 import { AnchorConfigError } from './anchor/config.js';
 import { defaultDataDir } from './db/open.js';
 import type { DocumentSource } from './docs/documents.js';
+import { runDoctor, renderDoctor } from './doctor.js';
 import { bindGit } from './git/binding.js';
 import { DEFAULT_HTTP_PORT, loadOrCreateBearer, readBearerFile, serveHttp } from './http.js';
 import { createServerFactory, renderSystemStateMarkdown } from './server.js';
@@ -58,6 +60,7 @@ const BOOLEAN_FLAGS = new Set([
   'once',
   'bind-git',
   'no-network',
+  'full',
 ]);
 
 function parseArgs(argv: string[]): Args {
@@ -131,6 +134,8 @@ Usage:
   kronicle-lite watch [PATHS…] [--interval MS] [--debounce MS] [--poll] [--cwd DIR]
                                                                  re-put instruction files on change (fs.watch + polling)
                  [--list [--json]]                               print the resolved watch set and exit
+  kronicle-lite doctor       [--data-dir DIR] [--json] [--no-network] [--full] [--cwd DIR]
+                                                                 health checks (read-only); exit 1 when any check fails
   kronicle-lite orient       [--data-dir DIR] [--actor ID] [--cursor C] [--focus F] [--json]
 
 Data dir defaults to $KRONICLE_LITE_DATA_DIR or ~/.kronicle-lite.
@@ -390,6 +395,16 @@ async function main(argv: string[]): Promise<number> {
     }
     case 'watch':
       return watchCommand(dataDir, positional, flags);
+    case 'doctor': {
+      const report = await runDoctor({
+        dataDir,
+        ...(str(flags['cwd']) !== undefined ? { cwd: str(flags['cwd'])! } : {}),
+        network: flags['no-network'] !== true,
+        full: flags['full'] === true,
+      });
+      process.stdout.write((flags['json'] ? JSON.stringify(report, null, 2) : renderDoctor(report)) + '\n');
+      return report.ok ? 0 : 1;
+    }
     default:
       process.stderr.write(`unknown command: ${cmd}\n\n${HELP}`);
       return 2;

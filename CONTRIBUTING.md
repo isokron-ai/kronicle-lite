@@ -35,6 +35,13 @@ Run the server against a scratch data dir:
 node dist/cli.js serve --data-dir /tmp/kl-dev
 ```
 
+The MCP catalog is pinned twice: `.mcp-catalog/kronicle-lite.json` (CI runs
+`npm run catalog:check`) and `CATALOG_FINGERPRINT` / `CATALOG_VERSION` in
+`src/catalog.ts` (what `doctor` compares the running build against). After a
+deliberate tool change run `npm run build && npm run catalog:snapshot`, copy
+the printed `sha256` into `src/catalog.ts`, and explain the drift in
+CHANGELOG; `test/doctor.test.ts` fails until all three agree.
+
 ## Pull requests
 
 - One logical change per PR. Tests for anything that touches the chain,

@@ -312,6 +312,29 @@ bound vs working blob; `get_system_state` lists the document under a
 `git rev-parse` / `git hash-object` / `git cat-file`; outside a repository
 (or without git) the put succeeds with a warning and nothing is bound.
 
+## `kronicle-lite doctor` (0.4.0)
+
+```sh
+kronicle-lite doctor                 # human-readable; exit 1 when any check fails
+kronicle-lite doctor --json          # the full report
+kronicle-lite doctor --no-network    # skip the anchor reachability probe
+kronicle-lite doctor --full          # verify the whole chain, not the last 1000 events
+```
+
+Read-only: it never creates the data dir or writes a key, config or schema.
+Checks: Node version (≥ 20); data dir and key-file modes (`0700` dir,
+`0600` keys — a group/world-readable signing key, cursor secret, bearer
+token or license-bearing `config.json` fails); `PRAGMA integrity_check`;
+chain links and hashes over the last 1000 events plus every checkpoint;
+FTS5 index vs `blocks`; the MCP catalog this build serves vs the
+fingerprint pinned for this version; `config.json` sanity; the last anchor
+vs the local root (fails on divergence); anchor service reachability
+(warning only); which MCP clients have kronicle-lite configured
+(`~/.claude.json` user and local scopes, `.mcp.json`, `.cursor/mcp.json`,
+`~/.cursor/mcp.json`, `~/.codex/config.toml` — read, never written) and with
+which `--data-dir`. On Windows it adds a note that the POSIX modes are
+no-ops there, with an `icacls` line to lock the data dir down.
+
 ## Tools
 
 | tool | what it does | writes chain |
