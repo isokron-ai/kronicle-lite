@@ -1,19 +1,29 @@
 # Roadmap
 
-Things deliberately left out of v0.1, roughly in the order they are likely
+Things deliberately left out so far, roughly in the order they are likely
 to land. Open an issue if one matters to you.
+
+## Shipped
+
+- **0.3.0 — MCP 2026-07-28 + SDK v2; HTTP transport.** Streamable HTTP
+  (`serve --http`, loopback, bearer from the data dir), `server/discover`,
+  `outputSchema`/`structuredContent` on every tool, cache hints, catalog
+  drift gate. stdio stays dual-era for 2025 `initialize` clients.
 
 ## Next
 
-- **Richer `audit_assumptions` symbols** — v0.1 grades block ids, document
-  slugs and the chain head. Next: `slug#heading` paths and free-text claims
-  matched through recall.
-- **HTTP transport** — Streamable HTTP alongside stdio, for clients that
-  cannot spawn a process, with a bearer token read from the data dir.
 - **Remote checkpoint anchoring** — push signed Merkle roots to somewhere
   the local box cannot rewrite (a gist, an S3 object with object lock, a
   transparency log). This is the step that turns local integrity into
-  evidence; see `docs/THREAT-MODEL.md`.
+  evidence; see `docs/THREAT-MODEL.md`. Now that HTTP exists, the natural
+  shape is a `checkpoint --anchor <target>` plus a `verify_chain` that
+  compares against the remote root.
+- **Richer `audit_assumptions` symbols** — grades block ids, document
+  slugs and the chain head today. Next: `slug#heading` paths and free-text
+  claims matched through recall.
+- **HTTP hardening for shared boxes** — per-token actor binding, token
+  rotation without restart, optional mTLS. The 0.3.0 HTTP mode is a
+  single-tenant base (one token = the whole store), on purpose.
 - **Semantic recall** — optional embedding index next to FTS5 (sqlite-vec),
   same receipt shape.
 

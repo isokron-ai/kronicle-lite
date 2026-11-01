@@ -20,7 +20,16 @@ kronicle-lite is a small SQLite-backed document store where:
   on that are now wrong.
 
 It is one process, one file, no accounts. It runs over stdio next to Claude
-Code, Cursor, Claude Desktop or any MCP client.
+Code, Cursor, Claude Desktop, Codex, GitHub Copilot or any MCP client, and
+over loopback Streamable HTTP for clients that cannot spawn a process.
+
+> **0.3.0 speaks MCP 2026-07-28** (TypeScript SDK v2). Every tool has an
+> `outputSchema` and returns `structuredContent`; `tools/list` and
+> `server/discover` carry cache hints; results carry `resultType`. The
+> stdio server is **dual-era**: a client that still opens with the
+> 2025-era `initialize` handshake (2025-11-25, 2025-06-18, 2025-03-26) is
+> served exactly as before. HTTP is 2026-07-28 only. Details in
+> [CHANGELOG](CHANGELOG.md).
 
 > kronicle-lite is **not a memory server**. It sits beside one. Keep using
 > whatever you use for knowledge graphs or semantic recall; point kronicle-lite
@@ -47,11 +56,26 @@ Then typing `orient` re-grounds the agent against the chain.
 
 ### Cursor
 
-`.cursor/mcp.json`:
+Cursor reads `.cursor/mcp.json` (project) or `~/.cursor/mcp.json`
+(global) and interpolates `${workspaceFolder}`, `${userHome}` and
+`${env:NAME}` in `command`, `args`, `env`, `url` and `headers`:
 
 ```json
-{ "mcpServers": { "kronicle-lite": { "command": "npx", "args": ["-y", "kronicle-lite", "serve", "--actor", "cursor"] } } }
+{
+  "mcpServers": {
+    "kronicle-lite": {
+      "command": "npx",
+      "args": ["-y", "kronicle-lite", "serve", "--data-dir", "${workspaceFolder}/.kronicle-lite", "--actor", "cursor"]
+    }
+  }
+}
 ```
+
+For the HTTP mode below use `{ "url": "http://127.0.0.1:7417/mcp", "headers": { "Authorization": "Bearer ${env:KRONICLE_LITE_BEARER}" } }`
+instead of `command`/`args` — only if your Cursor build speaks MCP
+2026-07-28 over HTTP; a 2025-era HTTP client is refused (stdio serves both).
+Source:
+[Cursor Docs — Model Context Protocol](https://cursor.com/docs/context/mcp).
 
 ### Claude Desktop
 
@@ -61,7 +85,79 @@ Then typing `orient` re-grounds the agent against the chain.
 { "mcpServers": { "kronicle-lite": { "command": "npx", "args": ["-y", "kronicle-lite", "serve", "--actor", "claude-desktop"] } } }
 ```
 
+### Codex
+
+`~/.codex/config.toml` (or `.codex/config.toml` in a trusted project):
+
+```toml
+[mcp_servers.kronicle-lite]
+command = "npx"
+args = ["-y", "kronicle-lite", "serve", "--actor", "codex"]
+# optional: default_tools_approval_mode = "writes"   # prompt only for put/supersede/tombstone
+```
+
+Codex reads the server `instructions` at startup and uses the first 512
+characters as server-wide guidance; kronicle-lite's instructions are the
+orient loop and fit in that window. Per OpenAI's docs the same file also
+takes `enabled_tools` / `disabled_tools`, `startup_timeout_sec` (default
+10) and `tool_timeout_sec` (default 60). Source:
+[OpenAI — Model Context Protocol](https://developers.openai.com/codex/mcp).
+
+### GitHub Copilot (coding agent + code review)
+
+Repository **Settings → Copilot → MCP servers** (under "Code, planning, and
+automation"); the configuration is shared by the Copilot coding agent and
+Copilot code review:
+
+```json
+{
+  "mcpServers": {
+    "kronicle-lite": {
+      "type": "local",
+      "command": "npx",
+      "args": ["-y", "kronicle-lite", "serve", "--data-dir", "./.kronicle-lite", "--actor", "copilot"],
+      "tools": ["get_system_state", "audit_assumptions", "recall", "verify", "verify_chain"]
+    }
+  }
+}
+```
+
+`tools` is required; GitHub recommends allowlisting read-only tools because
+the agent calls them without asking. The five above are the ones
+kronicle-lite marks `readOnlyHint: true`, which is also the set Copilot code
+review will use (it ignores tools without that annotation). Add
+`put_document`, `supersede_block`, `tombstone_block` (or `"*"`) if the
+coding agent should write. Secrets must be named `COPILOT_MCP_*` and
+referenced from `env`. Source:
+[GitHub Docs — Extending Copilot coding agent with MCP](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/coding-agent/extend-coding-agent-with-mcp).
+
 More in [`examples/`](examples/README.md).
+
+### Streamable HTTP: `serve --http`
+
+For a client that cannot spawn a process (or several clients sharing one
+store on the same box):
+
+```sh
+kronicle-lite serve --http                       # http://127.0.0.1:7417/mcp
+kronicle-lite serve --http --port 9000           # other port
+kronicle-lite serve --http --bearer-file ./token # token from a file you manage
+kronicle-lite serve --http --bearer "$TOKEN"     # token from the environment
+```
+
+- **Auth.** Every request must carry `Authorization: Bearer <token>`. By
+  default the token lives in `<data dir>/http-bearer.token`, generated on
+  first run with mode `0600`; print it with `cat ~/.kronicle-lite/http-bearer.token`.
+- **Loopback.** Binds `127.0.0.1`; `Host` and `Origin` are validated
+  against loopback (DNS-rebinding defence). `--host 0.0.0.0 --allow-host
+  myhost.lan --allow-origin myhost.lan` opens it up; put TLS in front.
+- **2026-07-28 only, stateless.** No session id, `GET`/`DELETE` answer
+  `405`, every request carries its protocol version in `_meta` and the
+  `MCP-Protocol-Version` header. A 2025-era `initialize` gets `400` with
+  `UnsupportedProtocolVersionError` (`-32022`) listing `2026-07-28`; use
+  stdio for those clients.
+- **Trust domain.** Single tenant: the token is the whole store. See
+  [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md#http-transport-serve---http).
 
 ## Sixty-second tour
 
@@ -105,6 +201,14 @@ Every write tool accepts an optional `cursor` and returns the new chain head
 plus a `stale_write_advisory` (advisory only; nothing is ever blocked). The
 `kronicle://docs/{slug}` resource serves a document's current revision.
 
+Every tool declares an `outputSchema` and returns the same JSON as
+`structuredContent` and as a text block (`get_system_state` renders Markdown
+in the text block by default; `response_format: "json"` makes the text the
+JSON too). The emitted catalog is pinned in
+[`.mcp-catalog/kronicle-lite.json`](.mcp-catalog/kronicle-lite.json) and CI
+fails on byte drift (`npm run catalog:check`), because a changed description
+or schema silently invalidates every client's prompt-cache prefix.
+
 Full hash recipes and payload shapes: [`docs/FORMAT.md`](docs/FORMAT.md).
 What the local signature does and does not prove:
 [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md).
@@ -144,14 +248,15 @@ told.
 
 ```sh
 npm install
-npm run build        # tsup → dist/
-npm test             # builds, then vitest (unit + MCP in-process + MCP over stdio)
+npm run build          # tsup → dist/
+npm test               # builds, then vitest (unit + MCP in-process, stdio, HTTP, legacy handshake)
 npm run lint
+npm run catalog:check  # tools/list bytes vs .mcp-catalog/ (re-snapshot with catalog:snapshot)
 ```
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) (DCO sign-off required) and
-[`ROADMAP.md`](ROADMAP.md) for what is deliberately not here yet: chain-backed
-tickets, HTTP transport, remote checkpoint anchoring, semantic recall.
+[`ROADMAP.md`](ROADMAP.md) for what is deliberately not here yet: remote checkpoint
+anchoring, chain-backed tickets, semantic recall.
 
 ## Beyond one agent
 

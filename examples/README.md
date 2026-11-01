@@ -46,8 +46,28 @@ and add the line from `examples/.claude/CLAUDE.md` to your `CLAUDE.md`.
 }
 ```
 
+## Codex / GitHub Copilot
+
+See the README: `~/.codex/config.toml` `[mcp_servers.kronicle-lite]` for
+Codex; repository Settings → Copilot → MCP servers (`"type": "local"` with a
+`tools` allowlist) for Copilot.
+
+## Streamable HTTP
+
+```sh
+kronicle-lite serve --http            # 127.0.0.1:7417/mcp, bearer in ~/.kronicle-lite/http-bearer.token
+```
+
+Client config (any client that speaks MCP 2026-07-28 over HTTP):
+
+```json
+{ "mcpServers": { "kronicle-lite": { "url": "http://127.0.0.1:7417/mcp", "headers": { "Authorization": "Bearer <token>" } } } }
+```
+
 ## Any MCP client
 
-The server speaks MCP over stdio. `tools/list` returns nine tools; the
-`kronicle://docs/{slug}` resource template exposes current document
-revisions as Markdown. See the README for the tool reference.
+The server speaks MCP 2026-07-28 over stdio (dual-era: 2025 `initialize`
+clients are served too) and over HTTP (2026-07-28 only). `tools/list`
+returns nine tools, each with an `outputSchema`; the `kronicle://docs/{slug}`
+resource template exposes current document revisions as Markdown. See the
+README for the tool reference.
