@@ -133,6 +133,25 @@ uses semantic versioning once past 0.x.
   newer change blocks again, every reader / the configured actor, removal,
   derived note, ack override, integrity still closed).
 
+### Fixed — a project reached through a symlink lost every retraction (0.7.0)
+
+- 0.7.0 keyed a project by the path spelling it was given: `put` recorded
+  the physical working directory (macOS `/private/var/…`) while a hook or
+  `--cwd` passed the symlinked spelling (`/var/…`, a linked checkout), so
+  the two got different project keys and project-scoped `orient` /
+  `get_system_state` / `recall` showed 0 retractions for the other spelling.
+  0.7.0 users whose project path goes through a symlink were affected
+  (found by cc-anchor's macOS CI). Every working directory, project root and
+  instruction file path is now canonicalised with `realpath`
+  (`realpathSync.native`; a deleted file through its nearest existing
+  ancestor; on Windows a case-only difference keeps the given spelling)
+  before a key is computed: put, watch, the FileChanged hook, orient,
+  recall, pending, pulse and the shims all agree. Instruction files first
+  imported under the symlinked spelling's key are imported once more under
+  the canonical key; the old copy stays, scoped to the old key.
+  `test/symlink-project.test.ts`: put via the real path and orient / pending
+  / pulse via the link, and the reverse, plain dir and git repo.
+
 ### Bench (agent-memory-bench Track A, branch `kl-next-release`, 20 seeds)
 
 - **S1 next-session stale copy served unmarked: 20/20 → 0/20**

@@ -97,6 +97,27 @@ export interface ResolvedContext {
 
 const PROJECT_OVERRIDE_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
+/**
+ * 0.8.0: the canonical spelling of a path: symlinks resolved
+ * (`realpathSync.native`), so `/var/x` and `/private/var/x` (macOS), or a
+ * project reached through a symlink, name ONE project. A path that does not
+ * exist (a deleted file) is canonicalised through its nearest existing
+ * ancestor. On Windows a result that differs only in letter case keeps the
+ * given spelling (keys stay what they were; junctions still resolve).
+ */
+export function canonicalPath(p: string): string {
+  const abs = resolve(p);
+  let real: string;
+  try {
+    real = realpathSync.native(abs);
+  } catch {
+    const parent = dirname(abs);
+    return parent === abs ? abs : join(canonicalPath(parent), basename(abs));
+  }
+  if (process.platform === 'win32' && real.toLowerCase() === abs.toLowerCase()) return abs;
+  return real;
+}
+
 /** Readable, stable key for a project root: `<basename>-<sha256(root)[:8]>`. */
 export function projectKey(root: string): string {
   const norm = root.split(/[\\/]+/).join('/');
@@ -111,7 +132,9 @@ export function projectScopeFor(ctx: InstructionContext = {}): { keys: string[];
 }
 
 export function resolveContext(ctx: InstructionContext = {}): ResolvedContext {
-  const cwd = resolve(ctx.cwd ?? process.cwd());
+  // 0.8.0: canonical (symlinks resolved), so the project key is the same whichever spelling of the
+  // project path a caller passes (`put` from process.cwd() vs a hook's literal --cwd through a symlink).
+  const cwd = canonicalPath(ctx.cwd ?? process.cwd());
   const home = ctx.home ?? homedir();
   const env = ctx.env ?? process.env;
   const projectRoot = gitToplevel(cwd) ?? cwd;
@@ -250,10 +273,12 @@ function isInside(root: string, file: string): string | null {
 
 /** Build the entry (slug, recorded path, title) for one absolute file path. */
 export function entryFor(absPath: string, rc: ResolvedContext): InstructionEntry {
-  const path = resolve(absPath);
-  const inMem = isInside(rc.memoryDir, path);
+  // 0.8.0: classify by the canonical path (the project root is canonical), so a hook's
+  // /var/… spelling of a /private/var/… project file is still that project's file.
+  const path = canonicalPath(absPath);
+  const inMem = isInside(rc.memoryDir, path) ?? isInside(canonicalPath(rc.memoryDir), path);
   if (inMem !== null) {
-    const homeRel = isInside(rc.home, path);
+    const homeRel = isInside(rc.home, path) ?? isInside(canonicalPath(rc.home), path);
     const recordPath = homeRel !== null ? `~/${homeRel}` : path.split(/[\\/]+/).join('/');
     return {
       path,
@@ -277,7 +302,7 @@ export function entryFor(absPath: string, rc: ResolvedContext): InstructionEntry
       title: `${basename(rc.projectRoot)}/${rel}`,
     };
   }
-  const homeRel = isInside(rc.home, path);
+  const homeRel = isInside(rc.home, path) ?? isInside(canonicalPath(rc.home), path);
   const recordPath = homeRel !== null ? `~/${homeRel}` : path.split(/[\\/]+/).join('/');
   const slug = boundSlug(`instructions/external/${hash8(recordPath)}-${sanitizeSegment(stripMd(basename(path)))}`);
   return { path, slug, legacySlug: null, project: null, kind: 'instruction', recordPath, title: recordPath };

@@ -236,6 +236,12 @@ lowercased, at most 40 characters, then `-` and the first 8 hex chars of
 `sha256(absolute root path, '/'-separated)`: `/work/acme-api` →
 `acme-api-<8 hex>`. `<memory key>` is the same recipe over the main
 worktree root, the directory Claude Code keys auto memory by.
+Since 0.8.0 every root, working directory and file path is canonicalised
+first (symlinks resolved with `realpath`; a missing file through its
+nearest existing ancestor; on Windows a case-only difference keeps the
+given spelling), so a project reached through a symlink (macOS `/var` →
+`/private/var`, a linked checkout) has one key whichever spelling a caller
+passes.
 `$KRONICLE_LITE_PROJECT` (`^[a-z0-9][a-z0-9._-]{0,63}$`) replaces both.
 0.4.0 wrote the same slugs without the key (`instructions/claude-md`,
 `memory/MEMORY`), so two repositories sharing a data dir overwrote each
