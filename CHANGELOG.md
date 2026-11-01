@@ -4,7 +4,7 @@ All notable changes to kronicle-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
-## [Unreleased]
+## [0.7.0] — 2026-11-01
 
 ### Fixed — 0.7.0's cosmetic classifier hid real changes (release blocker)
 
@@ -63,7 +63,6 @@ uses semantic versioning once past 0.x.
   first. docs/PUSH.md: "kronicle unavailable" (non-zero exit: fail open)
   vs "integrity failure" (push it; a pulse blocks).
 
-## [0.7.0] — 2026-11-01
 
 Fixes measured by agent-memory-bench Track A (deterministic, 20 seeds per
 cell; before = 0.6.0, after = this branch). Additive: no hash recipe,
