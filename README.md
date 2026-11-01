@@ -31,6 +31,11 @@ over loopback Streamable HTTP for clients that cannot spawn a process.
 > served exactly as before. HTTP is 2026-07-28 only. Details in
 > [CHANGELOG](CHANGELOG.md).
 
+> **0.4.0** adds off-box anchoring (`checkpoint --push`, `verify --remote`),
+> chained instructions (`watch`, retractions of kind `instruction`),
+> git-aware blocks (`bind_git`, `STALE_SOURCE`) and `kronicle-lite doctor`.
+> All additive: 0.3.0 chains verify byte-for-byte.
+
 > kronicle-lite is **not a memory server**. It sits beside one. Keep using
 > whatever you use for knowledge graphs or semantic recall; point kronicle-lite
 > at the notes whose staleness would hurt.
@@ -402,7 +407,8 @@ told.
 ```sh
 npm install
 npm run build          # tsup → dist/
-npm test               # builds, then vitest (unit + MCP in-process, stdio, HTTP, legacy handshake)
+npm test               # builds, then vitest (unit + MCP in-process, stdio, HTTP, legacy handshake);
+                       # CI runs it on Ubuntu (Node 20, 22) and Windows (Node 22)
 npm run lint
 npm run catalog:check  # tools/list bytes vs .mcp-catalog/ (re-snapshot with catalog:snapshot)
 ```

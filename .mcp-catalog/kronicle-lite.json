@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-01T01:06:26.560Z",
+  "capturedAt": "2026-11-01T01:15:15.886Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -2771,7 +2771,7 @@
   "server": {
     "name": "kronicle-lite",
     "title": "kronicle-lite",
-    "version": "0.3.0"
+    "version": "0.4.0"
   },
   "sha256": "fa8d1d6f50b1c461af859c6520515c621c7aee09be19f516a03e366b42a48dee"
 }

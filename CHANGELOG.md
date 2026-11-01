@@ -4,7 +4,7 @@ All notable changes to kronicle-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
-## [0.4.0] — unreleased
+## [0.4.0] — 2026-11-01
 
 Four additive features. Every 0.3.0 chain verifies byte-for-byte: no hash
 recipe, receipt, checkpoint or cursor layout changed; new event payload
@@ -122,6 +122,62 @@ on; kronicle-lite's own DB, key and Merkle code replace the duplicates).
 - `src/catalog.ts`: `CATALOG_FINGERPRINT`, `CATALOG_VERSION`,
   `liveCatalogFingerprint()`; a test keeps them equal to the snapshot.
 - New databases are created `0600` (WAL/SHM inherit it).
+
+### Changed
+
+- **Catalog fingerprint** `11f99985…` → `fa8d1d6f50b1c461af859c6520515c621c7aee09be19f516a03e366b42a48dee`,
+  re-snapshotted deliberately in each feature commit. The drift: new tool
+  `anchor_status`; `checkpoint_chain` gains input `push`, optional output
+  `anchor`, `openWorldHint: true` and a longer description; `put_document`
+  gains inputs `source_path` / `bind_git`, optional outputs `source` /
+  `warnings` and a longer description; `verify` gains status
+  `STALE_SOURCE`, reason `stale_source`, optional `source_drift`;
+  `audit_assumptions` gains verdict `stale_source`, optional
+  `counts.stale_source` and `source_drift`; `get_system_state` gains
+  `anchor`, `source_drift` and retraction kind `instruction`. Nothing was
+  removed or renamed, no input became required, every 0.3.0 output field
+  is still there. Clients take one prompt-cache miss.
+- The fingerprint is also pinned in `src/catalog.ts` (`CATALOG_FINGERPRINT`,
+  `CATALOG_VERSION`) for `doctor`; a test keeps it equal to the snapshot.
+- New databases are created `0600`.
+- CI gains a `windows-latest` / Node 22 job; `.gitattributes` pins LF.
+  POSIX-only assertions (file modes) skip on win32 with a reason.
+- `package.json` / `server.json` → 0.4.0; `server.json` lists
+  `KRONICLE_ANCHOR_URL` and `KRONICLE_ANCHOR_KEY` (secret).
+
+### Compatibility
+
+- FORMAT changes are additive only: §1.2 event hash, §2 checkpoints, §4
+  receipts and §5 cursors are untouched. New: optional `source` in
+  `document.put`, namespaced slugs, tables `anchors` and `doc_sources`
+  (created on open), a trailing export line only when anchors exist.
+- `test/fixtures/export-0.3.0.jsonl`, written by the 0.3.0 CLI, imports
+  under 0.4.0 with every hash and link re-verified and re-exports its
+  event lines byte-for-byte; a real 0.3.0 data dir opens, gains the new
+  tables and its checkpoint still verifies.
+- An export that carries the anchors line is not importable by 0.3.0
+  (strict event parsing there); exports of un-anchored stores are
+  unchanged.
+
+### Tests
+
+76 → 123: anchor acceptance suite against an in-test service stub (plus,
+with `KRONICLE_ANCHOR_WORKER_DIR`, the same 13 cases against the real
+isokron-anchor Worker under Miniflare — 31/31 locally), instruction
+import/watch/hooks (12), git binding (7), doctor + catalog pin (8), 0.3.0
+compatibility (2).
+
+### Known limits
+
+- The hosted anchor service is not deployed; remote calls report "anchor
+  service unreachable". Inclusion proofs (`prove --seq N`) and day-root
+  refresh from the integration doc's days 6–12 are not in this release.
+- cc-anchor 0.2.0 (current) has no `FileChanged` / `watchPaths` hook; the
+  README shows the two settings entries that do the same job.
+- Claude Code project directory names over 200 characters carry an
+  unspecified hash suffix; `watch` finds that directory by prefix.
+- The Windows CI job was added but could not be run from the build
+  environment; it exercises paths, fs.watch, git and both transports.
 
 ## [0.3.0] — 2026-11-01
 

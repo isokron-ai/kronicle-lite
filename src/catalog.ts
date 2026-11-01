@@ -21,7 +21,7 @@ import { KronicleLite } from './store.js';
 
 export const CATALOG_FINGERPRINT = 'fa8d1d6f50b1c461af859c6520515c621c7aee09be19f516a03e366b42a48dee';
 /** Package version the fingerprint above was pinned for. */
-export const CATALOG_VERSION = '0.3.0';
+export const CATALOG_VERSION = '0.4.0';
 
 const MODERN = '2026-07-28';
 
