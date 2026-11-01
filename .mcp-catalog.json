@@ -1,0 +1,9 @@
+{
+  "snapshotDir": ".mcp-catalog",
+  "servers": [
+    {
+      "name": "kronicle-lite",
+      "command": ["node", "dist/cli.js", "serve", "--data-dir", ".mcp-catalog/.data"]
+    }
+  ]
+}

@@ -8,3 +8,4 @@ coverage/
 .kronicle-lite/
 *.tgz
 .DS_Store
+.mcp-catalog/.data/

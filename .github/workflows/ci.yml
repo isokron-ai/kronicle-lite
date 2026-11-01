@@ -19,3 +19,6 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
+      # Catalog drift gate: tools/list bytes are a reviewed artifact (.mcp-catalog/).
+      # Re-snapshot deliberately with `npm run catalog:snapshot` and commit the diff.
+      - run: npm run catalog:check
