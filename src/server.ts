@@ -67,9 +67,9 @@ export const CORE_TOOLS = ['get_system_state', 'audit_assumptions', 'recall', 'v
  */
 export const INSTRUCTIONS =
   'kronicle-lite: hash-chained document store with signed receipts and an orient protocol. ' +
-  'Loop: call get_system_state at session start and before writes, passing your previous cursor as since_cursor; ' +
-  'honor the drift banner and reconcile retractions (audit_assumptions) before acting; recall() returns blocks with receipts, ' +
-  'verify() re-checks a receipt against the live chain; write with your cursor; carry the returned cursor forward. ' +
+  'Call get_system_state at session start, before writes and before world-changing commands (deploy, migrate, publish, git push), ' +
+  'passing your previous cursor as since_cursor; honor the drift banner and reconcile retractions before acting. ' +
+  'recall() returns blocks with receipts; verify() re-checks one against the live chain. Carry the returned cursor forward. ' +
   'The chain is authority over your own memory.';
 
 /** Cache hints for the 2026-07-28 cacheable results. */
@@ -95,10 +95,16 @@ type ToolResult = {
   isError?: boolean;
 };
 
-/** Structured result: the value as structuredContent and, for text-only clients, as pretty JSON. */
-function json(value: object): ToolResult {
+/**
+ * Unreleased (next): MCP recall's default content budget (characters). The
+ * library default stays DEFAULT_MAX_CHARS (16000); agents ask for more.
+ */
+export const DEFAULT_MCP_MAX_CHARS = 4000;
+
+/** Structured result: the value as structuredContent and, for text-only clients, as JSON (pretty unless compact). */
+function json(value: object, opts: { compact?: boolean } = {}): ToolResult {
   return {
-    content: [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+    content: [{ type: 'text', text: opts.compact ? JSON.stringify(value) : JSON.stringify(value, null, 2) }],
     structuredContent: value as Record<string, unknown>,
   };
 }
@@ -173,7 +179,8 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
           since_cursor: z.string().optional().describe('cursor or cursor_compact from your last call'),
           focus: z.enum(FOCUSES).default('orientation'),
           response_format: z.enum(['markdown', 'json']).default('markdown'),
-          all_projects: z.boolean().default(false).describe('Include instruction retractions from other projects.'),
+          all_projects: z.boolean().default(false).describe('Include other projects\' documents and retractions.'),
+          include_cosmetic: z.boolean().default(false).describe('Also list formatting-only edits as retractions.'),
           actor_id: ACTOR,
         }),
         'input',
@@ -189,6 +196,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
           since_cursor: args.since_cursor,
           focus: args.focus,
           project: args.all_projects ? null : (opts.project ?? null),
+          include_cosmetic: args.include_cosmetic,
         });
         if (args.response_format === 'json') return json(state);
         return {
@@ -241,7 +249,9 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
           top_k: z.number().int().min(1).max(50).default(12),
           include_tombstoned: z.boolean().default(false),
           include_receipts: z.boolean().default(true),
-          max_chars: z.number().int().min(200).max(400_000).default(16_000).describe('Content budget; longer hits are cut with a pointer.'),
+          receipts: z.enum(['id', 'inline']).default('id').describe('id: receipt_id per hit (verify takes it); inline: the signed receipt.'),
+          max_chars: z.number().int().min(200).max(400_000).default(DEFAULT_MCP_MAX_CHARS).describe('Content budget; longer hits are cut with a pointer.'),
+          all_projects: z.boolean().default(false).describe('Search other projects\' documents too.'),
           cursor: CURSOR,
           actor_id: ACTOR,
         }),
@@ -259,10 +269,13 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
             top_k: args.top_k,
             include_tombstoned: args.include_tombstoned,
             include_receipts: args.include_receipts,
+            receipt_format: args.receipts,
             max_chars: args.max_chars,
             actor_id,
             session_since: store.orient.sessionStart(actor_id, args.cursor),
+            project_keys: args.all_projects ? null : (opts.project?.keys ?? null),
           }),
+          { compact: true },
         );
       } catch (err) {
         return errorResult(err);
@@ -275,13 +288,19 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     {
       title: 'Verify a retrieval receipt',
       description:
-        'Re-check a recall() receipt against the store (signature, re-hashed block text, chain position, supersession): ' +
+        'Re-check a recall() receipt (object or receipt_id) against the store (signature, re-hashed block text, chain position, supersession): ' +
         'VERIFIED | SUPERSEDED (see current_block_id) | TOMBSTONED | STALE_SOURCE | UNVERIFIED, with a reason. Fail-closed.',
-      inputSchema: lean(z.object({ receipt: z.record(z.string(), z.unknown()).describe('The receipt object from recall().') }), 'input'),
+      inputSchema: lean(
+        z.object({
+          receipt: z.record(z.string(), z.unknown()).optional().describe('The receipt object from recall().'),
+          receipt_id: z.string().min(1).max(100).optional().describe('Or the receipt_id from recall().'),
+        }),
+        'input',
+      ),
       outputSchema: lean(VerifyResultSchema, 'output'),
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
-    (args) => json(store.verifier.verify(args.receipt)),
+    (args) => json(store.verifier.verify(args.receipt ?? (args.receipt_id !== undefined ? store.recall.getReceipt(args.receipt_id) : null))),
   );
 
   registerTool(
@@ -404,6 +423,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
           ...(args.idempotency_key !== undefined ? { idempotency_key: args.idempotency_key } : {}),
           ...(source !== undefined ? { source } : {}),
           ...(args.redact_secrets ? { secrets: 'redact' as const } : {}),
+          ...(opts.project && opts.project.keys.length > 0 ? { project: { key: opts.project.keys[0]!, root: opts.project.root ?? '' } } : {}),
         });
         return json({
           ...result,
@@ -555,14 +575,48 @@ export function fullOutputSchemas(): Record<string, unknown> {
 
 // ───────────────────────────── markdown rendering ─────────────────────────────
 
+/**
+ * True when a briefing has nothing to say beyond "carry on": a verified
+ * cursor, no events in scope, nothing retracted, drifted or failing. Such a
+ * briefing renders as a one-line pulse (≤ 300 bytes).
+ */
+export function isQuietBriefing(s: SystemState): boolean {
+  const presented = s.recovery.method === 'presented' || s.recovery.method === 'presented_compact';
+  return (
+    presented &&
+    s.focus !== 'pulse' &&
+    s.recovery.cursor_error === null &&
+    !s.drift_banner.surfaced &&
+    (s.integrity?.ok ?? true) &&
+    (s.delta?.events_since ?? 0) === 0 &&
+    (s.retractions?.length ?? 0) === 0 &&
+    (s.cosmetic_edits?.length ?? 0) === 0 &&
+    (s.carried_notes?.length ?? 0) === 0 &&
+    (s.source_drift?.length ?? 0) === 0 &&
+    (s.scope?.hidden_retractions ?? 0) === 0
+  );
+}
+
 export function renderSystemStateMarkdown(s: SystemState): string {
+  const integrityLine = s.integrity && !s.integrity.ok ? `**INTEGRITY FAILURE: ${s.integrity.problem}. The store was edited outside kronicle-lite; run \`kronicle-lite verify-chain\`.**` : null;
+  // Unreleased (next): the per-turn answer when nothing changed is one line.
+  if (isQuietBriefing(s)) {
+    const other = s.head.seq > s.recovery.from_seq ? ` in this project (head seq ${s.head.seq})` : '';
+    return `kronicle-lite: no change since seq ${s.recovery.from_seq}${other}. Proceed; next cursor: \`${s.cursor_compact}\``;
+  }
+  if (s.focus === 'pulse') {
+    const out = [`kronicle-lite pulse: head seq ${s.head.seq}. ${s.drift_banner.line}`];
+    if (s.recovery.cursor_error) out.push(`Your cursor was rejected (${s.recovery.cursor_error}); position recovered server-side (${s.recovery.method}).`);
+    if (s.drift_banner.surfaced) out.push('Call get_system_state with focus=recent_changes before acting.');
+    out.push(`Next cursor: \`${s.cursor_compact}\``);
+    return out.join('\n');
+  }
+
   const lines: string[] = [];
   const shortHash = s.head.hash.slice(0, 12);
   lines.push(`# kronicle-lite orient — head seq ${s.head.seq} (${shortHash}…)`);
   lines.push('');
-  if (s.integrity && !s.integrity.ok) {
-    lines.push(`> **INTEGRITY FAILURE: ${s.integrity.problem}. The store was edited outside kronicle-lite; run \`kronicle-lite verify-chain\`.**`);
-  }
+  if (integrityLine) lines.push(`> ${integrityLine}`);
   if (s.drift_banner.surfaced) lines.push(`> **${s.drift_banner.line}**`);
   else lines.push(`> ${s.drift_banner.line}`);
   // 0.5.0: no "never anchored" line until there is an anchor to talk about.
@@ -571,13 +625,6 @@ export function renderSystemStateMarkdown(s: SystemState): string {
   lines.push('');
   lines.push(`**cursor_compact:** \`${s.cursor_compact}\`  `);
   lines.push(`**recovery:** ${s.recovery.method} — ${s.recovery.reason}`);
-  if (s.focus === 'pulse') {
-    lines.push('');
-    for (const n of s.next_steps) lines.push(`- ${n}`);
-    lines.push('');
-    lines.push(`<details><summary>full cursor</summary>\n\n\`${s.cursor}\`\n\n</details>`);
-    return lines.join('\n');
-  }
 
   if (s.retractions && s.retractions.length > 0) {
     lines.push('');
@@ -592,8 +639,23 @@ export function renderSystemStateMarkdown(s: SystemState): string {
     // 0.6.0: a hidden scope degrades "none" — it was not reviewed, not cleared.
     lines.push(s.scope?.verdict === 'partial' ? '## Retractions: none in this project (partial view)' : '## Retractions: none');
   }
+  const cosmetic = s.cosmetic_edits ?? [];
+  if (cosmetic.length > 0) {
+    const rules = [...new Set(cosmetic.flatMap((c) => c.rules))].join(', ');
+    lines.push(`_${cosmetic.length} cosmetic edit(s) recorded (${rules}): meaning unchanged, no action needed (include_cosmetic: true lists them)._`);
+  }
   if (s.scope && s.scope.hidden_retractions > 0) {
-    lines.push(`_${s.scope.hidden_retractions} instruction retraction(s) from other projects hidden and not reviewed (all_projects: true shows them)._`);
+    lines.push(`_${s.scope.hidden_retractions} retraction(s) from other projects hidden and not reviewed (all_projects: true shows them)._`);
+  }
+
+  if (s.carried_notes && s.carried_notes.length > 0) {
+    lines.push('');
+    lines.push(`## Your notes since seq ${s.recovery.from_seq}`);
+    for (const n of s.carried_notes) {
+      lines.push(`- \`${n.doc_slug}\` (seq ${n.seq}${n.truncated ? `, first ${n.text.length} of ${n.total_chars} chars → kronicle://docs/${encodeURIComponent(n.doc_slug)}` : ''}):`);
+      for (const l of n.text.split('\n')) lines.push(`  ${l}`);
+      for (const t of n.stale_terms) lines.push(`  - this note repeats \`${t.term}\`, changed at seq ${t.seq}${t.now ? ` (now: "${t.now}")` : ' (removed)'}`);
+    }
   }
 
   if (s.source_drift && s.source_drift.length > 0) {
@@ -607,7 +669,10 @@ export function renderSystemStateMarkdown(s: SystemState): string {
     }
   }
 
-  if (s.digest) {
+  // Unreleased (next): with a verified cursor the agent already has the store's
+  // shape; the digest (still in structuredContent) is shown on cold or recovered starts.
+  const presented = s.recovery.method === 'presented' || s.recovery.method === 'presented_compact';
+  if (s.digest && !presented) {
     lines.push('');
     lines.push('## Digest');
     lines.push(
@@ -619,9 +684,18 @@ export function renderSystemStateMarkdown(s: SystemState): string {
   }
 
   if (s.delta) {
+    const cosmeticSeqs = new Map(cosmetic.map((c) => [c.seq, c]));
     lines.push('');
-    lines.push(`## Delta: ${s.delta.events_since} event(s) since seq ${s.delta.from_seq}`);
-    const types = Object.entries(s.delta.by_type)
+    lines.push(`## Delta: ${s.delta.events_since} event(s) since seq ${s.delta.from_seq}${s.scope?.hidden_events ? ` (+${s.scope.hidden_events} in other projects, not shown)` : ''}`);
+    // Cosmetic supersessions are counted as what they are, not as retractions.
+    const byType: Record<string, number> = { ...s.delta.by_type };
+    for (const ce of cosmetic) {
+      const t = s.delta.entries.find((e) => e.kind === 'event' && e.seq === ce.seq)?.event_type ?? 'block.superseded';
+      if ((byType[t] ?? 0) > 0) byType[t] = byType[t]! - 1;
+      if (byType[t] === 0) delete byType[t];
+      byType['cosmetic_edit'] = (byType['cosmetic_edit'] ?? 0) + 1;
+    }
+    const types = Object.entries(byType)
       .sort((a, b) => b[1] - a[1])
       .map(([t, n]) => `${t}×${n}`)
       .join(', ');
@@ -631,7 +705,9 @@ export function renderSystemStateMarkdown(s: SystemState): string {
     if (c.truncated) lines.push('_truncated to the most recent entries_');
     for (const e of s.delta.entries) {
       if (e.kind === 'event') {
-        lines.push(`- seq ${e.seq} \`${e.event_type}\` by ${e.actor_id} @ ${e.occurred_at} — ${summarizePayload(e.payload)}`);
+        const ce = cosmeticSeqs.get(e.seq);
+        if (ce) lines.push(`- seq ${e.seq} cosmetic edit (${ce.rules.join(', ')}) in ${ce.doc_slug ?? 'a document'} by ${e.actor_id}`);
+        else lines.push(`- seq ${e.seq} \`${e.event_type}\` by ${e.actor_id} @ ${e.occurred_at} — ${summarizePayload(e.payload)}`);
       } else {
         lines.push(`- seq ${e.first_seq}–${e.last_seq} \`${e.event_type}\` ×${e.count} (rolled up${e.rendered_via === 'budget' ? ' by budget' : ''}); last: ${summarizePayload(e.sample.payload)}`);
       }

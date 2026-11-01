@@ -50,6 +50,8 @@ export interface DocumentRow {
   created_at: string;
   updated_at: string;
   tombstoned_at: string | null;
+  /** Unreleased (next): owning project key, or null (unscoped, visible from every project). */
+  project_key?: string | null;
 }
 
 export interface BlockSummary {
@@ -203,13 +205,28 @@ export class DocumentStore {
     return (this.db.prepare(`SELECT * FROM documents WHERE slug = ?`).get(slug) as DocumentRow | undefined) ?? null;
   }
 
+  /** Unreleased (next): the document's project key, or null when unscoped / unknown. */
+  projectKeyOf(doc_id: string): string | null {
+    const r = this.db.prepare(`SELECT project_key FROM documents WHERE doc_id = ?`).get(doc_id) as { project_key: string | null } | undefined;
+    return r?.project_key ?? null;
+  }
+
   getDocumentById(doc_id: string): DocumentRow | null {
     return (
       (this.db.prepare(`SELECT * FROM documents WHERE doc_id = ?`).get(doc_id) as DocumentRow | undefined) ?? null
     );
   }
 
-  listDocuments(limit = 50): DocumentRow[] {
+  /** Live documents, newest first; with `projectKeys`, only those projects' and unscoped ones. */
+  listDocuments(limit = 50, projectKeys: readonly string[] | null = null): DocumentRow[] {
+    if (projectKeys && projectKeys.length > 0) {
+      return this.db
+        .prepare(
+          `SELECT * FROM documents WHERE tombstoned_at IS NULL AND (project_key IS NULL OR project_key IN (${projectKeys.map(() => '?').join(', ')}))
+            ORDER BY updated_at DESC LIMIT ?`,
+        )
+        .all(...projectKeys, limit) as DocumentRow[];
+    }
     return this.db
       .prepare(`SELECT * FROM documents WHERE tombstoned_at IS NULL ORDER BY updated_at DESC LIMIT ?`)
       .all(limit) as DocumentRow[];
@@ -369,6 +386,12 @@ export class DocumentStore {
     source?: DocumentSource;
     /** 0.6.0: what to do with a detected secret (default refuse; nothing is chained). */
     secrets?: SecretPolicy;
+    /**
+     * Unreleased (next): the project this document belongs to, recorded as the
+     * document.put payload's `project` (additive; absent = unscoped). Ignored
+     * when `source.project` is set (instruction files carry their own).
+     */
+    project?: { key: string; root: string } | null;
   }): PutDocumentResult {
     const guarded = guardFields({ title: args.title, markdown: args.markdown }, args.secrets ?? 'refuse', `document ${args.slug}`);
     args = { ...args, ...guarded.fields };
@@ -425,6 +448,7 @@ export class DocumentStore {
           // Additive (0.4.0): only present when the caller supplied it, so a
           // put without a source hashes exactly as in 0.3.0.
           ...(args.source !== undefined ? { source: args.source as unknown as Record<string, unknown> } : {}),
+          ...(args.project && !args.source?.project ? { project: { key: args.project.key, root: args.project.root } } : {}),
         },
       });
       for (const c of [...created, ...replaced]) {
@@ -746,6 +770,10 @@ export class DocumentStore {
         const upd = this.db.prepare(`UPDATE blocks SET ordinal = ?, heading_path = ? WHERE block_id = ?`);
         for (const c of carried) upd.run(c.ordinal, joinHeadingPath(c.heading_path), c.block_id);
         if (ev.event_type === 'document.put') {
+          // Unreleased (next): the latest full put decides the project too.
+          const src = p['source'] as DocumentSource | undefined;
+          const proj = (src && typeof src === 'object' ? src.project?.key : undefined) ?? (p['project'] as { key?: unknown } | undefined)?.key;
+          this.db.prepare(`UPDATE documents SET project_key = ? WHERE doc_id = ?`).run(typeof proj === 'string' ? proj : null, doc_id);
           // The latest full put decides provenance: a put without `source`
           // (every 0.3.0 put) clears any earlier binding.
           const source = p['source'] as DocumentSource | undefined;

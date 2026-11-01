@@ -9,11 +9,11 @@
 
 import { randomUUID } from 'node:crypto';
 
-import type { Chain, ChainHead } from '../chain/index.js';
+import type { Chain, ChainEvent, ChainHead } from '../chain/index.js';
 import { GENESIS_HASH } from '../chain/genesis.js';
 import { canonicalize } from '../crypto/canonical.js';
 import { sha256Hex } from '../crypto/hash.js';
-import { splitHeadingPath, type DocumentStore, type SourceDrift } from '../docs/documents.js';
+import { isInstructionSlug, splitHeadingPath, type DocumentStore, type SourceDrift } from '../docs/documents.js';
 import { checkBlockRow } from '../docs/integrity.js';
 import { CursorTokenError, parseAnyCursor, serializeCompactCursor, serializeCursor } from './cursor.js';
 import { foldDelta, type PolicyOptions, type TypedDelta } from './delta.js';
@@ -28,7 +28,9 @@ import {
 } from './drift.js';
 import { scrubDeep } from '../secrets/guard.js';
 import { FlightRecorder } from './flight-recorder.js';
+import type { CosmeticRule } from './cosmetic.js';
 import { computeRetractions, type Retraction } from './retraction.js';
+import { snippet } from './textdiff.js';
 
 export const FOCUSES = ['orientation', 'recent_changes', 'retractions', 'pulse'] as const;
 export type Focus = (typeof FOCUSES)[number];
@@ -64,7 +66,44 @@ export interface OrientInput {
    * null/undefined: no scoping (every retraction is listed).
    */
   project?: ProjectScope | null | undefined;
+  /**
+   * Unreleased (next): also list cosmetic edits (whitespace, quotes,
+   * punctuation, typo-level, review dates) in `retractions`. Default false:
+   * they are recorded and listed under `cosmetic_edits` only.
+   */
+  include_cosmetic?: boolean | undefined;
 }
+
+/** Unreleased (next): a supersession that changed formatting, not meaning (orient/cosmetic.ts). */
+export interface CosmeticEdit {
+  seq: number;
+  doc_slug: string | null;
+  block_id: string | null;
+  successor_block_id: string | null;
+  rules: CosmeticRule[];
+  diff: string | null;
+}
+
+/**
+ * Unreleased (next): a note this actor wrote since its cursor, carried back
+ * in the briefing (bounded) so a decision survives a context compaction as
+ * text, not only as a slug. `stale_terms`: identifiers in the note that a
+ * retraction in this briefing changed or removed.
+ */
+export interface CarriedNote {
+  doc_slug: string;
+  seq: number;
+  revision: number;
+  text: string;
+  total_chars: number;
+  truncated: boolean;
+  stale_terms: { term: string; seq: number; now: string | null }[];
+}
+
+/** Bounds for carried notes: per note and per briefing (characters). */
+export const CARRIED_NOTE_CHARS = 600;
+export const CARRIED_NOTES_TOTAL_CHARS = 1500;
+export const CARRIED_NOTES_MAX = 3;
 
 /** The project keys (instructions + auto memory) of the working directory; see instructions/paths.ts. */
 export interface ProjectScope {
@@ -116,7 +155,7 @@ export interface SystemState {
   stale_write_advisory: StaleWriteAdvisory;
   /** 0.4.0: latest anchor, or null when never anchored. */
   anchor: AnchorSummary | null;
-  /** 0.4.0: git-bound documents whose source file changed or vanished; null for focus=pulse. */
+  /** 0.4.0: git-bound documents whose source file changed or vanished; null for focus=pulse (and, unreleased/next, focus=retractions: not checked). */
   source_drift: SourceDrift[] | null;
   /** 0.5.0: chain + live-block integrity over what this briefing read; null for focus=pulse. */
   integrity: IntegritySummary | null;
@@ -125,9 +164,19 @@ export interface SystemState {
    * 0.6.0 `verdict`: `partial` when retractions were hidden, so "no retractions"
    * here is not a clean bill for the hidden projects.
    */
-  scope: { project_keys: string[]; hidden_retractions: number; verdict: 'complete' | 'partial' } | null;
+  scope: {
+    project_keys: string[];
+    hidden_retractions: number;
+    verdict: 'complete' | 'partial';
+    /** Unreleased (next): events about other projects' documents left out of the delta. */
+    hidden_events?: number;
+  } | null;
   delta: TypedDelta | null;
   retractions: Retraction[] | null;
+  /** Unreleased (next): cosmetic supersessions since the cursor (not in `retractions` by default); null for focus=pulse. */
+  cosmetic_edits?: CosmeticEdit[] | null;
+  /** Unreleased (next): this actor's own notes written since the cursor, bounded; null unless focus is orientation / recent_changes. */
+  carried_notes?: CarriedNote[] | null;
   digest: Digest | null;
   next_steps: string[];
 }
@@ -285,13 +334,13 @@ export class Orient {
     };
   }
 
-  digest(): Digest {
+  digest(projectKeys: string[] | null = null): Digest {
     return {
       genesis_hash: GENESIS_HASH,
       documents: this.docs.countDocuments(),
       live_blocks: this.docs.countLiveBlocks(),
       checkpoints: this.chain.listCheckpoints().length,
-      recent_documents: this.docs.listDocuments(10).map((d) => ({
+      recent_documents: this.docs.listDocuments(10, projectKeys).map((d) => ({
         slug: d.slug,
         title: d.title,
         revision: d.current_revision,
@@ -301,10 +350,47 @@ export class Orient {
   }
 
   /** Block text for retractions; withheld (null) when the row fails its integrity check. */
-  private blockText(block_id: string): { content: string; heading_path: string[] } | null {
+  private blockText(block_id: string): { content: string; heading_path: string[]; kind: string } | null {
     const b = this.docs.getBlock(block_id);
     if (!b || checkBlockRow(this.chain, b) !== null) return null;
-    return { content: b.content, heading_path: splitHeadingPath(b.heading_path) };
+    return { content: b.content, heading_path: splitHeadingPath(b.heading_path), kind: b.kind };
+  }
+
+  /** The actor's own non-instruction documents put in `events`, newest first, as bounded text. */
+  carriedNotes(events: readonly ChainEvent[], actor_id: string, retractions: readonly Retraction[]): CarriedNote[] {
+    const latest = new Map<string, ChainEvent>();
+    for (const e of events) {
+      if (e.event_type !== 'document.put' || e.actor_id !== actor_id) continue;
+      const slug = e.payload['slug'];
+      const doc_id = e.payload['doc_id'];
+      if (typeof slug !== 'string' || typeof doc_id !== 'string' || isInstructionSlug(slug)) continue;
+      latest.delete(doc_id);
+      latest.set(doc_id, e);
+    }
+    const changed = retractions.filter((r) => !r.cosmetic && r.old_text);
+    const out: CarriedNote[] = [];
+    let budget = CARRIED_NOTES_TOTAL_CHARS;
+    for (const [doc_id, e] of [...latest].reverse()) {
+      if (out.length >= CARRIED_NOTES_MAX || budget <= 0) break;
+      const doc = this.docs.getDocumentById(doc_id);
+      if (!doc || doc.tombstoned_at) continue;
+      const blocks = this.docs.liveBlocks(doc_id).filter((b) => b.kind !== 'heading' && checkBlockRow(this.chain, b) === null);
+      const full = blocks.map((b) => b.content).join('\n\n');
+      if (full.length === 0) continue;
+      const limit = Math.min(CARRIED_NOTE_CHARS, budget);
+      const text = full.length > limit ? full.slice(0, limit - 1).trimEnd() + '\u2026' : full;
+      budget -= text.length;
+      const stale_terms: CarriedNote['stale_terms'] = [];
+      for (const r of changed) {
+        const now = r.new_text ? new Set(identifiers(r.new_text)) : new Set<string>();
+        for (const term of identifiers(r.old_text!)) {
+          if (now.has(term) || !full.includes(term) || stale_terms.some((t) => t.term === term)) continue;
+          if (stale_terms.length < 3) stale_terms.push({ term, seq: r.seq, now: r.new_text ? snippet(r.new_text, 80) : null });
+        }
+      }
+      out.push({ doc_slug: doc.slug, seq: e.seq, revision: doc.current_revision, text, total_chars: full.length, truncated: text.length < full.length, stale_terms });
+    }
+    return out;
   }
 
   /**
@@ -363,8 +449,29 @@ export class Orient {
     let integrity: IntegritySummary | null = null;
     let scope: SystemState['scope'] = null;
 
+    let cosmetic_edits: CosmeticEdit[] | null = null;
+    let carried_notes: CarriedNote[] | null = null;
+
     if (focus !== 'pulse') {
-      const events = this.chain.since(recovery.from_seq);
+      const allEvents = this.chain.since(recovery.from_seq);
+      // Project scope (0.5.0 instruction retractions; unreleased/next: every
+      // event about a document of another project). Unscoped documents and
+      // events without a document stay visible.
+      const keys = input.project && input.project.keys.length > 0 ? new Set(input.project.keys) : null;
+      const projOf = new Map<string, string | null>();
+      const inScope = (e: ChainEvent): boolean => {
+        if (!keys) return true;
+        const doc_id = e.payload['doc_id'];
+        if (typeof doc_id !== 'string') return true;
+        let k = projOf.get(doc_id);
+        if (k === undefined) {
+          k = this.docs.projectKeyOf(doc_id);
+          projOf.set(doc_id, k);
+        }
+        return k === null || keys.has(k);
+      };
+      const events = keys ? allEvents.filter(inScope) : allEvents;
+      const lookup = (id: string) => this.blockText(id);
       if (focus === 'orientation' || focus === 'recent_changes') {
         // Reserve roughly a third of the budget for everything that is not delta entries.
         delta = foldDelta(events, recovery.from_seq, head.seq, {
@@ -375,26 +482,24 @@ export class Orient {
         // retractions focus: counts only, no entries
         delta = { ...foldDelta(events, recovery.from_seq, head.seq, { ...this.policy, budget_tokens: 0 }), entries: [] };
       }
-      const all = computeRetractions(events, (id) => this.blockText(id));
-      if (input.project && input.project.keys.length > 0) {
-        const docOf = new Map(events.map((e) => [e.seq, typeof e.payload['doc_id'] === 'string' ? (e.payload['doc_id'] as string) : null]));
-        const keys = new Set(input.project.keys);
-        retractions = all.filter((r) => {
-          if (r.kind !== 'instruction') return true;
-          const doc_id = docOf.get(r.seq);
-          const key = doc_id ? this.docs.getSource(doc_id)?.source.project?.key : undefined;
-          return key === undefined || keys.has(key);
-        });
-        const hidden = all.length - retractions.length;
-        scope = { project_keys: input.project.keys, hidden_retractions: hidden, verdict: hidden > 0 ? 'partial' : 'complete' };
-      } else {
-        retractions = all;
+      const computed = computeRetractions(events, lookup);
+      if (keys && input.project) {
+        const hiddenEvents = allEvents.length - events.length;
+        const hidden = hiddenEvents > 0 ? computeRetractions(allEvents.filter((e) => !inScope(e)), lookup).filter((r) => !r.cosmetic).length : 0;
+        scope = { project_keys: input.project.keys, hidden_retractions: hidden, verdict: hidden > 0 ? 'partial' : 'complete', hidden_events: hiddenEvents };
       }
+      retractions = input.include_cosmetic ? computed : computed.filter((r) => !r.cosmetic);
+      cosmetic_edits = computed
+        .filter((r) => r.cosmetic)
+        .map((r) => ({ seq: r.seq, doc_slug: r.doc_slug, block_id: r.block_id, successor_block_id: r.successor_block_id, rules: r.cosmetic!, diff: r.diff }));
       // 0.6.0: read-time secret scrub on the text this briefing serves.
       retractions = scrubDeep(retractions).value;
+      cosmetic_edits = scrubDeep(cosmetic_edits).value;
       if (delta.entries.length > 0) delta = { ...delta, entries: scrubDeep(delta.entries).value };
-      if (focus === 'orientation' || recovery.method === 'genesis') digest = scrubDeep(this.digest()).value;
-      source_drift = this.docs.listSourceDrift();
+      if (focus === 'orientation' || focus === 'recent_changes') carried_notes = scrubDeep(this.carriedNotes(events, input.actor_id, computed)).value;
+      if (focus === 'orientation' || recovery.method === 'genesis') digest = scrubDeep(this.digest(keys ? [...keys] : null)).value;
+      // The retractions focus is the per-tool-call push contract (docs/PUSH.md): no git calls (null = not checked).
+      source_drift = focus === 'retractions' ? null : this.docs.listSourceDrift();
       integrity = this.quickIntegrity(recovery.from_seq, head);
     }
 
@@ -429,6 +534,8 @@ export class Orient {
       scope,
       delta,
       retractions,
+      cosmetic_edits,
+      carried_notes,
       digest,
       next_steps,
     };
@@ -447,6 +554,7 @@ export class Orient {
           recovery,
           by_type: delta?.by_type ?? {},
           retraction_count: retractions?.length ?? 0,
+          cosmetic_count: cosmetic_edits?.length ?? 0,
           drift_surfaced: drift_banner.surfaced,
           budget_tokens: budget,
         },
@@ -490,7 +598,7 @@ function nextSteps(args: {
   }
   if (args.scope && args.scope.verdict === 'partial') {
     steps.push(
-      `${args.scope.hidden_retractions} instruction retraction(s) from other projects were hidden and not reviewed: this briefing is not a clean bill for those projects (pass all_projects: true to see them).`,
+      `${args.scope.hidden_retractions} retraction(s) from other projects were hidden and not reviewed: this briefing is not a clean bill for those projects (pass all_projects: true to see them).`,
     );
   }
   if (args.source_drift && args.source_drift.length > 0) {
@@ -505,4 +613,9 @@ function nextSteps(args: {
   }
   steps.push('Carry the returned cursor (or cursor_compact) into your next get_system_state call and into write tools.');
   return steps;
+}
+
+/** Identifier-like words (a digit or one of - _ . : /), the kind a note copies verbatim. */
+function identifiers(text: string): string[] {
+  return [...new Set((text.match(/[\p{L}\p{N}][\p{L}\p{N}._:/-]*[\p{L}\p{N}]/gu) ?? []).filter((w) => w.length >= 4 && /[\d._:/-]/.test(w)))];
 }

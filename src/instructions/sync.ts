@@ -6,19 +6,22 @@
  * re-put empty (every block tombstoned). An unchanged file appends nothing.
  */
 
-import { readFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { extname, join, resolve } from 'node:path';
 
 import { blake3Hex } from '../crypto/hash.js';
 import { normalizeMarkdown } from '../docs/parser.js';
 import type { ChainHead } from '../chain/chain.js';
 import { redactSecrets, type SecretPolicy } from '../secrets/guard.js';
 import type { KronicleLite } from '../store.js';
-import type { InstructionEntry } from './paths.js';
+import { git } from '../git/git.js';
+import { entryFor, type InstructionEntry, type ResolvedContext } from './paths.js';
 
 /** Claude Code skips CLAUDE.md files over 4 MiB; so do we. */
 export const MAX_INSTRUCTION_BYTES = 4 * 1024 * 1024;
 
-export type SyncAction = 'created' | 'updated' | 'unchanged' | 'removed' | 'missing' | 'too_large' | 'error';
+/** `renamed` (unreleased, next): the file moved with its content intact; the document followed it (`document.renamed`). */
+export type SyncAction = 'created' | 'updated' | 'unchanged' | 'removed' | 'renamed' | 'missing' | 'too_large' | 'error';
 
 /**
  * 0.5.0 migration: adopt the 0.4.0 un-keyed document (`instructions/claude-md`)
@@ -58,6 +61,8 @@ export interface SyncResult {
   error?: string;
   /** 0.5.0: the legacy slug this document was renamed from in this sync. */
   migrated_from?: string;
+  /** Unreleased (next): with action `renamed`, the document's previous slug and path. */
+  renamed_from?: { slug: string; path: string };
 }
 
 function readText(path: string): { text: string } | { missing: true } | { tooLarge: number } {
@@ -83,7 +88,19 @@ function readText(path: string): { text: string } | { missing: true } | { tooLar
  * chained; `redact` chains a redacted copy and compares the redacted text on
  * later syncs, so an unchanged file stays `unchanged`.
  */
-export function syncInstructionFile(store: KronicleLite, entry: InstructionEntry, opts: { actor_id?: string; secrets?: SecretPolicy } = {}): SyncResult {
+export interface SyncOptions {
+  actor_id?: string;
+  secrets?: SecretPolicy;
+  /**
+   * Unreleased (next): the resolved project context. With it, a file that
+   * moved inside the project with its content intact is a rename
+   * (`document.renamed`, block ids kept, no retraction) instead of a removal
+   * plus a new document — whichever of the two paths is synced first.
+   */
+  context?: ResolvedContext;
+}
+
+export function syncInstructionFile(store: KronicleLite, entry: InstructionEntry, opts: SyncOptions = {}): SyncResult {
   const actor_id = opts.actor_id ?? 'instructions';
   const base: Pick<SyncResult, 'slug' | 'path' | 'kind' | 'created' | 'superseded' | 'tombstoned' | 'migrated_from'> = {
     slug: entry.slug,
@@ -108,6 +125,14 @@ export function syncInstructionFile(store: KronicleLite, entry: InstructionEntry
       if (!existing || store.docs.liveBlocks(existing.doc_id).length === 0) {
         return { ...base, action: 'missing', revision: existing?.current_revision ?? null, head: store.chain.head() };
       }
+      // Moved, not deleted? Follow the content to its new path.
+      if (opts.context) {
+        const to = findMovedCopy(store, entry, opts.context, opts.secrets);
+        if (to) {
+          const moved = followRename(store, existing.doc_id, entry, to.entry, to.text, actor_id, opts.secrets);
+          if (moved) return moved;
+        }
+      }
       markdown = '';
       removing = true;
     } else {
@@ -122,6 +147,14 @@ export function syncInstructionFile(store: KronicleLite, entry: InstructionEntry
         src.source.project?.key === entry.project?.key
       ) {
         return { ...base, action: 'unchanged', revision: existing.current_revision, head: store.chain.head() };
+      }
+      // A new path whose exact content belongs to a document whose file is gone: a move.
+      if (!existing && opts.context) {
+        const from = findMovedOrigin(store, entry, hash, opts.context);
+        if (from) {
+          const moved = followRename(store, from.doc_id, from.entry, entry, markdown, actor_id, opts.secrets);
+          if (moved) return moved;
+        }
       }
     }
     const r = store.docs.putDocument({
@@ -164,6 +197,8 @@ export function describeSync(r: SyncResult): string {
       return `${r.slug} ← ${r.path}: rev ${r.revision} (${counts})${r.migrated_from ? `; renamed from ${r.migrated_from}` : ''}`;
     case 'removed':
       return `${r.slug} ← ${r.path}: file removed; rev ${r.revision} retires ${r.tombstoned} block(s)`;
+    case 'renamed':
+      return `${r.slug} ← ${r.path}: moved from ${r.renamed_from?.path ?? '?'} with its content intact; same document, block ids kept (rev ${r.revision})`;
     case 'unchanged':
       return `${r.slug} ← ${r.path}: unchanged (rev ${r.revision})`;
     case 'missing':
@@ -173,4 +208,147 @@ export function describeSync(r: SyncResult): string {
     case 'error':
       return `${r.slug} ← ${r.path}: error: ${r.error}`;
   }
+}
+
+// ───────────────────────────── renames (unreleased, next) ─────────────────────────────
+
+const MAX_CANDIDATES_HASHED = 200;
+const MAX_WALK_FILES = 5000;
+
+/** Files under the project root a moved instruction file could now be at (git-aware, else a bounded walk). */
+function projectFiles(root: string): string[] {
+  const listed = git(['ls-files', '-z', '--cached', '--others', '--exclude-standard'], root, { trim: false });
+  if (listed !== null) return listed.split('\0').filter((f) => f.length > 0).map((f) => resolve(root, f));
+  const out: string[] = [];
+  const walk = (dir: string, depth: number) => {
+    if (depth > 8 || out.length >= MAX_WALK_FILES) return;
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const n of names) {
+      if (n === '.git' || n === 'node_modules') continue;
+      const full = join(dir, n);
+      let st;
+      try {
+        st = statSync(full);
+      } catch {
+        continue;
+      }
+      if (st.isDirectory()) walk(full, depth + 1);
+      else if (st.isFile()) out.push(full);
+    }
+  };
+  walk(root, 0);
+  return out;
+}
+
+function storedHash(text: string, secrets: SecretPolicy | undefined): string {
+  return blake3Hex(normalizeMarkdown(secrets === 'redact' ? redactSecrets(text).text : text));
+}
+
+/**
+ * The deleted file's content, intact, at another path in the same project
+ * that is not already its own live document. null when there is none, or
+ * more than one (ambiguous: treat as a removal).
+ */
+function findMovedCopy(
+  store: KronicleLite,
+  gone: InstructionEntry,
+  rc: ResolvedContext,
+  secrets: SecretPolicy | undefined,
+): { entry: InstructionEntry; text: string } | null {
+  if (gone.kind !== 'instruction' || !gone.project) return null;
+  const want = store.docs.currentMarkdownHash(gone.slug);
+  const doc = store.docs.getDocument(gone.slug);
+  if (!want || !doc) return null;
+  const rev = store.docs.getRevision(doc.doc_id, doc.current_revision);
+  if (!rev) return null;
+  const size = Buffer.byteLength(rev.markdown);
+  const ext = extname(gone.path).toLowerCase();
+  const hits: { entry: InstructionEntry; text: string }[] = [];
+  let hashed = 0;
+  for (const f of projectFiles(gone.project.root)) {
+    if (f === gone.path || extname(f).toLowerCase() !== ext) continue;
+    let st;
+    try {
+      st = statSync(f);
+    } catch {
+      continue;
+    }
+    // Normalization only trims trailing whitespace and line endings.
+    if (st.size < size || st.size > size * 1.25 + 256) continue;
+    if (++hashed > MAX_CANDIDATES_HASHED) break;
+    const read = readText(f);
+    if (!('text' in read) || storedHash(read.text, secrets) !== want) continue;
+    const entry = entryFor(f, rc);
+    if (entry.project?.key !== gone.project.key || entry.kind !== gone.kind) continue;
+    const there = store.docs.getDocument(entry.slug);
+    if (there && store.docs.liveBlocks(there.doc_id).length > 0) continue; // a copy that already existed, not a move
+    hits.push({ entry, text: read.text });
+  }
+  return hits.length === 1 ? hits[0]! : null;
+}
+
+/** A live instruction document of this project whose file is gone and whose text hashes to `hash`. */
+function findMovedOrigin(store: KronicleLite, arrived: InstructionEntry, hash: string, rc: ResolvedContext): { doc_id: string; entry: InstructionEntry } | null {
+  if (arrived.kind !== 'instruction' || !arrived.project) return null;
+  const hits: { doc_id: string; entry: InstructionEntry }[] = [];
+  for (const src of store.docs.listSources(arrived.kind)) {
+    if (src.source.project?.key !== arrived.project.key || src.slug === arrived.slug) continue;
+    if (store.docs.currentMarkdownHash(src.slug) !== hash) continue;
+    const oldPath = resolve(arrived.project.root, src.source.path);
+    if (!('missing' in readText(oldPath))) continue; // still there: a copy, not a move
+    if (store.docs.liveBlocks(src.doc_id).length === 0) continue;
+    hits.push({ doc_id: src.doc_id, entry: entryFor(oldPath, rc) });
+  }
+  return hits.length === 1 ? hits[0]! : null;
+}
+
+/** document.renamed to the new slug, then a put recording the new path (every block carried). */
+function followRename(
+  store: KronicleLite,
+  doc_id: string,
+  from: InstructionEntry,
+  to: InstructionEntry,
+  text: string,
+  actor_id: string,
+  secrets: SecretPolicy | undefined,
+): SyncResult | null {
+  if (store.docs.getDocument(to.slug)) return null; // slug taken (e.g. an emptied document): plain removal + import
+  try {
+    store.docs.renameDocument({ doc_id, slug: to.slug, actor_id, reason: `moved: ${from.recordPath} → ${to.recordPath} (same content)` });
+  } catch {
+    return null;
+  }
+  const r = store.docs.putDocument({
+    slug: to.slug,
+    title: to.title,
+    markdown: text,
+    actor_id,
+    source: { kind: to.kind, path: to.recordPath, ...(to.project ? { project: to.project } : {}) },
+    ...(secrets !== undefined ? { secrets } : {}),
+  });
+  let created = 0;
+  let superseded = 0;
+  let tombstoned = 0;
+  for (const b of r.blocks) {
+    if (b.status === 'tombstoned') tombstoned++;
+    else if (b.status === 'created' && b.supersedes) superseded++;
+    else if (b.status === 'created') created++;
+  }
+  return {
+    slug: to.slug,
+    path: to.recordPath,
+    kind: to.kind,
+    action: 'renamed',
+    revision: r.revision,
+    created,
+    superseded,
+    tombstoned,
+    head: r.head,
+    renamed_from: { slug: from.slug, path: from.recordPath },
+  };
 }

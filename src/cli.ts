@@ -15,7 +15,7 @@
  *   kronicle-lite put --from-instructions [PATHS…] [--cwd DIR] [--json] [--stdin-hook]
  *   kronicle-lite watch [PATHS…] [--interval MS] [--debounce MS] [--poll] [--cwd DIR] [--redact-secrets] [--list [--json]]
  *   kronicle-lite doctor [--json] [--no-network] [--full] [--cwd DIR]
- *   kronicle-lite orient [--data-dir DIR] [--actor ID] [--cursor C] [--focus F] [--all-projects]
+ *   kronicle-lite orient [--data-dir DIR] [--actor ID] [--cursor C] [--focus F] [--json] [--all-projects] [--include-cosmetic]
  *   kronicle-lite verify-chain [--full] | rebuild | demo [--dir D] [--keep]
  */
 
@@ -66,6 +66,7 @@ const BOOLEAN_FLAGS = new Set([
   'full',
   'keep',
   'all-projects',
+  'include-cosmetic',
   'modern-only',
   'core',
   'redact-secrets',
@@ -158,8 +159,10 @@ Usage:
   kronicle-lite doctor       [--data-dir DIR] [--json] [--no-network] [--full] [--cwd DIR]
                                                                  health checks (read-only); exit 1 when any check fails
   kronicle-lite orient       [--data-dir DIR] [--actor ID] [--cursor C] [--focus F] [--json] [--cwd DIR] [--all-projects]
-                                                                 instruction retractions are scoped to the project at
-                                                                 --cwd (default: the working directory)
+                 [--include-cosmetic]                            scoped to the project at --cwd (default: the working
+                                                                 directory); "--cursor C --focus retractions --json" is the
+                                                                 hook contract (docs/PUSH.md); cosmetic edits are listed
+                                                                 under cosmetic_edits unless --include-cosmetic
 
 Data dir defaults to $KRONICLE_LITE_DATA_DIR or ~/.kronicle-lite. Instruction slugs carry a project key
 (<repo>-<hash8>); $KRONICLE_LITE_PROJECT overrides it.
@@ -426,6 +429,8 @@ async function main(argv: string[]): Promise<number> {
         actor_id: str(flags['actor']) ?? 'cli',
         ...(source !== undefined ? { source } : {}),
         ...(flags['redact-secrets'] === true ? { secrets: 'redact' as const } : {}),
+        // Unreleased (next): the document belongs to the project at --cwd (recall/orient scope).
+        ...(flags['all-projects'] === true ? {} : { project: primaryProject(instructionCtx(flags)) }),
       });
       for (const w of warnings) process.stderr.write(`warning: ${w}\n`);
       if (r.redactions) process.stderr.write(`warning: redacted ${r.redactions.length} secret(s) before chaining: ${r.redactions.map((f) => `${f.detector} (line ${f.line})`).join(', ')}\n`);
@@ -453,7 +458,9 @@ async function main(argv: string[]): Promise<number> {
         focus: focusRaw as Focus | undefined,
         ...(num(flags['budget']) !== undefined ? { budget_tokens: num(flags['budget'])! } : {}),
         project: flags['all-projects'] === true ? null : projectScopeFor(instructionCtx(flags)),
+        include_cosmetic: flags['include-cosmetic'] === true,
       });
+      // --json is the push-hook contract (docs/PUSH.md): one JSON object, the SystemState.
       process.stdout.write(flags['json'] ? JSON.stringify(state, null, 2) + '\n' : renderSystemStateMarkdown(state) + '\n');
       store.close();
       return 0;
@@ -491,6 +498,12 @@ function printVerifyAll(store: KronicleLite, flags: Record<string, string | true
   return r.ok ? 0 : 1;
 }
 
+/** The primary project (instruction key + root) of a working directory. */
+function primaryProject(ctx: { cwd?: string }): { key: string; root: string } {
+  const scope = projectScopeFor(ctx);
+  return { key: scope.keys[0]!, root: scope.root };
+}
+
 function instructionCtx(flags: Record<string, string | true>, cwdOverride?: string) {
   const cwd = cwdOverride ?? str(flags['cwd']);
   return cwd !== undefined ? { cwd } : {};
@@ -518,7 +531,7 @@ async function putFromInstructions(dataDir: string, positional: string[], flags:
     try {
       if (input.hook_event_name === 'FileChanged' && typeof input.file_path === 'string') {
         const rc = resolveContext(ctx);
-        const r = syncInstructionFile(store, entryFor(input.file_path, rc), { actor_id: actor, ...secrets });
+        const r = syncInstructionFile(store, entryFor(input.file_path, rc), { actor_id: actor, ...secrets, context: rc });
         if (r.action !== 'unchanged' && r.action !== 'missing') {
           process.stdout.write(JSON.stringify({ systemMessage: `kronicle-lite: ${describeSync(r)}` }) + '\n');
         }

@@ -26,6 +26,7 @@ import { VERIFY_REASONS, VERIFY_STATUSES } from './recall/verify-receipt.js';
 import { AUDIT_VERDICTS } from './orient/audit.js';
 import { ReceiptSchema } from './recall/receipt.js';
 import { FOCUSES, RECOVERY_METHODS } from './orient/orient.js';
+import { COSMETIC_RULES } from './orient/cosmetic.js';
 import { RETRACTION_KINDS } from './orient/retraction.js';
 import { ROW_PROBLEMS } from './docs/integrity.js';
 import { ABSENCE_VERDICTS, RECALL_SCOPES } from './recall/absence.js';
@@ -174,6 +175,26 @@ export const RetractionSchema = z.object({
   old_text: z.string().nullable(),
   new_text: z.string().nullable(),
   diff: z.string().nullable().describe('Word diff: [-removed-]{+added+}.'),
+  cosmetic: z.array(z.enum(COSMETIC_RULES)).nullable().optional().describe('Rules that make this edit cosmetic (meaning unchanged), else null.'),
+});
+
+export const CosmeticEditSchema = z.object({
+  seq: z.number().int().positive(),
+  doc_slug: z.string().nullable(),
+  block_id: z.string().nullable(),
+  successor_block_id: z.string().nullable(),
+  rules: z.array(z.enum(COSMETIC_RULES)),
+  diff: z.string().nullable(),
+});
+
+export const CarriedNoteSchema = z.object({
+  doc_slug: z.string(),
+  seq: z.number().int().positive(),
+  revision: z.number().int().positive(),
+  text: z.string(),
+  total_chars: z.number().int().nonnegative(),
+  truncated: z.boolean(),
+  stale_terms: z.array(z.object({ term: z.string(), seq: z.number().int().positive(), now: z.string().nullable() })),
 });
 
 export const DeltaEventEntrySchema = z.object({
@@ -266,7 +287,7 @@ export const SystemStateSchema = z.object({
   source_drift: z
     .array(SourceDriftSchema)
     .nullable()
-    .describe('Git-bound documents whose source file changed or was deleted since binding; null for focus=pulse.'),
+    .describe('Git-bound documents whose source file changed or was deleted since binding; null for focus=pulse and focus=retractions (not checked).'),
   integrity: z
     .object({ ok: z.boolean(), events_checked: z.number().int().nonnegative(), blocks_checked: z.number().int().nonnegative(), problem: z.string().nullable() })
     .nullable(),
@@ -275,10 +296,13 @@ export const SystemStateSchema = z.object({
       project_keys: z.array(z.string()),
       hidden_retractions: z.number().int().nonnegative(),
       verdict: z.enum(['complete', 'partial']).describe('partial: retractions were hidden, so "none" is not a clean bill for them.'),
+      hidden_events: z.number().int().nonnegative().optional().describe('Events about other projects\' documents left out of the delta.'),
     })
     .nullable(),
   delta: TypedDeltaSchema.nullable().describe('null for focus=retractions and focus=pulse.'),
-  retractions: z.array(RetractionSchema).nullable().describe('null for focus=pulse.'),
+  retractions: z.array(RetractionSchema).nullable().describe('null for focus=pulse. Cosmetic edits only with include_cosmetic.'),
+  cosmetic_edits: z.array(CosmeticEditSchema).nullable().optional().describe('Formatting-only edits since the cursor (not retractions); null for focus=pulse.'),
+  carried_notes: z.array(CarriedNoteSchema).nullable().optional().describe('Your own notes written since the cursor, bounded text.'),
   digest: DigestSchema.nullable().describe('Present on cold start and focus=orientation.'),
   next_steps: z.array(z.string()),
 });
@@ -321,7 +345,8 @@ export const RecallHitSchema = z.object({
   status: z.enum(['live', 'superseded', 'tombstoned']),
   superseded_by: z.string().nullable(),
   tombstone_reason: z.string().nullable(),
-  receipt: ReceiptSchema.nullable().describe('Signed receipt v2; null when include_receipts=false.'),
+  receipt: ReceiptSchema.nullable().describe('Signed receipt v2; null when include_receipts=false or receipts=id.'),
+  receipt_id: z.string().optional().describe('With receipts=id: the stored receipt; pass it to verify({receipt_id}).'),
   authority: z.enum(AUTHORITIES).describe('0.6.0: can_act only from block-level evidence (docs/HONESTY.md).'),
   authority_reason: z.enum(AUTHORITY_REASONS),
   authority_basis: z.enum(AUTHORITY_BASES),
@@ -360,6 +385,11 @@ export const RecallResultSchema = z.object({
   absence: AbsenceSchema,
   attention: z.object({ actor_id: z.string(), session_since: z.string(), already_read: z.number().int().nonnegative() }).nullable(),
   truncated: z.object({ hits: z.number().int().positive(), max_chars: z.number().int().positive(), hint: z.string() }).nullable(),
+  scope: z
+    .object({ project_keys: z.array(z.string()), other_projects_hidden: z.number().int().nonnegative() })
+    .nullable()
+    .optional()
+    .describe('Project scoping applied (all_projects=false); null when every project was searched.'),
 });
 
 export const VerifyResultSchema = z.object({

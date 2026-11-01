@@ -16,7 +16,8 @@
 
 import type { Db } from '../db/open.js';
 
-export const RECALL_SCOPES = ['live_blocks', 'tombstoned_blocks', 'superseded_blocks'] as const;
+/** `other_projects` (unreleased, next): documents of other projects, skipped by a project-scoped recall. */
+export const RECALL_SCOPES = ['live_blocks', 'tombstoned_blocks', 'superseded_blocks', 'other_projects'] as const;
 export type RecallScope = (typeof RECALL_SCOPES)[number];
 
 export const ABSENCE_VERDICTS = ['found', 'absent_in_searched', 'cannot_certify'] as const;

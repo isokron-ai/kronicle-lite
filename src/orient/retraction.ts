@@ -13,6 +13,7 @@
 
 import type { ChainEvent } from '../chain/index.js';
 import { isInstructionSlug } from '../docs/documents.js';
+import { classifyEdit, type CosmeticRule } from './cosmetic.js';
 import { snippet, wordDiff } from './textdiff.js';
 
 export type RetractionSeverity = 'safety' | 'behavioral' | 'informational';
@@ -46,12 +47,22 @@ export interface Retraction {
   old_text: string | null;
   new_text: string | null;
   diff: string | null;
+  /**
+   * Unreleased (next), additive: the rules that make this supersession
+   * cosmetic (whitespace, quotes, punctuation, typo, review_stamp, ...;
+   * orient/cosmetic.ts), or null when it is semantic or not a supersession.
+   * Orient lists cosmetic edits under `cosmetic_edits`, not `retractions`,
+   * unless asked (`include_cosmetic`).
+   */
+  cosmetic: CosmeticRule[] | null;
 }
 
 /** Block text for a retraction, from the projection (orient passes one in). */
 export interface BlockText {
   content: string;
   heading_path: string[];
+  /** Block kind (heading | paragraph | code); code blocks only tolerate whitespace edits. */
+  kind?: string;
 }
 export type BlockTextLookup = (block_id: string) => BlockText | null;
 
@@ -99,8 +110,18 @@ export function classifyRetraction(ev: ChainEvent, lookup?: BlockTextLookup): Re
     new_text: oldB && newB ? snippet(newB.content) : null,
     diff: oldB && newB ? wordDiff(oldB.content, newB.content) : null,
   };
-  const base = { seq: ev.seq, event_type: ev.event_type, block_id, doc_slug, successor_block_id, reason, ...text };
+  const edit = rule.kind === 'supersession' && oldB && newB ? classifyEdit(oldB.content, newB.content, oldB.kind ?? newB.kind) : null;
+  const cosmetic = edit?.cosmetic ? (edit.rules.length > 0 ? edit.rules : (['whitespace'] as CosmeticRule[])) : null;
+  const base = { seq: ev.seq, event_type: ev.event_type, block_id, doc_slug, successor_block_id, reason, ...text, cosmetic };
   const instruction = isInstructionSlug(doc_slug) && rule.kind !== 'retraction';
+  if (cosmetic) {
+    return {
+      ...base,
+      kind: instruction ? 'instruction' : rule.kind,
+      severity: 'informational',
+      reason_line: `Cosmetic edit (${cosmetic.join(', ')}) of "${text.old_text}"${where(doc_slug, text.heading_path)} at seq ${ev.seq}: the meaning is unchanged; no action needed.`,
+    };
+  }
   // With the words in hand, say them: "you relied on <old>; it is now <new>".
   if (oldB && (rule.kind === 'tombstone' || (rule.kind === 'supersession' && newB))) {
     const loc = where(doc_slug, text.heading_path);

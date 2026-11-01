@@ -42,6 +42,17 @@ export interface RecallInput {
   session_since?: string | null | undefined;
   /** 0.6.0: total characters of hit content in the response (default 16000). */
   max_chars?: number | undefined;
+  /**
+   * Unreleased (next): only documents of these projects (plus unscoped ones,
+   * project_key NULL) are searched; matches in other projects are counted in
+   * `scope.other_projects_hidden`. null/absent: every project.
+   */
+  project_keys?: string[] | null | undefined;
+  /**
+   * Unreleased (next): `inline` (default) puts the signed receipt on each hit;
+   * `id` returns only `receipt_id` (the receipt is stored; verify() takes the id).
+   */
+  receipt_format?: 'inline' | 'id' | undefined;
 }
 
 export interface RecallHit {
@@ -59,6 +70,8 @@ export interface RecallHit {
   superseded_by: string | null;
   tombstone_reason: string | null;
   receipt: Receipt | null;
+  /** Unreleased (next): set with receipt_format 'id' (receipt stored, not inlined). */
+  receipt_id?: string;
   /** 0.6.0: may this text be acted on without further checks? See docs/HONESTY.md. */
   authority: Authority;
   authority_reason: AuthorityReason;
@@ -97,6 +110,8 @@ export interface RecallResult {
   attention: { actor_id: string; session_since: string; already_read: number } | null;
   /** 0.6.0: content cut to fit max_chars, or null. */
   truncated: { hits: number; max_chars: number; hint: string } | null;
+  /** Unreleased (next): project scoping applied, or null (every project searched). */
+  scope?: { project_keys: string[]; other_projects_hidden: number } | null;
 }
 
 interface HitRow extends BlockRow {
@@ -138,11 +153,14 @@ export class Recall {
     let rows: HitRow[] = [];
     let match_mode: RecallResult['match_mode'] = 'none';
     let searchedAny = false;
+    const keys = input.project_keys && input.project_keys.length > 0 ? input.project_keys : null;
+    let hiddenOther = 0;
     for (const mode of ['AND', 'OR'] as const) {
       const expr = toMatchExpression(input.query, mode);
       if (!expr) break;
       searchedAny = true;
-      rows = this.search(expr, top_k, includeTomb);
+      rows = this.search(expr, top_k, includeTomb, keys);
+      if (keys) hiddenOther = this.countOtherProjects(expr, includeTomb, keys);
       if (rows.length > 0) {
         match_mode = mode === 'AND' ? 'all_terms' : 'any_term';
         break;
@@ -202,6 +220,7 @@ export class Recall {
           );
           insert.run(receipt.receipt_id, r.block_id, head.seq, qh, issued_at, JSON.stringify(receipt), actor);
         }
+        const byId = receipt !== null && input.receipt_format === 'id';
         const status: RecallHit['status'] = r.tombstoned_at ? 'tombstoned' : r.valid_to ? 'superseded' : 'live';
         const scrub = scrubForRead(r.content);
         const source = r.source_json !== null ? (JSON.parse(r.source_json) as DocumentSource) : null;
@@ -225,7 +244,8 @@ export class Recall {
           status,
           superseded_by: r.superseded_by,
           tombstone_reason: r.tombstone_reason,
-          receipt,
+          receipt: byId ? null : receipt,
+          ...(byId && receipt ? { receipt_id: receipt.receipt_id } : {}),
           authority: honesty.authority,
           authority_reason: honesty.reason,
           authority_basis: honesty.basis,
@@ -238,7 +258,7 @@ export class Recall {
 
     const truncated = applyContentBudget(hits, maxChars);
     const searched: RecallScope[] = searchedAny ? (includeTomb ? ['live_blocks', 'tombstoned_blocks'] : ['live_blocks']) : [];
-    const all: RecallScope[] = ['live_blocks', 'tombstoned_blocks', 'superseded_blocks'];
+    const all: RecallScope[] = ['live_blocks', 'tombstoned_blocks', 'superseded_blocks', ...(keys ? (['other_projects'] as RecallScope[]) : [])];
     const fresh = indexFreshness(this.db);
     const absence = certifyRecallAbsence({
       hits: hits.length,
@@ -260,10 +280,23 @@ export class Recall {
       absence,
       attention: actor !== null && since !== null ? { actor_id: actor, session_since: since, already_read: hits.filter((h) => h.already_read).length } : null,
       truncated,
+      scope: keys ? { project_keys: keys, other_projects_hidden: hiddenOther } : null,
     };
   }
 
-  private search(expr: string, top_k: number, includeTomb: boolean): HitRow[] {
+  /** Matching blocks in documents of other projects (not served; counted). */
+  private countOtherProjects(expr: string, includeTomb: boolean, keys: string[]): number {
+    const liveFilter = includeTomb ? `(b.valid_to IS NULL OR b.tombstoned_at IS NOT NULL)` : `b.valid_to IS NULL AND b.tombstoned_at IS NULL`;
+    const r = this.db
+      .prepare(
+        `SELECT count(*) AS n FROM blocks_fts f JOIN blocks b ON b.rowid = f.rowid JOIN documents d ON d.doc_id = b.doc_id
+          WHERE blocks_fts MATCH ? AND ${liveFilter} AND d.project_key IS NOT NULL AND d.project_key NOT IN (${keys.map(() => '?').join(', ')})`,
+      )
+      .get(expr, ...keys) as { n: number };
+    return r.n;
+  }
+
+  private search(expr: string, top_k: number, includeTomb: boolean, keys: string[] | null = null): HitRow[] {
     // Live blocks only (valid_to IS NULL) unless tombstoned are requested; superseded
     // blocks are never returned — the successor is the live head and will match instead.
     const liveFilter = includeTomb
@@ -276,11 +309,11 @@ export class Recall {
            JOIN blocks b ON b.rowid = f.rowid
            JOIN documents d ON d.doc_id = b.doc_id
            LEFT JOIN doc_sources s ON s.doc_id = b.doc_id
-          WHERE blocks_fts MATCH ? AND ${liveFilter}
+          WHERE blocks_fts MATCH ? AND ${liveFilter}${keys ? ` AND (d.project_key IS NULL OR d.project_key IN (${keys.map(() => '?').join(', ')}))` : ''}
           ORDER BY score ASC, b.chain_seq DESC
           LIMIT ?`,
       )
-      .all(expr, top_k) as HitRow[];
+      .all(expr, ...(keys ?? []), top_k) as HitRow[];
   }
 
   getReceipt(receipt_id: string): Receipt | null {

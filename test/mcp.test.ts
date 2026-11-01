@@ -161,9 +161,24 @@ describe('MCP server (in-process, 2026-07-28 client via serveStdio over InMemory
     expect(put.blocks).toHaveLength(3);
     expect(put.stale_write_advisory.advisory).toBe(false);
 
-    // Recall with receipt.
-    const rc = parse<{ hits: { block_id: string; receipt: Receipt; content: string }[] }>(
+    // Recall: receipts by id (the default), verified by id.
+    const rcId = parse<{ hits: { block_id: string; receipt: Receipt | null; receipt_id: string; content: string }[] }>(
       await client.callTool({ name: 'recall', arguments: { query: 'restart worker' } }),
+    );
+    expect(rcId.hits[0]!.receipt).toBeNull();
+    expect(rcId.hits[0]!.receipt_id).toMatch(/^[0-9a-f-]{36}$/);
+    const v0 = parse<{ status: string; receipt_id: string }>(
+      await client.callTool({ name: 'verify', arguments: { receipt_id: rcId.hits[0]!.receipt_id } }),
+    );
+    expect(v0).toMatchObject({ status: 'VERIFIED', receipt_id: rcId.hits[0]!.receipt_id });
+    const vUnknown = parse<{ status: string; reason: string }>(
+      await client.callTool({ name: 'verify', arguments: { receipt_id: 'nope' } }),
+    );
+    expect(vUnknown.status).toBe('UNVERIFIED');
+
+    // Recall with the receipt inline.
+    const rc = parse<{ hits: { block_id: string; receipt: Receipt; content: string }[] }>(
+      await client.callTool({ name: 'recall', arguments: { query: 'restart worker', receipts: 'inline' } }),
     );
     expect(rc.hits[0]!.content).toContain('systemctl');
     const receipt = rc.hits[0]!.receipt;

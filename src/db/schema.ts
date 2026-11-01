@@ -9,12 +9,23 @@ export const SCHEMA_VERSION = 1;
  * Columns added to existing tables after 0.3.0; `openDatabase` adds them to
  * older databases (ALTER TABLE … ADD COLUMN), then creates their indexes.
  */
-export const ADDED_COLUMNS: readonly { table: string; column: string; ddl: string; index?: string }[] = [
+export const ADDED_COLUMNS: readonly { table: string; column: string; ddl: string; index?: string; backfill?: string }[] = [
   {
     table: 'receipts',
     column: 'actor_id',
     ddl: 'ALTER TABLE receipts ADD COLUMN actor_id TEXT',
     index: 'CREATE INDEX IF NOT EXISTS receipts_actor_idx ON receipts (actor_id, issued_at)',
+  },
+  {
+    // Unreleased (next): the project a document belongs to (instruction files'
+    // source.project.key, or the `project` of an MCP / CLI put). NULL = unscoped
+    // (every 0.6.0-and-earlier note): visible from every project. A derived
+    // index like the rest of the projection; recall and orient filter on it.
+    table: 'documents',
+    column: 'project_key',
+    ddl: 'ALTER TABLE documents ADD COLUMN project_key TEXT',
+    index: 'CREATE INDEX IF NOT EXISTS documents_project_idx ON documents (project_key)',
+    backfill: `UPDATE documents SET project_key = (SELECT json_extract(s.source_json, '$.project.key') FROM doc_sources s WHERE s.doc_id = documents.doc_id) WHERE project_key IS NULL`,
   },
 ];
 
@@ -74,7 +85,8 @@ CREATE TABLE IF NOT EXISTS documents (
   current_revision INTEGER NOT NULL,
   created_at       TEXT NOT NULL,
   updated_at       TEXT NOT NULL,
-  tombstoned_at    TEXT
+  tombstoned_at    TEXT,
+  project_key      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS document_revisions (

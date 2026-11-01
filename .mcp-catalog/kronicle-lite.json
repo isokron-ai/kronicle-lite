@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-01T03:52:10.538Z",
+  "capturedAt": "2026-11-01T15:04:42.811Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -233,7 +233,7 @@
             },
             "all_projects": {
               "default": false,
-              "description": "Include instruction retractions from other projects.",
+              "description": "Include other projects' documents and retractions.",
               "type": "boolean"
             },
             "budget_tokens": {
@@ -251,6 +251,11 @@
                 "pulse"
               ],
               "type": "string"
+            },
+            "include_cosmetic": {
+              "default": false,
+              "description": "Also list formatting-only edits as retractions.",
+              "type": "boolean"
             },
             "response_format": {
               "default": "markdown",
@@ -281,6 +286,18 @@
             },
             "briefing_id": {
               "type": "string"
+            },
+            "carried_notes": {
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "cosmetic_edits": {
+              "type": [
+                "array",
+                "null"
+              ]
             },
             "cursor": {
               "type": "string"
@@ -511,6 +528,11 @@
               "minLength": 1,
               "type": "string"
             },
+            "all_projects": {
+              "default": false,
+              "description": "Search other projects' documents too.",
+              "type": "boolean"
+            },
             "cursor": {
               "description": "Your latest cursor (for the stale-write advisory).",
               "type": "string"
@@ -524,7 +546,7 @@
               "type": "boolean"
             },
             "max_chars": {
-              "default": 16000,
+              "default": 4000,
               "description": "Content budget; longer hits are cut with a pointer.",
               "maximum": 400000,
               "minimum": 200,
@@ -533,6 +555,15 @@
             "query": {
               "maxLength": 2000,
               "minLength": 1,
+              "type": "string"
+            },
+            "receipts": {
+              "default": "id",
+              "description": "id: receipt_id per hit (verify takes it); inline: the signed receipt.",
+              "enum": [
+                "id",
+                "inline"
+              ],
               "type": "string"
             },
             "top_k": {
@@ -584,6 +615,12 @@
             },
             "query_hash": {
               "type": "string"
+            },
+            "scope": {
+              "type": [
+                "object",
+                "null"
+              ]
             },
             "truncated": {
               "type": [
@@ -771,17 +808,20 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Re-check a recall() receipt against the store (signature, re-hashed block text, chain position, supersession): VERIFIED | SUPERSEDED (see current_block_id) | TOMBSTONED | STALE_SOURCE | UNVERIFIED, with a reason. Fail-closed.",
+        "description": "Re-check a recall() receipt (object or receipt_id) against the store (signature, re-hashed block text, chain position, supersession): VERIFIED | SUPERSEDED (see current_block_id) | TOMBSTONED | STALE_SOURCE | UNVERIFIED, with a reason. Fail-closed.",
         "inputSchema": {
           "properties": {
             "receipt": {
               "description": "The receipt object from recall().",
               "type": "object"
+            },
+            "receipt_id": {
+              "description": "Or the receipt_id from recall().",
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
             }
           },
-          "required": [
-            "receipt"
-          ],
           "type": "object"
         },
         "name": "verify",
@@ -953,5 +993,5 @@
     "title": "kronicle-lite",
     "version": "0.6.0"
   },
-  "sha256": "0c25eb80d24f3cecab677dabcfc139f970c0440391a53539d5a820bb265e5e64"
+  "sha256": "331aa38721c0b9873c90998983b2d4a68af14e534cb9b98ca4e91fdcb6a602b1"
 }

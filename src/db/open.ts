@@ -70,7 +70,10 @@ export function openDatabase(opts: OpenOptions = {}): Opened {
 function addColumns(db: Db): void {
   for (const c of ADDED_COLUMNS) {
     const cols = db.prepare(`SELECT name FROM pragma_table_info(?)`).all(c.table) as { name: string }[];
-    if (!cols.some((x) => x.name === c.column)) db.exec(c.ddl);
+    if (!cols.some((x) => x.name === c.column)) {
+      db.exec(c.ddl);
+      if (c.backfill) db.exec(c.backfill);
+    }
     if (c.index) db.exec(c.index);
   }
 }

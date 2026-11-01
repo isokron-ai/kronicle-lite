@@ -66,8 +66,8 @@ function syncOpts(opts: WatchOptions): { actor_id?: string; secrets?: SecretPoli
 }
 
 export function syncInstructionSet(store: KronicleLite, opts: WatchOptions = {}): SyncResult[] {
-  const { entries } = resolveWatchSet(opts);
-  return entries.map((e) => syncInstructionFile(store, e, syncOpts(opts)));
+  const { entries, rc } = resolveWatchSet(opts);
+  return entries.map((e) => syncInstructionFile(store, e, { ...syncOpts(opts), context: rc }));
 }
 
 export class InstructionWatcher {
@@ -150,7 +150,7 @@ export class InstructionWatcher {
     const entry = this.known.get(abs) ?? entryFor(abs, this.rc);
     this.known.set(abs, entry);
     this.stamps.set(abs, this.stamp(abs));
-    const result = syncInstructionFile(this.store, entry, syncOpts(this.opts));
+    const result = syncInstructionFile(this.store, entry, { ...syncOpts(this.opts), context: this.rc });
     if (trigger === 'start' || (result.action !== 'unchanged' && result.action !== 'missing')) {
       this.emit({ type: 'synced', result, trigger });
     }
