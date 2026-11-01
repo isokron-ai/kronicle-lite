@@ -2,7 +2,7 @@
 /**
  * kronicle-lite CLI
  *
- *   kronicle-lite serve [--data-dir DIR] [--actor ID]   stdio MCP server
+ *   kronicle-lite serve [--data-dir DIR] [--actor ID]   stdio MCP server (dual-era: 2026-07-28 + 2025 initialize)
  *   kronicle-lite verify-chain [--data-dir DIR] [--from N] [--to N]
  *   kronicle-lite checkpoint [--data-dir DIR] [--from N] [--to N]
  *   kronicle-lite export [--data-dir DIR] [--out FILE]  JSONL of events (stdout default)
@@ -12,12 +12,12 @@
  *   kronicle-lite orient [--data-dir DIR] [--actor ID] [--cursor C] [--focus F]
  */
 
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { createReadStream, createWriteStream, readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 
 import { defaultDataDir } from './db/open.js';
-import { createServer, renderSystemStateMarkdown } from './server.js';
+import { createServerFactory, renderSystemStateMarkdown } from './server.js';
 import { KronicleLite } from './store.js';
 import { FOCUSES, type Focus } from './orient/orient.js';
 
@@ -93,17 +93,18 @@ async function main(argv: string[]): Promise<number> {
   switch (cmd) {
     case 'serve': {
       const store = new KronicleLite({ dataDir });
-      const server = createServer(store, {
+      const factory = createServerFactory(store, {
         version: VERSION,
         ...(str(flags['actor']) !== undefined ? { defaultActorId: str(flags['actor'])! } : {}),
       });
-      const transport = new StdioServerTransport();
       process.stderr.write(`kronicle-lite ${VERSION} serving on stdio; data dir ${dataDir}; key ${store.identity.signer.key_id}\n`);
-      await server.connect(transport);
-      // Keep the process alive until stdin closes.
+      const handle = serveStdio(factory, { onerror: (err) => process.stderr.write(`stdio: ${err.message}\n`) });
+      // Keep the process alive until stdin closes, then release the store.
       await new Promise<void>((resolve) => {
-        transport.onclose = () => resolve();
+        process.stdin.once('end', resolve);
+        process.stdin.once('close', resolve);
       });
+      await handle.close();
       store.close();
       return 0;
     }

@@ -14,11 +14,11 @@ export const HEX32 = /^[0-9a-f]{32}$/;
 export const ChainEventSchema = z
   .object({
     seq: z.number().int().positive(),
-    event_id: z.string().uuid(),
+    event_id: z.uuid(),
     event_type: z.string().min(1).max(200),
     payload: z.record(z.string(), z.unknown()),
     actor_id: z.string().min(1).max(200),
-    occurred_at: z.string().datetime(),
+    occurred_at: z.iso.datetime(),
     nonce: z.string().regex(HEX32),
     prev_hash: z.string().regex(HEX64),
     this_hash: z.string().regex(HEX64),

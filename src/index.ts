@@ -4,7 +4,8 @@
  */
 
 export { KronicleLite, type KronicleLiteOptions } from './store.js';
-export { createServer, renderSystemStateMarkdown, type ServerOptions } from './server.js';
+export { createServer, createServerFactory, renderSystemStateMarkdown, INSTRUCTIONS, CACHE_HINTS, type ServerOptions } from './server.js';
+export * as toolSchemas from './schemas.js';
 export * from './chain/index.js';
 export { canonicalize, type JsonValue } from './crypto/canonical.js';
 export { sha256Hex, blake3Hex } from './crypto/hash.js';

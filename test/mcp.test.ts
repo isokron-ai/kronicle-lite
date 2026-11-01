@@ -1,23 +1,46 @@
 /**
- * End-to-end over the MCP protocol: an SDK Client talks to createServer()
- * through an in-process linked transport, and separately to the built CLI
- * over real stdio.
+ * End-to-end over the MCP protocol with the v2 SDK:
+ *   (a) in-memory 2026-07-28 client against the dual-era `serveStdio` entry,
+ *   (b) the built CLI over real stdio (modern client, auto-negotiated),
+ *   (c) one Streamable HTTP round trip with a bearer token,
+ *   (d) a 2025-06-18-style `initialize` handshake client (raw JSON-RPC over
+ *       stdio) proving legacy clients still get served,
+ *   plus raw-wire checks of what the 2026-07-28 revision requires on
+ *   results (resultType, ttlMs/cacheScope, _meta serverInfo).
  */
 
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
+import { serveStdio } from '@modelcontextprotocol/server/stdio';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createInterface } from 'node:readline';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import type { Receipt } from '../src/recall/receipt.js';
-import { createServer } from '../src/server.js';
+import { CACHE_HINTS, createServer, createServerFactory, INSTRUCTIONS } from '../src/server.js';
 import { KronicleLite } from '../src/store.js';
+
+const MODERN = '2026-07-28';
+const META = { 'io.modelcontextprotocol/protocolVersion': MODERN, 'io.modelcontextprotocol/clientCapabilities': {} };
+
+const TOOL_NAMES = [
+  'audit_assumptions',
+  'checkpoint_chain',
+  'get_system_state',
+  'put_document',
+  'recall',
+  'supersede_block',
+  'tombstone_block',
+  'verify',
+  'verify_chain',
+].sort();
 
 interface ToolResult {
   content: { type: string; text?: string }[];
+  structuredContent?: Record<string, unknown>;
   isError?: boolean;
 }
 
@@ -25,61 +48,91 @@ function parse<T = unknown>(r: unknown): T {
   const res = r as ToolResult;
   const t = res.content[0];
   if (!t || t.type !== 'text' || !t.text) throw new Error('no text content');
-  return JSON.parse(t.text) as T;
+  const fromText = JSON.parse(t.text) as T;
+  // Every successful result carries the same value as structuredContent.
+  if (!res.isError) expect(res.structuredContent).toEqual(fromText);
+  return fromText;
 }
 
 function textOf(r: unknown): string {
   return (r as ToolResult).content[0]?.text ?? '';
 }
 
-describe('MCP server (in-process transport)', () => {
+describe('server metadata', () => {
+  it('instructions fit the 512-char window Codex reads', () => {
+    expect(INSTRUCTIONS.length).toBeLessThanOrEqual(512);
+    expect(INSTRUCTIONS).toMatch(/get_system_state/);
+    expect(INSTRUCTIONS).toMatch(/since_cursor/);
+  });
+
+  it('cache hints: catalog is public and long-lived, document reads are private and stale', () => {
+    expect(CACHE_HINTS['tools/list']).toEqual({ ttlMs: 3_600_000, cacheScope: 'public' });
+    expect(CACHE_HINTS['resources/read']).toEqual({ ttlMs: 0, cacheScope: 'private' });
+  });
+});
+
+describe('MCP server (in-process, 2026-07-28 client via serveStdio over InMemoryTransport)', () => {
   let store: KronicleLite;
   let client: Client;
+  let close: () => Promise<void>;
 
   beforeAll(async () => {
     store = new KronicleLite({ memory: true });
-    const server = createServer(store, { defaultActorId: 'test-agent' });
     const [clientT, serverT] = InMemoryTransport.createLinkedPair();
-    await server.connect(serverT);
-    client = new Client({ name: 'test-client', version: '0.0.0' });
+    const handle = serveStdio(createServerFactory(store, { defaultActorId: 'test-agent' }), { transport: serverT });
+    close = () => handle.close();
+    client = new Client({ name: 'test-client', version: '0.0.0' }, { versionNegotiation: { mode: { pin: MODERN } } });
     await client.connect(clientT);
   });
 
   afterAll(async () => {
     await client.close();
+    await close();
     store.close();
   });
 
-  it('lists the expected tools with instructive descriptions', async () => {
+  it('negotiates the modern era and answers server/discover with identity + instructions', async () => {
+    expect(client.getProtocolEra()).toBe('modern');
+    const d = await client.discover();
+    expect(d.supportedVersions).toContain(MODERN);
+    expect(d.capabilities).toMatchObject({ tools: expect.any(Object), resources: expect.any(Object) });
+    expect(d.instructions).toBe(INSTRUCTIONS);
+    expect(client.getServerVersion()).toMatchObject({ name: 'kronicle-lite' });
+  });
+
+  it('lists the expected tools with instructive descriptions, annotations and an outputSchema on every tool', async () => {
     const { tools } = await client.listTools();
-    const names = tools.map((t) => t.name).sort();
-    expect(names).toEqual(
-      [
-        'audit_assumptions',
-        'checkpoint_chain',
-        'get_system_state',
-        'put_document',
-        'recall',
-        'supersede_block',
-        'tombstone_block',
-        'verify',
-        'verify_chain',
-      ].sort(),
-    );
+    expect(tools.map((t) => t.name).sort()).toEqual(TOOL_NAMES);
+    for (const t of tools) {
+      expect(t.title, t.name).toBeTruthy();
+      expect(t.inputSchema, t.name).toMatchObject({ type: 'object' });
+      expect(t.outputSchema, t.name).toMatchObject({ type: 'object' });
+      expect(t.annotations, t.name).toHaveProperty('readOnlyHint');
+      expect(t.annotations?.openWorldHint, t.name).toBe(false);
+    }
     const gss = tools.find((t) => t.name === 'get_system_state')!;
     expect(gss.description).toMatch(/since_cursor/);
     expect(gss.description).toMatch(/drift banner/);
-    expect(gss.inputSchema).toMatchObject({ type: 'object' });
     expect((gss.inputSchema as { properties: Record<string, unknown> }).properties).toHaveProperty('budget_tokens');
+    expect((gss.outputSchema as { required: string[] }).required).toEqual(expect.arrayContaining(['cursor', 'head', 'drift_banner']));
+    expect(tools.find((t) => t.name === 'tombstone_block')!.annotations).toMatchObject({ destructiveHint: true });
+    expect(tools.find((t) => t.name === 'put_document')!.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false });
+  });
+
+  it('tools/list order is deterministic across calls', async () => {
+    const a = (await client.listTools({}, { cacheMode: 'bypass' })).tools.map((t) => t.name);
+    const b = (await client.listTools({}, { cacheMode: 'bypass' })).tools.map((t) => t.name);
+    expect(a).toEqual(b);
   });
 
   it('runs the full loop: orient → put → recall → verify → supersede → verify → orient', async () => {
-    // Cold orient, markdown by default.
-    const o1 = await client.callTool({ name: 'get_system_state', arguments: {} });
+    // Cold orient, markdown by default; structuredContent still carries the JSON state.
+    const o1 = (await client.callTool({ name: 'get_system_state', arguments: {} })) as ToolResult;
     const md = textOf(o1);
     expect(md).toMatch(/^# kronicle-lite orient — head seq 0/);
     expect(md).toMatch(/cursor_compact:\*\* `sxt1c\.0\./);
     const cursorCompact = /cursor_compact:\*\* `([^`]+)`/.exec(md)![1]!;
+    expect(o1.structuredContent).toMatchObject({ format: 'kronicle-lite/1', cursor_compact: cursorCompact, head: { seq: 0 } });
 
     // Write with the cursor: no advisory because we just oriented.
     const put = parse<{
@@ -154,6 +207,16 @@ describe('MCP server (in-process transport)', () => {
     expect(o2.delta.events_since).toBe(7);
     expect(o2.retractions).toEqual([expect.objectContaining({ kind: 'supersession', block_id: receipt.block_id })]);
 
+    // audit_assumptions grades the old block as stale.
+    const audit = parse<{ results: { verdict: string }[]; counts: Record<string, number> }>(
+      await client.callTool({
+        name: 'audit_assumptions',
+        arguments: { claims: [{ symbol: receipt.block_id, value: receipt.content_hash }, { symbol: 'head', value: 7 }] },
+      }),
+    );
+    expect(audit.results.map((r) => r.verdict)).toEqual(['stale', 'current']);
+    expect(audit.counts).toMatchObject({ stale: 1, current: 1 });
+
     // Tombstone with a different actor who never oriented → advisory true.
     const tomb = parse<{ stale_write_advisory: { advisory: boolean; line: string } }>(
       await client.callTool({
@@ -164,7 +227,7 @@ describe('MCP server (in-process transport)', () => {
     expect(tomb.stale_write_advisory.advisory).toBe(true);
     expect(tomb.stale_write_advisory.line).toMatch(/never oriented/);
 
-    // Errors are structured tool errors.
+    // Errors are structured tool errors (isError, text only — no structuredContent to validate).
     const bad = (await client.callTool({
       name: 'tombstone_block',
       arguments: { block_id: put.blocks[2]!.block_id, reason: 'again' },
@@ -199,15 +262,66 @@ describe('MCP server (in-process transport)', () => {
   });
 });
 
+describe('MCP server (in-process, legacy 2025-06-18 initialize client via serveStdio)', () => {
+  let store: KronicleLite;
+  let client: Client;
+  let close: () => Promise<void>;
+
+  beforeAll(async () => {
+    store = new KronicleLite({ memory: true });
+    const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+    const handle = serveStdio(createServerFactory(store, { defaultActorId: 'legacy-agent' }), { transport: serverT });
+    close = () => handle.close();
+    // Default negotiation mode is the plain 2025 `initialize` handshake; offer 2025-06-18 first.
+    client = new Client({ name: 'legacy-client', version: '0.0.0' }, { supportedProtocolVersions: ['2025-06-18'] });
+    await client.connect(clientT);
+  });
+
+  afterAll(async () => {
+    await client.close();
+    await close();
+    store.close();
+  });
+
+  it('is served under the negotiated legacy revision with the same catalog', async () => {
+    expect(client.getProtocolEra()).toBe('legacy');
+    expect(client.getInstructions()).toBe(INSTRUCTIONS);
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name).sort()).toEqual(TOOL_NAMES);
+    const put = parse<{ head: { seq: number } }>(
+      await client.callTool({ name: 'put_document', arguments: { slug: 'a', title: 'A', markdown: 'hello legacy' } }),
+    );
+    expect(put.head.seq).toBe(2);
+  });
+});
+
+describe('direct McpServer.connect (v1-style wiring still works for embedding)', () => {
+  it('serves a legacy client over a plain transport', async () => {
+    const store = new KronicleLite({ memory: true });
+    const server = createServer(store, { defaultActorId: 'embed' });
+    const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverT);
+    const client = new Client({ name: 'embed-client', version: '0.0.0' });
+    await client.connect(clientT);
+    const s = parse<{ actor_id: string }>(
+      await client.callTool({ name: 'get_system_state', arguments: { response_format: 'json' } }),
+    );
+    expect(s.actor_id).toBe('embed');
+    await client.close();
+    await server.close();
+    store.close();
+  });
+});
+
 const CLI = join(process.cwd(), 'dist', 'cli.js');
 
-describe.skipIf(!existsSync(CLI))('MCP server over stdio (built CLI)', () => {
+describe.skipIf(!existsSync(CLI))('MCP server over stdio (built CLI, modern client with auto negotiation)', () => {
   let dir: string;
   let client: Client;
 
   beforeAll(async () => {
     dir = mkdtempSync(join(tmpdir(), 'kl-stdio-'));
-    client = new Client({ name: 'stdio-test', version: '0.0.0' });
+    client = new Client({ name: 'stdio-test', version: '0.0.0' }, { versionNegotiation: { mode: 'auto' } });
     await client.connect(
       new StdioClientTransport({ command: process.execPath, args: [CLI, 'serve', '--data-dir', dir, '--actor', 'stdio-agent'] }),
     );
@@ -218,7 +332,8 @@ describe.skipIf(!existsSync(CLI))('MCP server over stdio (built CLI)', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('answers tools/list and tools/call', async () => {
+  it('probes with server/discover, lands on 2026-07-28, and answers tools/list and tools/call', async () => {
+    expect(client.getProtocolEra()).toBe('modern');
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name)).toContain('get_system_state');
     const put = parse<{ head: { seq: number } }>(
@@ -230,5 +345,139 @@ describe.skipIf(!existsSync(CLI))('MCP server over stdio (built CLI)', () => {
     );
     expect(s.actor_id).toBe('stdio-agent');
     expect(s.head.seq).toBe(2);
+  });
+});
+
+// ───────────────────────────── raw wire (stdio) ─────────────────────────────
+
+interface RawRpc {
+  send(msg: Record<string, unknown>): void;
+  /** Wait for the response with this id (responses may arrive out of order: handlers are async). */
+  response(id: number): Promise<Record<string, unknown>>;
+  close(): Promise<void>;
+}
+
+function rawStdio(dir: string): RawRpc {
+  const child: ChildProcess = spawn(process.execPath, [CLI, 'serve', '--data-dir', dir], { stdio: ['pipe', 'pipe', 'ignore'] });
+  const byId = new Map<number, Record<string, unknown>>();
+  const waiters = new Map<number, (msg: Record<string, unknown>) => void>();
+  createInterface({ input: child.stdout! }).on('line', (line) => {
+    const msg = JSON.parse(line) as Record<string, unknown>;
+    const id = msg['id'];
+    if (typeof id !== 'number') return; // notifications
+    const w = waiters.get(id);
+    if (w) {
+      waiters.delete(id);
+      w(msg);
+    } else byId.set(id, msg);
+  });
+  return {
+    send: (msg) => child.stdin!.write(JSON.stringify(msg) + '\n'),
+    response: (id) =>
+      new Promise((resolve, reject) => {
+        const got = byId.get(id);
+        if (got) {
+          byId.delete(id);
+          return resolve(got);
+        }
+        const t = setTimeout(() => reject(new Error(`timeout waiting for response id ${id}`)), 10_000);
+        waiters.set(id, (msg) => {
+          clearTimeout(t);
+          resolve(msg);
+        });
+      }),
+    close: () =>
+      new Promise((resolve) => {
+        child.once('exit', () => resolve());
+        child.stdin!.end();
+      }),
+  };
+}
+
+describe.skipIf(!existsSync(CLI))('raw JSON-RPC over stdio: era behavior of the built CLI', () => {
+  it('(d) a 2025-06-18 initialize handshake client is served under 2025-06-18, without 2026 result fields', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'kl-legacy-'));
+    const rpc = rawStdio(dir);
+    try {
+      rpc.send({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'old-client', version: '1' } },
+      });
+      const init = (await rpc.response(1)) as { id: number; result: Record<string, unknown> };
+      expect(init.id).toBe(1);
+      expect(init.result['protocolVersion']).toBe('2025-06-18');
+      expect(init.result['serverInfo']).toMatchObject({ name: 'kronicle-lite' });
+      expect(init.result['instructions']).toBe(INSTRUCTIONS);
+      expect(init.result).not.toHaveProperty('resultType');
+
+      rpc.send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+      rpc.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+      const list = (await rpc.response(2)) as { id: number; result: Record<string, unknown> };
+      expect(list.id).toBe(2);
+      expect((list.result['tools'] as { name: string }[]).map((t) => t.name).sort()).toEqual(TOOL_NAMES);
+      expect(list.result).not.toHaveProperty('ttlMs');
+      expect(list.result).not.toHaveProperty('resultType');
+
+      rpc.send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'verify_chain', arguments: {} } });
+      const call = (await rpc.response(3)) as { id: number; result: ToolResult };
+      expect(call.id).toBe(3);
+      expect(parse<{ ok: boolean }>(call.result).ok).toBe(true);
+      expect(call.result).not.toHaveProperty('resultType');
+
+      // A modern request on a connection pinned to the legacy era is refused.
+      rpc.send({ jsonrpc: '2.0', id: 4, method: 'server/discover', params: { _meta: META } });
+      const refused = (await rpc.response(4)) as { id: number; error?: { code: number } };
+      expect(refused.id).toBe(4);
+      expect(refused.error).toBeDefined();
+    } finally {
+      await rpc.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a modern opening gets 2026-07-28 result fields; a later initialize on that connection gets -32022', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'kl-modern-'));
+    const rpc = rawStdio(dir);
+    try {
+      rpc.send({ jsonrpc: '2.0', id: 1, method: 'server/discover', params: { _meta: META } });
+      const d = (await rpc.response(1)) as { result: Record<string, unknown> };
+      expect(d.result).toMatchObject({
+        resultType: 'complete',
+        supportedVersions: [MODERN],
+        instructions: INSTRUCTIONS,
+        ttlMs: CACHE_HINTS['server/discover'].ttlMs,
+        cacheScope: 'public',
+      });
+      expect((d.result['_meta'] as Record<string, unknown>)['io.modelcontextprotocol/serverInfo']).toMatchObject({ name: 'kronicle-lite' });
+
+      rpc.send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: { _meta: META } });
+      const list = (await rpc.response(2)) as { result: Record<string, unknown> };
+      expect(list.result).toMatchObject({ resultType: 'complete', ttlMs: CACHE_HINTS['tools/list'].ttlMs, cacheScope: 'public' });
+      expect((list.result['tools'] as { outputSchema?: unknown }[]).every((t) => t.outputSchema !== undefined)).toBe(true);
+
+      rpc.send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'verify_chain', arguments: {}, _meta: META } });
+      const call = (await rpc.response(3)) as { result: ToolResult & { resultType: string } };
+      expect(call.result.resultType).toBe('complete');
+      expect(call.result.structuredContent).toMatchObject({ ok: true });
+
+      // Note (SDK 2.4.0): once a stdio connection is pinned to an instance, that instance does not
+      // re-validate the per-request protocol version; the opening request is where the version is
+      // checked (see the next test). HTTP validates every request because each one is its own exchange.
+
+      // Legacy handshake after a modern opening: the connection is pinned modern.
+      rpc.send({
+        jsonrpc: '2.0',
+        id: 5,
+        method: 'initialize',
+        params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'old', version: '1' } },
+      });
+      const late = (await rpc.response(5)) as { error: { code: number } };
+      expect(late.error.code).toBe(-32022);
+    } finally {
+      await rpc.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

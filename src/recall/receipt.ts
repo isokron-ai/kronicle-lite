@@ -24,16 +24,16 @@ export const RECEIPT_VERSION = 2 as const;
 export const ReceiptSchema = z
   .object({
     v: z.literal(RECEIPT_VERSION),
-    receipt_id: z.string().uuid(),
+    receipt_id: z.uuid(),
     workspace: z.string().min(1).max(100),
-    block_id: z.string().uuid(),
+    block_id: z.uuid(),
     content_hash: z.string().regex(HEX64),
     doc_slug: z.string().min(1).max(128),
     revision: z.number().int().positive(),
     chain_seq: z.number().int().nonnegative(),
     chain_head_hash: z.string().regex(HEX64),
     query_hash: z.string().regex(HEX64),
-    issued_at: z.string().datetime(),
+    issued_at: z.iso.datetime(),
     key_id: z.string().min(1).max(100),
     signature: z.string().min(1).optional(),
   })

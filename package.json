@@ -54,17 +54,20 @@
     "url": "git+https://github.com/rafe-walker/kronicle-lite.git"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@modelcontextprotocol/node": "^2.1.2",
+    "@modelcontextprotocol/server": "^2.4.0",
     "@noble/hashes": "^2.0.1",
     "better-sqlite3": "^12.6.0",
     "canonicalize": "^2.1.0",
-    "zod": "^3.25.76"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.0",
+    "@modelcontextprotocol/client": "^2.4.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.19.0",
     "eslint": "^9.39.0",
+    "mcp-catalog-snap": "^0.1.0",
     "tsup": "^8.5.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.46.0",
