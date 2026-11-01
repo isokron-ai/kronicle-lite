@@ -4,7 +4,7 @@ All notable changes to kronicle-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
-## [0.6.0] — unreleased
+## [0.6.0] — 2026-11-01
 
 Honest labels: deterministic, LLM-free checks ported from IsoKron
 (`packages/reality` retrieval-honesty-tags and the C-1 inherit ladder,
