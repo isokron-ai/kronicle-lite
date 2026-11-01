@@ -451,8 +451,8 @@ a document's current revision.
 
 **`serve --core`** (0.6.0) serves only `get_system_state`,
 `audit_assumptions`, `recall`, `verify`, `put_document` and
-`supersede_block`, for small context windows: `tools/list` is 9.9 KB
-instead of 13.6 KB. Its catalog is pinned separately
+`supersede_block`, for small context windows: `tools/list` is 10.5 KB
+instead of 14.2 KB. Its catalog is pinned separately
 ([`.mcp-catalog/kronicle-lite-core.json`](.mcp-catalog/kronicle-lite-core.json)).
 
 ### Honest labels (0.6.0)

@@ -106,4 +106,4 @@ The wake contract and the orient skill carry the rule instead: call
 `get_system_state` with your cursor **before any world-changing command**
 (deploy, migrate, publish, `git push`, sending messages, paying), not only
 before kronicle write tools. With nothing new, the answer is one line
-(about 150 bytes); otherwise reconcile the retractions first.
+(under 100 bytes); otherwise reconcile the retractions first.

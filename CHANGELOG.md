@@ -74,20 +74,23 @@ backfilled on open.
   reported corrupt; a concurrent `mkdir` of the data dir is tolerated.
   Before: 50 processes on a fresh data dir could crash on a half-written
   `cursor-secret` (sea-lite, 1/20 bench seeds) or end up signing with
-  different keys (2/20 stress trials). After: 0 crashes, one identity, in
-  1000 concurrent starts.
+  different keys (1–2 of 20 stress trials of 50 processes). After: 0
+  crashes and one identity in 1000 concurrent starts (20 × 50).
 
 ### Changed — response diet
 
 - With a verified cursor and nothing new, `get_system_state` answers in one
-  line (`kronicle-lite: no change since seq N. Proceed; next cursor: …`,
-  ~110 B; was ~1.1 KB). `focus=pulse` is also one to three lines.
+  line (`kronicle-lite: no change since seq N. Proceed; next cursor: …`:
+  78 B, was 878 B; `focus=pulse` 126 B, was 603 B).
 - The Markdown briefing omits the digest when a cursor was presented (still
   in `structuredContent`).
 - MCP `recall`: receipts by id (`receipt_id` per hit; the receipt is stored
   and `verify` takes `{receipt_id}`; `receipts: "inline"` for the old
   shape), compact JSON text, `max_chars` default 4000 (library default
-  unchanged at 16000).
+  unchanged at 16000). Bench: recall 2.2 KB → 1.3 KB per query (S12),
+  S1 per-turn orient 2.7 → 2.4 KB, S8 6.0 → 1.0 KB.
+- `tools/list` grows by ~0.6 KB (14.2 KB full, 10.5 KB `--core`) for the
+  new parameters and result fields.
 
 ### Added — push contract for hooks
 

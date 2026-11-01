@@ -155,12 +155,16 @@ export class Recall {
     let searchedAny = false;
     const keys = input.project_keys && input.project_keys.length > 0 ? input.project_keys : null;
     let hiddenOther = 0;
+    // The count costs a second full-text query: run it only when another project has documents (indexed check).
+    const otherProjects =
+      keys !== null &&
+      this.db.prepare(`SELECT 1 FROM documents WHERE project_key IS NOT NULL AND project_key NOT IN (${keys.map(() => '?').join(', ')}) LIMIT 1`).get(...keys) !== undefined;
     for (const mode of ['AND', 'OR'] as const) {
       const expr = toMatchExpression(input.query, mode);
       if (!expr) break;
       searchedAny = true;
       rows = this.search(expr, top_k, includeTomb, keys);
-      if (keys) hiddenOther = this.countOtherProjects(expr, includeTomb, keys);
+      if (keys && otherProjects) hiddenOther = this.countOtherProjects(expr, includeTomb, keys);
       if (rows.length > 0) {
         match_mode = mode === 'AND' ? 'all_terms' : 'any_term';
         break;
