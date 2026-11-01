@@ -59,7 +59,7 @@ Fields a hook reads:
 | `head.seq` | chain head when the briefing was made |
 | `recovery.method`, `recovery.cursor_error` | see above |
 | `retractions[]` | things the agent may have relied on that changed; empty when nothing did |
-| `retractions[].seq`, `.kind`, `.severity` | `kind`: `instruction` \| `supersession` \| `tombstone` \| `retraction` \| `derived` (unreleased, below); `severity`: `safety` \| `behavioral` \| `informational` |
+| `retractions[].seq`, `.kind`, `.severity` | `kind`: `instruction` \| `supersession` \| `tombstone` \| `retraction` \| `derived` (0.8.0, below); `severity`: `safety` \| `behavioral` \| `informational` |
 | `retractions[].doc_slug`, `.heading_path` | where |
 | `retractions[].old_text`, `.new_text`, `.diff` | bounded snippets (≤ 160 chars) and a word diff `[-old-]{+new+}` (≤ 400 chars); `new_text` and `diff` are `null` for a removal |
 | `retractions[].hint` | `"likely_typo"` on an edit shaped like a one-letter typo fix: a label only (severity and delivery unchanged; such edits include Karen→Karin) |
@@ -68,8 +68,8 @@ Fields a hook reads:
 | `format_only_edits[]` (alias `cosmetic_edits`) | edits with the same Markdown tree and byte-identical text (reflow, whitespace, emphasis or list-marker style): recorded, **not** in `retractions`, so a hook does not push them. `--include-format-only` folds them back into `retractions` with `format_only: true`. Nothing else is ever left out |
 | `integrity.ok`, `integrity.problem`, `integrity.seq` | `false`: the store was edited outside kronicle-lite (see "integrity failure" above) |
 | `drift_banner.surfaced` | the actor has not oriented for a while |
-| `retractions[]` with `kind: "derived"` (unreleased) | a NOTE derived from a block that changed in this window and was not re-derived: `doc_slug` / `old_text` are the note's, `diff` is the source's word diff (`source <slug>: [-old-]{+new+}`), `derived_from_change` names the source version, its current version and the change (`superseded` \| `moved` \| `tombstoned` \| `missing`); `seq` / `event_type` are the source change's. Severity `safety` when the source was removed, else `behavioral` |
-| `pending[]`, `pending_count`, `pending_actor`, `pending_hidden` (unreleased) | see "Pending" below; every focus, `pulse` included |
+| `retractions[]` with `kind: "derived"` (0.8.0) | a NOTE derived from a block that changed in this window and was not re-derived: `doc_slug` / `old_text` are the note's, `diff` is the source's word diff (`source <slug>: [-old-]{+new+}`), `derived_from_change` names the source version, its current version and the change (`superseded` \| `moved` \| `tombstoned` \| `missing`); `seq` / `event_type` are the source change's. Severity `safety` when the source was removed, else `behavioral` |
+| `pending[]`, `pending_count`, `pending_actor`, `pending_hidden` (0.8.0) | see "Pending" below; every focus, `pulse` included |
 
 `focus=retractions` is the cheap path: no delta entries, no digest, no git
 calls (`source_drift` is `null`, meaning "not checked"), and the integrity
@@ -78,7 +78,7 @@ live blocks, so a store edited behind kronicle-lite's back still surfaces on
 this path. About 0.33 s per call on a 300-file store, most of it Node
 start-up.
 
-## Pending: version-bound reconciliation (unreleased, additive)
+## Pending: version-bound reconciliation (0.8.0, additive)
 
 Delivery is not reconciliation. A retraction pushed into the context can be
 skimmed, compacted away or never acted on, and the cursor has moved on
@@ -136,6 +136,9 @@ open as above). A `PreToolUse` gate for `deploy|migrate|publish|git push`
 blocks (or asks) while `pending_count > 0`, quoting each item's `resolve`;
 the agent clears it by re-reading, never by acknowledging. Existing fields
 are unchanged: a hook that ignores `pending` behaves exactly as before.
+The exec-time [shims](#shims-exec-time-pulse-for-any-client) apply the same
+rule to the retractions since their cursor (`kronicle-lite pulse
+--pending-actor`).
 
 ## A minimal PostToolUse hook
 
@@ -175,7 +178,7 @@ try {
 
 The same call works as a `PreToolUse` gate for `Bash` commands matching
 `deploy|migrate|publish|git push`: when `retractions` is non-empty, return
-the lines as context (or ask) before the command runs. Unreleased: key the
+the lines as context (or ask) before the command runs. Since 0.8.0, key the
 gate on `pending_count` instead (add `--pending-actor <agent>`, or call
 `kronicle-lite pending --actor <agent> --json`): it stays non-zero until the
 agent has re-read the current version, even after the push was delivered or
@@ -195,7 +198,7 @@ exec time in any client, hooks or not.
 
 ## Shims: exec-time pulse for any client
 
-*Unreleased.* A push hook needs a client with hooks, and a check made before
+*0.8.0.* A push hook needs a client with hooks, and a check made before
 a Bash call cannot see a change that lands while the call runs
 (`build && migrate && deploy`), nor a deploy hidden in `make release`,
 `bash -c "$CMD"` or a wrapper script. A shim checks at the moment the real
@@ -205,10 +208,10 @@ a CI script or a human.
 ```sh
 kronicle-lite shim install [--dir D] [--commands git,terraform,tofu,kubectl,helm,npm,pnpm,yarn]
                            [--world "make release,docker push,gh release create"]
-                           [--data-dir DIR] [--mode deny|warn] [--windows]
+                           [--data-dir DIR] [--mode deny|warn] [--pending-actor A[,B]] [--windows]
 export PATH="D:$PATH"          # D FIRST on PATH (default D: ~/.kronicle-lite/shims)
 kronicle-lite shim status      # per tool: active on PATH? real binary? anything blocking in this project?
-kronicle-lite shim ack --through SEQ   # after reconciling a denial (the denial prints SEQ)
+kronicle-lite shim ack --through SEQ   # manual override: clear a denial without re-reading (the denial prints SEQ)
 kronicle-lite shim uninstall   # removes only files carrying the shim marker, plus D/.kronicle-shim
 ```
 
@@ -274,27 +277,57 @@ Not seen: git aliases (`git p` for `git push`), commands run by absolute
 path (`/usr/bin/git push`), and anything that edits PATH first. A shim is a
 guard rail for agents that act in good faith, not a security boundary.
 
-### Acknowledging
+### Reconciling: re-read the current version (or acknowledge)
 
 The shim keeps one cursor per project (the project of the working
 directory: the same key `orient --cwd` uses) in `D/.kronicle-shim/cursors/`,
-starting from the head at install time.
+starting from the head at install time. Each blocking retraction since the
+cursor (severity `safety` or `behavioral`; format-only edits are never
+retractions) is checked the way [`pending`](#pending-version-bound-reconciliation-080-additive)
+is (0.8.0):
 
-- **Denied** (blocking retractions since the cursor: severity `safety` or
-  `behavioral`; format-only edits are never retractions): the cursor does
-  **not** move, so a plain retry is refused again. Re-read the documents,
-  then `kronicle-lite shim ack --through SEQ` (SEQ = the head the denial
-  printed). A change after SEQ still blocks: acknowledging 42 never
-  clears 43. Acknowledging in one project does not clear another.
-- **Allowed**: the cursor moves to the head. Informational retractions are
-  printed on stderr and do not block.
+- **Resolved** when every *pending actor* has read the **current version**
+  of the changed block: a recall hit on it (or a format-only twin), a
+  document read (`kronicle://docs/<slug>`, CLI `get`), or its own write; for
+  a removal, a read of the document (or the tombstoned block) after the
+  removal. For a `derived` retraction, the current version of the note's
+  source. Reading an older version never resolves a newer change, and
+  receiving the push (a briefing, a retraction in a hook) is not a read.
+- **Pending actors**: `shim install --pending-actor A[,B]` (stored in the
+  shim config; `pulse --pending-actor` for a hook), else the actors that
+  read any version of the changed block (recall hits and document reads;
+  writing a version is not relying on it), plus, for `derived`, the actors
+  that read or wrote the note. All of them must have re-read. With nobody
+  to check (no recorded reader, or a document-level event without a
+  block) the change stays blocking until someone reads the current version
+  or it is acknowledged. Name the agent's actor (the `--actor` of its
+  `serve`) with `--pending-actor` when several agents or people read the
+  same documents: the default waits for all of them.
+
+Then:
+
+- **Denied** (any blocking retraction unresolved): the cursor does **not**
+  move, so a plain retry is refused again. Each line names who has not
+  re-read yet (`[not yet re-read at the current version by: agent-a]`).
+  Re-read the document and run the command again: an agent that recalls
+  the runbook again clears the gate itself, no `ack` needed.
+- **Manual override**: `kronicle-lite shim ack --through SEQ` (SEQ = the
+  head the denial printed) clears the gate without a read. A change after
+  SEQ still blocks: acknowledging 42 never clears 43. Acknowledging in one
+  project does not clear another.
+- **Allowed** (nothing blocking, or every blocking change resolved): the
+  cursor moves to the head; resolved changes are noted once on stderr
+  (`… already re-read at the current version (by agent-a)`).
+  Informational retractions are printed and do not block.
 - **Warn mode**: the denial text is printed, the cursor moves, the command
   runs.
+- **Integrity failure**: refused in both modes, whatever was read (fail
+  closed).
 
 ### `kronicle-lite pulse` (the check itself)
 
 ```sh
-kronicle-lite pulse [--data-dir DIR] [--cwd DIR] [--cursor C | --state D] [--mode deny|warn] [--json] [--all-projects] [-- CMD…]
+kronicle-lite pulse [--data-dir DIR] [--cwd DIR] [--cursor C | --state D] [--mode deny|warn] [--pending-actor A[,B]] [--json] [--all-projects] [-- CMD…]
 ```
 
 Usable from any hook. Exit 0 = allow (also warn and a first check), 77 =
@@ -308,9 +341,12 @@ cursors itself. `--json` prints one object:
 |---|---|
 | `decision` | `allow` \| `deny` \| `warn` \| `seed` |
 | `reason` | `clear` \| `retractions` \| `integrity` \| `seeded` \| `genesis` (unreadable cursor: re-seeded) |
-| `blocking[]`, `informational[]` | retractions (same shape as orient's `retractions[]`) |
+| `blocking[]`, `informational[]` | retractions (same shape as orient's `retractions[]`); `blocking[]` are the unresolved ones |
+| `blocking[].pending_actors`, `.unread_by` | (0.8.0) the actors checked for this change and those that have not read its current version (`[]` / `[]`: no reader recorded) |
+| `resolved[]` | (0.8.0) blocking retractions since the cursor that every pending actor has re-read at the current version (same shape as `blocking[]`) |
+| `pending_actors` | (0.8.0) the configured actors (`--pending-actor`, or the shim config), `null` = each change's readers |
 | `cursor` | carry it: the head when allowed / warned, the unchanged cursor when denied |
-| `ack_through` | denied for retractions: acknowledge through this seq |
+| `ack_through` | denied for retractions: the manual override acknowledges through this seq |
 | `integrity` | orient's integrity summary (`ok: false` ⇒ `decision: "deny"`) |
 | `message` | the text a shim prints on stderr (null: nothing to say) |
 | `head`, `from_seq`, `recovery`, `project_keys`, `hidden_retractions` | as in orient |
@@ -372,5 +408,7 @@ The shim works wherever the agent's shell inherits a PATH with `D` first.
 
 Tell the agent what exit 77 means in its instructions, e.g.: *"A command
 that exits 77 with `kronicle-lite shim: did NOT run` was refused because a
-document you rely on changed: re-read it, check the command's values, run
-the `kronicle-lite shim ack` line it printed, then run the command again."*
+document you rely on changed: re-read it (recall it again), check the
+command's values, then run the command again. Reading the current version
+clears the check; use the `kronicle-lite shim ack` line it printed only to
+override."*

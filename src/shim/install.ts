@@ -58,6 +58,8 @@ export interface ShimConfig {
   /** User patterns, "TOOL [WORD…]". */
   world: string[];
   mode: PulseMode;
+  /** Whose current-version reads reconcile a change (absent: each change's readers). */
+  pending_actors?: string[];
   /** '' = kronicle-lite's default data dir at run time. */
   data_dir: string;
   node: string;
@@ -203,6 +205,8 @@ export interface InstallOptions {
   commands?: string[] | undefined;
   world?: string[] | undefined;
   mode?: PulseMode | undefined;
+  /** Whose reads reconcile a change (stored in the config; pulse reads it). */
+  pendingActors?: string[] | undefined;
   /** Explicit data dir to embed (undefined: kronicle-lite's default at run time). */
   dataDir?: string | undefined;
   /** Data dir to seed the baseline from (the explicit one, or the default). */
@@ -307,6 +311,7 @@ export function install(o: InstallOptions): InstallReport {
     tools,
     world: o.world ?? [],
     mode,
+    ...(o.pendingActors && o.pendingActors.length > 0 ? { pending_actors: o.pendingActors } : {}),
     data_dir: o.dataDir ?? '',
     node: o.node,
     cli: o.cli,

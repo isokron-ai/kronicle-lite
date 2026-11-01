@@ -14,9 +14,14 @@ uses semantic versioning once past 0.x.
   `--derived-from ID:HASH,…`), and every write also records
   `derived_from_inferred`: each block the writing actor read (recall hits,
   document reads) since its session started (the briefing behind the
-  `cursor` it passes, else its latest orient). Inference over-approximates
-  on purpose, is never truncated, and downgrades exactly like declared
-  lineage. Instruction-file imports infer nothing. Chained as additive
+  `cursor` it passes, else its latest orient), one edge per block (the
+  latest version read). Bounded: an actor that never oriented has no
+  session, and then only its reads of the last 24 h count, at most the 200
+  most recently read blocks; a write that left reads out records
+  `derived_from_inferred_truncated: true` (chained, and in the reply's
+  `lineage`). Inside those bounds inference over-approximates on purpose
+  and downgrades exactly like declared lineage. Instruction-file imports
+  infer nothing. Chained as additive
   payload fields (`document.put`, `block.created`); a write without lineage
   hashes as before. Projection table `doc_lineage`, checked by the
   projection check and rebuilt by `rebuild` / `import` (docs/FORMAT.md §3.10).
@@ -89,16 +94,33 @@ uses semantic versioning once past 0.x.
 - Windows: `.cmd`/`.ps1` wrappers delegate to `kronicle-lite shim exec`
   (same decision in TypeScript; one node start per call; not yet run on a
   Windows machine).
-- `kronicle-lite pulse [--cursor C | --state D] [--mode] [--json] [-- CMD…]`:
-  the check as one CLI call for any hook — orient `focus=retractions` plus
-  the integrity pass → `allow | deny | warn | seed`; exit 0 / 77 / 3 (no store).
+- `kronicle-lite pulse [--cursor C | --state D] [--mode] [--pending-actor
+  A[,B]] [--json] [-- CMD…]`: the check as one CLI call for any hook —
+  orient `focus=retractions` plus the integrity pass → `allow | deny | warn
+  | seed`; exit 0 / 77 / 3 (no store).
+- The gate is version-bound (the `pending` rule): a blocking retraction is
+  resolved once every pending actor has read the CURRENT version of the
+  changed block (recall hit, document read, own write; for a removal, the
+  document after it; for `derived`, the note's source). Pending actors:
+  `shim install --pending-actor A[,B]` / `pulse --pending-actor`, else
+  everyone who read any version of the changed block (and, for `derived`,
+  read or wrote the note). An agent that re-reads the runbook through
+  recall clears the gate itself; `shim ack --through SEQ` stays as the
+  manual override. Reading an older version, or receiving the push, never
+  clears it; no recorded reader = blocking until read or acknowledged;
+  integrity failure still fails closed. `pulse --json` adds `resolved[]`,
+  `pending_actors` and `blocking[].pending_actors` / `.unread_by`; each
+  denial line names who has not re-read.
 - docs/PUSH.md § Shims (matcher table, acknowledgement, recursion, Cursor /
   Codex / Hermes set-up); README section. Tests: a 105-case decision table
   run through the TypeScript classifier and the generated sh under dash and
   bash, wrapper end-to-end in temp dirs (argv byte-exact, PATH spellings,
   exec-wrapper and child-wrapper recursion, deny/ack/warn, per-project ack,
   integrity in both modes, fail-open on no store / missing CLI / timeout,
-  install safety), and the read-only overhead measurement.
+  install safety), the read-only overhead measurement, and version-bound
+  reconciliation (re-read clears without ack, an older version does not, a
+  newer change blocks again, every reader / the configured actor, removal,
+  derived note, ack override, integrity still closed).
 
 ### Bench (agent-memory-bench Track A, branch `kl-lineage`, 20 seeds)
 

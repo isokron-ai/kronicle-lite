@@ -70,14 +70,16 @@ function cliPath(): string {
 export const SHIM_HELP = `kronicle-lite shim — exec-time pulse wrappers for world-changing commands (docs/PUSH.md)
 
   kronicle-lite shim install   [--dir D] [--commands ${DEFAULT_COMMANDS.join(',')}] [--world "make release,docker push"]
-                               [--data-dir DIR] [--mode deny|warn] [--windows] [--json]
-        write tiny wrappers into D (default ~/.kronicle-lite/shims); put D FIRST on PATH
+                               [--data-dir DIR] [--mode deny|warn] [--pending-actor A[,B]] [--windows] [--json]
+        write tiny wrappers into D (default ~/.kronicle-lite/shims); put D FIRST on PATH.
+        A change stops blocking once the pending actor(s) re-read its current version
+        (default: whoever read the changed block)
   kronicle-lite shim status    [--dir D] [--cwd DIR] [--json]   what is installed, active on PATH, pending here
   kronicle-lite shim ack       [--dir D] [--cwd DIR] [--through SEQ] [--json]
-        after reconciling: clear this project's gate up to SEQ (the seq a denial printed)
+        manual override: clear this project's gate up to SEQ (the seq a denial printed)
   kronicle-lite shim uninstall [--dir D] [--json]               remove our wrappers (marker-checked) and state
   kronicle-lite shim exec      --dir D --tool T -- ARGS…        what the Windows wrappers run
-  kronicle-lite pulse          [--data-dir DIR] [--cwd DIR] [--cursor C | --state D] [--mode deny|warn] [--json] [-- CMD…]
+  kronicle-lite pulse          [--data-dir DIR] [--cwd DIR] [--cursor C | --state D] [--mode deny|warn] [--pending-actor A[,B]] [--json] [-- CMD…]
         the check itself: exit 0 allow, 77 refused (reason on stderr), 3 store unavailable
 
 Without --dir, status/ack/uninstall use the first shim dir on PATH.
@@ -119,6 +121,7 @@ export async function runShimCli(cmd: 'pulse' | 'shim', argv: string[]): Promise
         actor: str(flags['actor']),
         cursor: str(flags['cursor']),
         stateDir,
+        ...(str(flags['pending-actor']) !== undefined ? { pendingActors: list(flags['pending-actor']) } : {}),
         mode: modeOf(flags['mode']),
         command: rest,
         allProjects: flags['all-projects'] === true,
@@ -143,6 +146,7 @@ export async function runShimCli(cmd: 'pulse' | 'shim', argv: string[]): Promise
         commands: list(flags['commands']),
         world: list(flags['world']),
         mode: modeOf(flags['mode']),
+        ...(str(flags['pending-actor']) !== undefined ? { pendingActors: list(flags['pending-actor']) } : {}),
         dataDir: dataDirFlag,
         effectiveDataDir: dataDir,
         node: process.execPath,
@@ -183,7 +187,7 @@ export async function runShimCli(cmd: 'pulse' | 'shim', argv: string[]): Promise
         return 1;
       }
       const c = r.config!;
-      const lines = [`shims in ${r.dir}: mode ${c.mode}; data dir ${r.store.data_dir}${r.store.exists ? ` (head seq ${r.store.head_seq ?? '?'})` : ' (no store: fail open)'}`];
+      const lines = [`shims in ${r.dir}: mode ${c.mode}; ${c.pending_actors && c.pending_actors.length > 0 ? `pending actor(s) ${c.pending_actors.join(', ')}` : 'pending actors: each change\'s readers'}; data dir ${r.store.data_dir}${r.store.exists ? ` (head seq ${r.store.head_seq ?? '?'})` : ' (no store: fail open)'}`];
       for (const t of r.tools) {
         lines.push(
           `  ${t.tool.padEnd(10)} ${t.active ? 'active ' : 'INACTIVE'} real: ${t.real ?? 'NOT FOUND'}${t.active ? '' : `; PATH runs ${t.first_on_path ?? 'nothing'} first`}`,
@@ -197,7 +201,7 @@ export async function runShimCli(cmd: 'pulse' | 'shim', argv: string[]): Promise
           lines.push(
             p.reason === 'integrity'
               ? `project ${r.project.key}: BLOCKED — store integrity failure`
-              : `project ${r.project.key}: BLOCKED — ${p.blocking.length} unreconciled change(s); after reconciling: kronicle-lite shim ack --through ${p.ack_through}`,
+              : `project ${r.project.key}: BLOCKED — ${p.blocking.length} unreconciled change(s); re-read the current version (or override: kronicle-lite shim ack --through ${p.ack_through})`,
           );
           for (const b of p.blocking.slice(0, 6)) lines.push('  ' + retractionLine(b));
         } else lines.push(`project ${r.project.key}: clear (checked from seq ${p.from_seq}, head ${p.head.seq})`);

@@ -6,13 +6,23 @@
  *   allow  nothing blocking since the cursor (informational news is noted and
  *          the cursor advances);
  *   deny   blocking retractions (severity safety | behavioral; format-only
- *          edits are never in `retractions`) since the cursor: the command
- *          must not run; the cursor does NOT move until they are acknowledged
- *          (`kronicle-lite shim ack --through SEQ`), so a retry without
- *          reconciling is refused again;
+ *          edits are never in `retractions`) since the cursor that are not
+ *          yet reconciled: the command must not run; the cursor does NOT
+ *          move, so a retry without reconciling is refused again;
  *   warn   same as deny under `--mode warn`: printed, the cursor advances,
  *          the command runs;
  *   seed   first check (no cursor yet): records the head, allows.
+ *
+ * Reconciled = version-bound, the rule `pending` uses (src/lineage): a
+ * blocking change is resolved once every pending actor has read the CURRENT
+ * version of the changed block (a recall hit, a document read, its own
+ * write; for a removal, the document after the removal). Pending actors: the
+ * configured ones (`--pending-actor`, `shim install --pending-actor`), else
+ * the actors that read any version of the affected block (for a `derived`
+ * change: also those that read or wrote the note). Nobody to check (no
+ * reader recorded, or a document-level event) = not resolved. So an agent
+ * that re-reads the runbook through recall clears the gate itself;
+ * `kronicle-lite shim ack --through SEQ` stays as the manual override.
  *
  * An integrity failure (the store was edited outside kronicle-lite) denies in
  * every mode: fail closed. A store that cannot be opened at all is
@@ -54,7 +64,21 @@ export interface PulseOptions {
   allProjects?: boolean | undefined;
   /** false: compute the decision without writing the state dir (status). Default true. */
   persist?: boolean | undefined;
+  /**
+   * Whose reads reconcile a change. Undefined: `pending_actors` of the shim
+   * config in `stateDir` when set, else the actors that read the affected
+   * blocks. [] = no read reconciles anything (acknowledgement only).
+   */
+  pendingActors?: string[] | undefined;
 }
+
+/** A blocking retraction, with who still has to read the current version. */
+export type BlockingRetraction = Retraction & {
+  /** Actors checked for this change (configured, or its readers). */
+  pending_actors: string[];
+  /** Of those, the ones that have not read the current version ([] with no actors: only an ack clears it). */
+  unread_by: string[];
+};
 
 export interface PulseResult {
   format: 'kronicle-lite/1';
@@ -67,9 +91,14 @@ export interface PulseResult {
   from_seq: number;
   recovery: string;
   project_keys: string[] | null;
-  blocking: Retraction[];
+  /** Unreconciled blocking retractions. */
+  blocking: BlockingRetraction[];
+  /** Blocking retractions since the cursor that every pending actor has re-read at the current version. */
+  resolved: BlockingRetraction[];
   informational: Retraction[];
   hidden_retractions: number;
+  /** The configured pending actors, or null (each change's readers). */
+  pending_actors: string[] | null;
   integrity: IntegritySummary | null;
   /** What the shim prints on stderr (null: nothing to say). */
   message: string | null;
@@ -118,6 +147,17 @@ function writeAtomic(file: string, text: string): void {
 
 export function cursorFile(stateDir: string, projectKey: string): string {
   return join(stateDir, 'cursors', safeKey(projectKey));
+}
+
+/** `pending_actors` from the shim config next to the state (`shim install --pending-actor`), or null. */
+export function configuredPendingActors(stateDir: string): string[] | null {
+  try {
+    const c = JSON.parse(readFileSync(join(stateDir, 'config.json'), 'utf8')) as { pending_actors?: unknown };
+    if (Array.isArray(c.pending_actors) && c.pending_actors.every((a) => typeof a === 'string')) return c.pending_actors as string[];
+  } catch {
+    // no config (a bare --state dir): readers decide
+  }
+  return null;
 }
 
 export function baselineFile(stateDir: string): string {
@@ -171,8 +211,12 @@ export function retractionLine(r: Retraction): string {
   return `- ${where ? where + ' ' : ''}(seq ${r.seq}, ${r.kind}/${r.severity}): ${body}`;
 }
 
-function retractionLines(rs: Retraction[]): string {
-  const lines = rs.slice(0, 6).map(retractionLine);
+function retractionLines(rs: (Retraction | BlockingRetraction)[]): string {
+  const lines = rs.slice(0, 6).map((r) => {
+    const line = retractionLine(r);
+    if (!('unread_by' in r)) return line;
+    return r.unread_by.length > 0 ? `${line} [not yet re-read at the current version by: ${r.unread_by.join(', ')}]` : `${line} [no reader recorded: re-read it, or acknowledge]`;
+  });
   if (rs.length > 6) lines.push(`- … and ${rs.length - 6} more (kronicle-lite orient --focus retractions lists them all)`);
   return lines.join('\n');
 }
@@ -193,6 +237,26 @@ export function integrityText(i: IntegritySummary): string {
 const isBlocking = (r: Retraction) => !r.format_only && (r.severity === 'safety' || r.severity === 'behavioral');
 
 /**
+ * Version-bound reconciliation of one blocking retraction: resolved when
+ * every pending actor has read the current version of the changed block
+ * (for `derived`: of the note's source). See the header.
+ */
+export function reconcile(store: KronicleLite, r: Retraction, configured: readonly string[] | null, self: string): BlockingRetraction {
+  const lineageBlock = r.kind === 'derived' ? (r.derived_from_change?.source_block_id ?? null) : r.block_id;
+  let actors: string[];
+  if (configured !== null) actors = [...configured];
+  else if (lineageBlock === null) actors = [];
+  else {
+    const note = r.kind === 'derived' && r.doc_slug ? (store.docs.getDocument(r.doc_slug)?.doc_id ?? null) : null;
+    actors = store.lineage.readersOf(store.lineage.lineageIds(lineageBlock), note).filter((a) => a !== SHIM_ACTOR && a !== self);
+  }
+  const unread = lineageBlock === null ? actors : actors.filter((a) => !store.lineage.readCurrent(a, lineageBlock));
+  return { ...r, pending_actors: actors, unread_by: unread };
+}
+
+const isResolved = (b: BlockingRetraction) => b.pending_actors.length > 0 && b.unread_by.length === 0;
+
+/**
  * Run the pulse against an open store. Pure apart from the state files (when
  * `stateDir` is set) and orient's flight-recorder row.
  */
@@ -202,6 +266,7 @@ export function pulse(store: KronicleLite, opts: PulseOptions): PulseResult {
   const scope = opts.allProjects ? null : projectScopeFor(opts.cwd !== undefined ? { cwd: opts.cwd } : {});
   const projectKey = scope?.keys[0] ?? '_all';
   const cmd = displayCommand(opts.command);
+  const configured = opts.pendingActors ?? (opts.stateDir !== undefined ? configuredPendingActors(opts.stateDir) : null);
 
   let cursor: string | null = opts.cursor ?? null;
   if (opts.stateDir !== undefined) cursor = readProjectCursor(opts.stateDir, projectKey).cursor;
@@ -217,6 +282,7 @@ export function pulse(store: KronicleLite, opts: PulseOptions): PulseResult {
     recovery: st.recovery.method,
     project_keys: scope?.keys ?? null,
     hidden_retractions: st.scope?.hidden_retractions ?? 0,
+    pending_actors: configured,
   });
 
   if (cursor === null) {
@@ -230,6 +296,7 @@ export function pulse(store: KronicleLite, opts: PulseOptions): PulseResult {
       reason: 'seeded',
       cursor: st.cursor,
       blocking: [],
+      resolved: [],
       informational: [],
       integrity: st.integrity,
       message: null,
@@ -249,6 +316,7 @@ export function pulse(store: KronicleLite, opts: PulseOptions): PulseResult {
       reason: 'genesis',
       cursor: st.cursor,
       blocking: [],
+      resolved: [],
       informational: [],
       integrity: st.integrity,
       message: `kronicle-lite shim: the stored position was unreadable (${st.recovery.cursor_error ?? 'no cursor'}); re-seeded at seq ${st.head.seq}.`,
@@ -256,23 +324,29 @@ export function pulse(store: KronicleLite, opts: PulseOptions): PulseResult {
     };
   }
   const all = st.retractions ?? [];
-  const blocking = all.filter(isBlocking);
+  const checked = all.filter(isBlocking).map((r) => reconcile(store, r, configured, actor));
+  const blocking = checked.filter((b) => !isResolved(b));
+  const resolved = checked.filter(isResolved);
   const informational = all.filter((r) => !isBlocking(r));
 
   if (blocking.length === 0) {
     save(st.cursor);
+    const notes: string[] = [];
+    if (resolved.length > 0) {
+      const who = [...new Set(resolved.flatMap((r) => r.pending_actors))].join(', ');
+      notes.push(`kronicle-lite: ${resolved.length} change(s) since the last check already re-read at the current version (by ${who}); not blocking \`${cmd}\`.`);
+    }
+    if (informational.length > 0) notes.push(`kronicle-lite: ${informational.length} informational change(s) since the last check (none blocks \`${cmd}\`):\n${retractionLines(informational)}`);
     return {
       ...base(st),
       decision: 'allow',
       reason: 'clear',
       cursor: st.cursor,
       blocking,
+      resolved,
       informational,
       integrity: st.integrity,
-      message:
-        informational.length > 0
-          ? `kronicle-lite: ${informational.length} informational change(s) since the last check (none blocks \`${cmd}\`):\n${retractionLines(informational)}`
-          : null,
+      message: notes.length > 0 ? notes.join('\n') : null,
       ack_through: null,
     };
   }
@@ -286,6 +360,7 @@ export function pulse(store: KronicleLite, opts: PulseOptions): PulseResult {
       reason: 'retractions',
       cursor: st.cursor,
       blocking,
+      resolved,
       informational,
       integrity: st.integrity,
       message: `kronicle-lite shim (warn): \`${cmd}\` is running, but kronicle-lite has ${n} change(s) you have not reconciled (head seq ${st.head.seq}):\n${retractionLines(blocking)}\nCheck that this command used the current values.`,
@@ -295,32 +370,35 @@ export function pulse(store: KronicleLite, opts: PulseOptions): PulseResult {
   const through = st.head.seq;
   const ack =
     opts.stateDir !== undefined
-      ? `Once reconciled, acknowledge with \`kronicle-lite shim ack --through ${through}\` (in this directory), then run the command again.`
-      : `Once reconciled, check again with a cursor at seq ${through} or later.`;
+      ? `Then run the command again. To override without re-reading: \`kronicle-lite shim ack --through ${through}\` (in this directory).`
+      : `Then check again (the same cursor is fine), or carry a cursor at seq ${through} or later to override.`;
   return {
     ...base(st),
     decision: 'deny',
     reason: 'retractions',
     cursor,
     blocking,
+    resolved,
     informational,
     integrity: st.integrity,
     message:
       `kronicle-lite shim: did NOT run \`${cmd}\` — kronicle-lite has ${n} change(s) you have not reconciled (head seq ${through}):\n` +
       `${retractionLines(blocking)}\n` +
-      `Re-read the affected document(s) (recall, or get_system_state with your cursor) and check the values this command uses. ` +
+      `Re-read the affected document(s) (recall them again, or read kronicle://docs/<slug>; the briefing alone does not count) and check the values this command uses: ` +
+      `reading the current version clears the gate by itself. ` +
       ack,
     ack_through: through,
   };
 }
 
-function integrityDeny(st: SystemState, b: Omit<PulseResult, 'decision' | 'reason' | 'cursor' | 'blocking' | 'informational' | 'integrity' | 'message' | 'ack_through'>, cursor: string, cmd: string): PulseResult {
+function integrityDeny(st: SystemState, b: Omit<PulseResult, 'decision' | 'reason' | 'cursor' | 'blocking' | 'resolved' | 'informational' | 'integrity' | 'message' | 'ack_through'>, cursor: string, cmd: string): PulseResult {
   return {
     ...b,
     decision: 'deny',
     reason: 'integrity',
     cursor,
     blocking: [],
+    resolved: [],
     informational: [],
     integrity: st.integrity,
     message: `kronicle-lite shim: did NOT run \`${cmd}\` — ${integrityText(st.integrity!)}`,

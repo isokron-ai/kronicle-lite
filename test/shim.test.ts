@@ -461,6 +461,134 @@ describe('kronicle-lite shim exec (Windows wrappers / portable path)', () => {
   });
 });
 
+describe('version-bound reconciliation: the gate clears when the reader re-reads the current version', () => {
+  const read = (r: Rig, actor: string, args: string[] = ['runbook']) => {
+    const g = kl(['get', ...args, '--actor', actor, '--data-dir', r.data]);
+    expect(g.status, g.stderr).toBe(0);
+    return g.stdout;
+  };
+  const blockWith = (r: Rig, text: string): string => {
+    const db = new Database(join(r.data, 'kronicle-lite.db'), { readonly: true });
+    try {
+      return (db.prepare(`SELECT block_id FROM blocks WHERE content LIKE ? AND kind = 'paragraph'`).get(`%${text}%`) as { block_id: string }).block_id;
+    } finally {
+      db.close();
+    }
+  };
+
+  it('re-reading clears it without shim ack; an older version does not; a newer change blocks again', () => {
+    const r = rig({ tools: ['terraform'] });
+    read(r, 'agent-a');
+    putRunbook(r, 'prod-b');
+    const d1 = run(r, ['terraform', 'apply']);
+    expect(d1.status).toBe(77);
+    expect(d1.stderr).toContain('[-prod-a-]{+prod-b+}');
+    expect(d1.stderr).toContain('[not yet re-read at the current version by: agent-a]');
+    expect(d1.stderr).toMatch(/To override without re-reading: `kronicle-lite shim ack --through \d+`/);
+    putRunbook(r, 'prod-c');
+    read(r, 'agent-a', ['--block', blockWith(r, 'prod-b')]); // v2: not the current version
+    expect(run(r, ['terraform', 'apply']).status).toBe(77);
+    read(r, 'agent-a', ['--block', blockWith(r, 'prod-c')]); // the current version
+    const ok = run(r, ['terraform', 'apply']);
+    expect(ok.status, ok.stderr).toBe(0);
+    expect(ok.stderr).toMatch(/2 change\(s\) since the last check already re-read at the current version \(by agent-a\)/);
+    expect(run(r, ['terraform', 'apply']).stderr).toBe(''); // the cursor moved
+    putRunbook(r, 'prod-d');
+    expect(run(r, ['terraform', 'apply']).status).toBe(77);
+    expect(calls(r).map((c) => c.join(' '))).toEqual(['terraform apply', 'terraform apply']);
+  });
+
+  it('every reader must re-read; a configured --pending-actor replaces the readers; shim ack still overrides', () => {
+    const r = rig({ tools: ['terraform'] });
+    read(r, 'agent-a');
+    read(r, 'agent-b');
+    putRunbook(r, 'prod-b');
+    read(r, 'agent-a');
+    const d = run(r, ['terraform', 'apply']);
+    expect(d.status).toBe(77);
+    expect(d.stderr).toContain('by: agent-b]');
+    read(r, 'agent-b');
+    expect(run(r, ['terraform', 'apply']).status).toBe(0);
+
+    const c = rig({ tools: ['terraform'], extra: ['--pending-actor', 'deployer'] });
+    read(c, 'agent-a');
+    putRunbook(c, 'prod-b');
+    read(c, 'agent-a'); // not the configured actor
+    const dc = run(c, ['terraform', 'apply']);
+    expect(dc.status).toBe(77);
+    expect(dc.stderr).toContain('by: deployer]');
+    const st = kl(['shim', 'status', '--dir', c.shims], {}, c.proj);
+    expect(st.stdout).toContain('pending actor(s) deployer');
+    const seq = /ack --through (\d+)/.exec(dc.stderr)![1]!;
+    expect(kl(['shim', 'ack', '--dir', c.shims, '--through', seq], {}, c.proj).status).toBe(0); // manual override
+    expect(run(c, ['terraform', 'apply']).status).toBe(0);
+    putRunbook(c, 'prod-c');
+    expect(run(c, ['terraform', 'apply']).status).toBe(77);
+    read(c, 'deployer'); // the configured actor reads the current version
+    expect(run(c, ['terraform', 'apply']).status).toBe(0);
+  });
+
+  it('a removal clears on a read of the document after it; a derived note clears when its source is re-read; integrity still fails closed', () => {
+    const r = rig({ tools: ['terraform'] });
+    read(r, 'agent-a');
+    writeFileSync(join(r.root, 'note.md'), '# Deploy note\n\nWe deploy with terraform to prod-a.\n');
+    expect(kl(['put', 'deploy-note', join(r.root, 'note.md'), '--actor', 'agent-a', '--data-dir', r.data, '--all-projects']).status).toBe(0);
+    putRunbook(r, 'prod-b');
+    const p = JSON.parse(kl(['pulse', '--state', join(r.shims, '.kronicle-shim'), '--data-dir', r.data, '--cwd', r.proj, '--json'], {}, r.proj).stdout);
+    expect(p.decision).toBe('deny');
+    expect(p.blocking.map((b: { kind: string }) => b.kind).sort()).toEqual(['derived', 'supersession']);
+    expect(p.blocking.every((b: { unread_by: string[] }) => b.unread_by.join() === 'agent-a')).toBe(true);
+    read(r, 'agent-a');
+    const ok = JSON.parse(kl(['pulse', '--state', join(r.shims, '.kronicle-shim'), '--data-dir', r.data, '--cwd', r.proj, '--json'], {}, r.proj).stdout);
+    expect(ok).toMatchObject({ decision: 'allow', blocking: [], pending_actors: null });
+    expect(ok.resolved).toHaveLength(2);
+
+    // removal: the Deploy section goes away
+    writeFileSync(r.runbook, '# Runbook\n\nNothing to deploy.\n');
+    expect(kl(['put', 'runbook', r.runbook, '--data-dir', r.data, '--all-projects']).status).toBe(0);
+    const rm = run(r, ['terraform', 'apply']);
+    expect(rm.status).toBe(77);
+    expect(rm.stderr).toContain('now REMOVED');
+    read(r, 'agent-a');
+    expect(run(r, ['terraform', 'apply']).status).toBe(0);
+
+    // integrity: a reconciled reader does not open a tampered store
+    putRunbook(r, 'prod-c');
+    read(r, 'agent-a');
+    const db = new Database(join(r.data, 'kronicle-lite.db'));
+    db.prepare(`UPDATE blocks SET content = 'Run terraform apply against target: evil' WHERE content LIKE '%prod-c%' AND valid_to IS NULL`).run();
+    db.close();
+    const bad = run(r, ['terraform', 'apply']);
+    expect(bad.status).toBe(77);
+    expect(bad.stderr).toMatch(/STORE INTEGRITY FAILURE/);
+  });
+
+  it('pulse --cursor --pending-actor: blocking[].unread_by, then resolved[] and the head cursor after the read', () => {
+    const r = rig({ tools: ['terraform'] });
+    const seed = JSON.parse(kl(['pulse', '--data-dir', r.data, '--json', '--all-projects']).stdout);
+    putRunbook(r, 'prod-b');
+    const args = ['pulse', '--data-dir', r.data, '--json', '--all-projects', '--cursor', seed.cursor, '--pending-actor', 'agent-a'];
+    const d = kl(args);
+    expect(d.status).toBe(77);
+    const dj = JSON.parse(d.stdout);
+    expect(dj).toMatchObject({ decision: 'deny', pending_actors: ['agent-a'], cursor: seed.cursor });
+    expect(dj.blocking[0]).toMatchObject({ kind: 'supersession', pending_actors: ['agent-a'], unread_by: ['agent-a'] });
+    read(r, 'agent-a');
+    const a = kl(args);
+    expect(a.status).toBe(0);
+    const aj = JSON.parse(a.stdout);
+    expect(aj).toMatchObject({ decision: 'allow', reason: 'clear', blocking: [] });
+    expect(aj.resolved[0]).toMatchObject({ unread_by: [] });
+    expect(aj.cursor).not.toBe(seed.cursor);
+    // default actors = the change's readers: agent-a, who has re-read
+    const n = JSON.parse(kl(['pulse', '--data-dir', r.data, '--json', '--all-projects', '--cursor', seed.cursor]).stdout);
+    expect(n).toMatchObject({ decision: 'allow', pending_actors: null });
+    // a configured actor that has not read the current version keeps it blocked
+    const e = JSON.parse(kl(['pulse', '--data-dir', r.data, '--json', '--all-projects', '--cursor', seed.cursor, '--pending-actor', 'nobody']).stdout);
+    expect(e.decision).toBe('deny');
+  });
+});
+
 describe('shim status', () => {
   it('reports active shims, the real binaries and what is pending in this project', () => {
     const r = rig({ tools: ['terraform'] });
@@ -469,7 +597,8 @@ describe('shim status', () => {
     const s = kl(['shim', 'status', '--dir', r.shims], { PATH: `${r.shims}:${r.bin}:${SYS_PATH}` }, r.proj);
     expect(s.status, s.stderr).toBe(0);
     expect(s.stdout).toMatch(/terraform\s+active\s+real: .*\/bin\/terraform/);
-    expect(s.stdout).toMatch(/BLOCKED — 1 unreconciled change\(s\); after reconciling: kronicle-lite shim ack --through \d+/);
+    expect(s.stdout).toMatch(/BLOCKED — 1 unreconciled change\(s\); re-read the current version \(or override: kronicle-lite shim ack --through \d+\)/);
+    expect(s.stdout).toContain("pending actors: each change's readers");
     const j = JSON.parse(kl(['shim', 'status', '--dir', r.shims, '--json'], { PATH: `${r.bin}:${SYS_PATH}` }, r.proj).stdout);
     expect(j.tools[0]).toMatchObject({ tool: 'terraform', active: false, real: join(r.bin, 'terraform') });
     // status is read-only: still blocked afterwards

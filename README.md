@@ -115,7 +115,7 @@ To gate world-changing commands on changes the agent has not re-read yet,
 add a `PreToolUse` hook on `kronicle-lite pending --actor <agent> --json`
 and block while `pending_count > 0` (docs/PUSH.md "Pending"). For a check
 at the moment `git push` / `terraform apply` / `kubectl apply` actually
-runs, in any client, see [exec-time pulse shims](#exec-time-pulse-shims-unreleased).
+runs, in any client, see [exec-time pulse shims](#exec-time-pulse-shims).
 Notes the agent writes after reading something are linked to what it read;
 when a source changes, the note is served `never_act` / `stale_derived`
 (docs/HONESTY.md §6).
@@ -439,7 +439,7 @@ vs the local root (fails on divergence); anchor service reachability
 which `--data-dir`. On Windows it adds a note that the POSIX modes are
 no-ops there, with an `icacls` line to lock the data dir down.
 
-## Exec-time pulse shims (unreleased)
+## Exec-time pulse shims
 
 A push hook only reaches clients that have hooks, and a check made before a
 Bash call misses a runbook change that lands while `build && deploy` runs,
@@ -460,20 +460,26 @@ node start. A world-changing one (`git push`, `terraform apply`,
 `kubectl apply|delete|patch|replace|rollout …`, `helm install|upgrade|uninstall`,
 `npm|pnpm|yarn publish`, `npm run deploy`, plus your own `--world "make release,docker push"`)
 first runs `kronicle-lite pulse` (~0.2 s): when a document changed since
-the last check it is **refused** with the diff (exit 77):
+the last check and whoever read it has not re-read the current version, it
+is **refused** with the diff (exit 77):
 
 ```text
 $ terraform apply
 kronicle-lite shim: did NOT run `terraform apply` — kronicle-lite has 1 change(s) you have not reconciled (head seq 7):
-- runbook › Runbook › Deploy (seq 7, supersession/behavioral): relied on "Target: prod-a" → now "Target: prod-b"; diff: Target: [-prod-a-]{+prod-b+}
-Re-read the affected document(s) … Once reconciled, acknowledge with `kronicle-lite shim ack --through 7` (in this directory), then run the command again.
+- runbook › Runbook › Deploy (seq 7, supersession/behavioral): relied on "Target: prod-a" → now "Target: prod-b"; diff: Target: [-prod-a-]{+prod-b+} [not yet re-read at the current version by: agent-a]
+Re-read the affected document(s) … reading the current version clears the gate by itself. Then run the command again. To override without re-reading: `kronicle-lite shim ack --through 7` (in this directory).
 ```
 
-`--mode warn` prints the same and runs the command. A store that fails its
+The gate is version-bound, like `pending`: once the agent recalls the
+runbook again (or reads `kronicle://docs/runbook`) and gets the current
+version, the same command runs, no acknowledgement needed. Who has to
+re-read: `shim install --pending-actor <agent>`, else everyone who read the
+changed block. `kronicle-lite shim ack --through SEQ` stays as a manual
+override. `--mode warn` prints the same and runs the command. A store that fails its
 integrity check refuses world-changing commands in both modes (fail
 closed); a missing, broken or hung kronicle-lite lets them run (fail open,
 noted once on stderr, logged in `.kronicle-shim/shim.log`). Matching rules,
-recursion guard, per-project acknowledgement and client snippets:
+recursion guard, reconciliation, per-project acknowledgement and client snippets:
 [docs/PUSH.md § Shims](docs/PUSH.md#shims-exec-time-pulse-for-any-client).
 
 ## Tools
