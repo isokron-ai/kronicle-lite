@@ -1,0 +1,126 @@
+/**
+ * Chain an instruction file: re-put it when its content differs from the
+ * stored current revision. A changed file becomes a new revision whose
+ * changed blocks are superseded (and removed blocks tombstoned), so the next
+ * orient lists them as retractions of kind `instruction`. A deleted file is
+ * re-put empty (every block tombstoned). An unchanged file appends nothing.
+ */
+
+import { readFileSync, statSync } from 'node:fs';
+
+import { blake3Hex } from '../crypto/hash.js';
+import { normalizeMarkdown } from '../docs/parser.js';
+import type { ChainHead } from '../chain/chain.js';
+import type { KronicleLite } from '../store.js';
+import type { InstructionEntry } from './paths.js';
+
+/** Claude Code skips CLAUDE.md files over 4 MiB; so do we. */
+export const MAX_INSTRUCTION_BYTES = 4 * 1024 * 1024;
+
+export type SyncAction = 'created' | 'updated' | 'unchanged' | 'removed' | 'missing' | 'too_large' | 'error';
+
+export interface SyncResult {
+  slug: string;
+  path: string;
+  kind: InstructionEntry['kind'];
+  action: SyncAction;
+  revision: number | null;
+  created: number;
+  superseded: number;
+  tombstoned: number;
+  head: ChainHead;
+  error?: string;
+}
+
+function readText(path: string): { text: string } | { missing: true } | { tooLarge: number } {
+  let size: number;
+  try {
+    const st = statSync(path);
+    if (!st.isFile()) return { missing: true };
+    size = st.size;
+  } catch {
+    return { missing: true };
+  }
+  if (size > MAX_INSTRUCTION_BYTES) return { tooLarge: size };
+  try {
+    return { text: readFileSync(path, 'utf8').replace(/^\uFEFF/, '') };
+  } catch {
+    return { missing: true };
+  }
+}
+
+export function syncInstructionFile(store: KronicleLite, entry: InstructionEntry, opts: { actor_id?: string } = {}): SyncResult {
+  const actor_id = opts.actor_id ?? 'instructions';
+  const base = { slug: entry.slug, path: entry.recordPath, kind: entry.kind, created: 0, superseded: 0, tombstoned: 0 };
+  try {
+    const read = readText(entry.path);
+    const existing = store.docs.getDocument(entry.slug);
+    if ('tooLarge' in read) {
+      return { ...base, action: 'too_large', revision: existing?.current_revision ?? null, head: store.chain.head(), error: `${read.tooLarge} bytes > 4 MiB` };
+    }
+    let markdown: string;
+    let removing = false;
+    if ('missing' in read) {
+      // Never stored, or already emptied: nothing to retract.
+      if (!existing || store.docs.liveBlocks(existing.doc_id).length === 0) {
+        return { ...base, action: 'missing', revision: existing?.current_revision ?? null, head: store.chain.head() };
+      }
+      markdown = '';
+      removing = true;
+    } else {
+      markdown = read.text;
+      const hash = blake3Hex(normalizeMarkdown(markdown));
+      const src = existing ? store.docs.getSource(existing.doc_id) : null;
+      if (existing && store.docs.currentMarkdownHash(entry.slug) === hash && src?.source.path === entry.recordPath) {
+        return { ...base, action: 'unchanged', revision: existing.current_revision, head: store.chain.head() };
+      }
+    }
+    const r = store.docs.putDocument({
+      slug: entry.slug,
+      title: entry.title,
+      markdown,
+      actor_id,
+      source: { kind: entry.kind, path: entry.recordPath },
+    });
+    let created = 0;
+    let superseded = 0;
+    let tombstoned = 0;
+    for (const b of r.blocks) {
+      if (b.status === 'tombstoned') tombstoned++;
+      else if (b.status === 'created' && b.supersedes) superseded++;
+      else if (b.status === 'created') created++;
+    }
+    return {
+      ...base,
+      action: removing ? 'removed' : existing ? 'updated' : 'created',
+      revision: r.revision,
+      created,
+      superseded,
+      tombstoned,
+      head: r.head,
+    };
+  } catch (err) {
+    return { ...base, action: 'error', revision: null, head: store.chain.head(), error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** One line per result for CLI logs and hook system messages. */
+export function describeSync(r: SyncResult): string {
+  const counts = `${r.superseded} superseded, ${r.created} created, ${r.tombstoned} tombstoned`;
+  switch (r.action) {
+    case 'created':
+      return `${r.slug} ← ${r.path}: imported as rev ${r.revision} (${r.created} block(s))`;
+    case 'updated':
+      return `${r.slug} ← ${r.path}: rev ${r.revision} (${counts})`;
+    case 'removed':
+      return `${r.slug} ← ${r.path}: file removed; rev ${r.revision} retires ${r.tombstoned} block(s)`;
+    case 'unchanged':
+      return `${r.slug} ← ${r.path}: unchanged (rev ${r.revision})`;
+    case 'missing':
+      return `${r.slug} ← ${r.path}: not present`;
+    case 'too_large':
+      return `${r.slug} ← ${r.path}: skipped (${r.error})`;
+    case 'error':
+      return `${r.slug} ← ${r.path}: error: ${r.error}`;
+  }
+}

@@ -11,9 +11,17 @@
  */
 
 import type { ChainEvent } from '../chain/index.js';
+import { isInstructionSlug } from '../docs/documents.js';
 
 export type RetractionSeverity = 'safety' | 'behavioral' | 'informational';
-export type RetractionKind = 'tombstone' | 'supersession' | 'retraction';
+/**
+ * `instruction` (0.4.0, additive): a supersession or tombstone of a block in
+ * an instruction document (slug under `instructions/` or `memory/`): a
+ * CLAUDE.md, AGENTS.md, rule file or auto-memory index changed on disk and
+ * was re-imported. Severity follows the underlying event.
+ */
+export type RetractionKind = 'tombstone' | 'supersession' | 'retraction' | 'instruction';
+export const RETRACTION_KINDS = ['tombstone', 'supersession', 'retraction', 'instruction'] as const;
 
 export interface Retraction {
   seq: number;
@@ -64,6 +72,24 @@ export function classifyRetraction(ev: ChainEvent): Retraction | null {
   const where = doc_slug ? ` in ${doc_slug}` : '';
   let asserted: string;
   let truth: string;
+  if (isInstructionSlug(doc_slug) && rule.kind !== 'retraction') {
+    asserted = `instruction ${subject}${tail}${where} (assumed in force)`;
+    truth =
+      rule.kind === 'tombstone'
+        ? `instruction ${subject}${tail} was REMOVED from ${doc_slug}${reason ? ` — ${reason}` : ''}; stop following it`
+        : `instruction ${subject}${tail} was CHANGED${successor_block_id ? ` (now ${successor_block_id})` : ''} in ${doc_slug}; re-read kronicle://docs/${encodeURIComponent(doc_slug!)} and follow the current text`;
+    return {
+      seq: ev.seq,
+      event_type: ev.event_type,
+      kind: 'instruction',
+      severity: rule.severity,
+      block_id,
+      doc_slug,
+      successor_block_id,
+      reason,
+      reason_line: buildReasonLine(asserted, truth),
+    };
+  }
   switch (rule.kind) {
     case 'tombstone':
       asserted = `${subject}${tail}${where} (assumed live)`;
@@ -74,6 +100,7 @@ export function classifyRetraction(ev: ChainEvent): Retraction | null {
       truth = `${subject}${tail} is SUPERSEDED${successor_block_id ? ` by ${successor_block_id}` : ''}${reason ? ` — ${reason}` : ''}; fetch the successor before relying on prior content`;
       break;
     case 'retraction':
+    default:
       asserted = `${subject}${tail}${where} (assumed asserted)`;
       truth = `${subject}${tail} is RETRACTED${reason ? ` — ${reason}` : ''}`;
       break;

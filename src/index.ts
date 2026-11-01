@@ -17,6 +17,12 @@ export {
   DocumentStore,
   DocumentError,
   planRevision,
+  isValidSlug,
+  isInstructionSlug,
+  SLUG_RE,
+  PATH_SLUG_RE,
+  type DocumentSource,
+  type GitBinding,
   type BlockRow,
   type DocumentRow,
   type PutDocumentResult,
@@ -29,6 +35,9 @@ export { Recall, toMatchExpression, type RecallInput, type RecallResult, type Re
 export { ReceiptVerifier, VERIFY_REASONS, type VerifyResult, type VerifyStatus, type VerifyReason } from './recall/verify-receipt.js';
 export * from './orient/index.js';
 export * as anchor from './anchor/index.js';
+export * as instructions from './instructions/index.js';
+export { InstructionWatcher, syncInstructionSet, resolveWatchSet, type WatchOptions, type WatchEvent } from './instructions/watch.js';
+export { syncInstructionFile, type SyncResult } from './instructions/sync.js';
 export {
   pushCheckpoint,
   tryPushCheckpoint,

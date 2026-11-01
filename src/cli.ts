@@ -12,11 +12,14 @@
  *   kronicle-lite import [--data-dir DIR] --in FILE     into an empty store
  *   kronicle-lite keys [--data-dir DIR]                 show key id + public key
  *   kronicle-lite put SLUG FILE.md [--title T] [--data-dir DIR]
+ *   kronicle-lite put --from-instructions [PATHS…] [--cwd DIR] [--json] [--stdin-hook]
+ *   kronicle-lite watch [PATHS…] [--interval MS] [--debounce MS] [--poll] [--cwd DIR] [--list [--json]]
  *   kronicle-lite orient [--data-dir DIR] [--actor ID] [--cursor C] [--focus F]
  */
 
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { createReadStream, createWriteStream, readFileSync } from 'node:fs';
+import { text as readStreamText } from 'node:stream/consumers';
 import { basename } from 'node:path';
 
 import { anchorStatus, tryPushCheckpoint, verifyRemote, type AnchorCallOptions } from './anchor/anchor.js';
@@ -27,6 +30,9 @@ import { DEFAULT_HTTP_PORT, loadOrCreateBearer, readBearerFile, serveHttp } from
 import { createServerFactory, renderSystemStateMarkdown } from './server.js';
 import { KronicleLite } from './store.js';
 import { FOCUSES, type Focus } from './orient/orient.js';
+import { entryFor, resolveContext } from './instructions/paths.js';
+import { describeSync, syncInstructionFile, type SyncResult } from './instructions/sync.js';
+import { InstructionWatcher, resolveWatchSet, syncInstructionSet } from './instructions/watch.js';
 
 import { VERSION } from './version.js';
 
@@ -36,6 +42,22 @@ interface Args {
   flags: Record<string, string | true>;
 }
 
+/** Flags that never take a value, so `put --from-instructions CLAUDE.md` keeps CLAUDE.md positional. */
+const BOOLEAN_FLAGS = new Set([
+  'http',
+  'json',
+  'push',
+  'remote',
+  'offline',
+  'from-instructions',
+  'stdin-hook',
+  'list',
+  'poll',
+  'once',
+  'bind-git',
+  'no-network',
+]);
+
 function parseArgs(argv: string[]): Args {
   const [cmd = 'help', ...rest] = argv;
   const positional: string[] = [];
@@ -43,9 +65,14 @@ function parseArgs(argv: string[]): Args {
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i]!;
     if (a.startsWith('--')) {
+      const eq = a.indexOf('=');
+      if (eq > 2) {
+        flags[a.slice(2, eq)] = a.slice(eq + 1);
+        continue;
+      }
       const key = a.slice(2);
       const next = rest[i + 1];
-      if (next !== undefined && !next.startsWith('--')) {
+      if (!BOOLEAN_FLAGS.has(key) && next !== undefined && !next.startsWith('--')) {
         flags[key] = next;
         i++;
       } else {
@@ -93,6 +120,13 @@ Usage:
   kronicle-lite import       [--data-dir DIR] --in FILE           rebuild an EMPTY store from JSONL
   kronicle-lite keys         [--data-dir DIR]                     print key id + public key PEM
   kronicle-lite put SLUG FILE.md [--title T] [--data-dir DIR]     store a document
+  kronicle-lite put --from-instructions [PATHS…] [--cwd DIR] [--json]
+                                                                 chain CLAUDE.md, AGENTS.md, .claude/rules/**/*.md,
+                                                                 .cursor/rules/** and Claude Code auto memory (one shot)
+                 [--stdin-hook]                                  as a Claude Code SessionStart / FileChanged hook
+  kronicle-lite watch [PATHS…] [--interval MS] [--debounce MS] [--poll] [--cwd DIR]
+                                                                 re-put instruction files on change (fs.watch + polling)
+                 [--list [--json]]                               print the resolved watch set and exit
   kronicle-lite orient       [--data-dir DIR] [--actor ID] [--cursor C] [--focus F] [--json]
 
 Data dir defaults to $KRONICLE_LITE_DATA_DIR or ~/.kronicle-lite.
@@ -311,6 +345,7 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case 'put': {
+      if (flags['from-instructions'] === true) return putFromInstructions(dataDir, positional, flags);
       const [slug, file] = positional;
       if (!slug || !file) throw new Error('put requires SLUG and FILE.md');
       const store = new KronicleLite({ dataDir });
@@ -340,10 +375,129 @@ async function main(argv: string[]): Promise<number> {
       store.close();
       return 0;
     }
+    case 'watch':
+      return watchCommand(dataDir, positional, flags);
     default:
       process.stderr.write(`unknown command: ${cmd}\n\n${HELP}`);
       return 2;
   }
+}
+
+function instructionCtx(flags: Record<string, string | true>, cwdOverride?: string) {
+  const cwd = cwdOverride ?? str(flags['cwd']);
+  return cwd !== undefined ? { cwd } : {};
+}
+
+/**
+ * `put --from-instructions`: one-shot sync of the default instruction set (or
+ * the given paths). With `--stdin-hook` it is a Claude Code hook: it reads
+ * the hook input JSON from stdin, syncs the changed file (FileChanged) or the
+ * whole set (SessionStart, answering with `watchPaths` so Claude Code keeps
+ * watching them), never fails the hook, and stays quiet unless something changed.
+ */
+async function putFromInstructions(dataDir: string, positional: string[], flags: Record<string, string | true>): Promise<number> {
+  const actor = str(flags['actor']) ?? 'instructions';
+  if (flags['stdin-hook'] === true) {
+    let input: { hook_event_name?: string; file_path?: string; cwd?: string } = {};
+    try {
+      input = JSON.parse((await readStreamText(process.stdin)) || '{}') as typeof input;
+    } catch {
+      input = {};
+    }
+    const ctx = instructionCtx(flags, typeof input.cwd === 'string' ? input.cwd : undefined);
+    const store = new KronicleLite({ dataDir });
+    try {
+      if (input.hook_event_name === 'FileChanged' && typeof input.file_path === 'string') {
+        const rc = resolveContext(ctx);
+        const r = syncInstructionFile(store, entryFor(input.file_path, rc), { actor_id: actor });
+        if (r.action !== 'unchanged' && r.action !== 'missing') {
+          process.stdout.write(JSON.stringify({ systemMessage: `kronicle-lite: ${describeSync(r)}` }) + '\n');
+        }
+        return 0;
+      }
+      const results = syncInstructionSet(store, { ...ctx, actor_id: actor });
+      const { entries, patterns } = resolveWatchSet(ctx);
+      const watchPaths = [...new Set([...entries.map((e) => e.path), ...patterns.filter((p) => p.type === 'file').map((p) => p.path)])];
+      const changed = results.filter((r) => r.action !== 'unchanged' && r.action !== 'missing');
+      process.stdout.write(
+        JSON.stringify({
+          hookSpecificOutput: { hookEventName: 'SessionStart', watchPaths },
+          ...(changed.length > 0 ? { systemMessage: `kronicle-lite: ${changed.map(describeSync).join('; ')}` } : {}),
+        }) + '\n',
+      );
+      return 0;
+    } catch (err) {
+      process.stderr.write(`kronicle-lite hook: ${err instanceof Error ? err.message : String(err)}\n`);
+      return 0;
+    } finally {
+      store.close();
+    }
+  }
+  const store = new KronicleLite({ dataDir });
+  try {
+    const results: SyncResult[] = syncInstructionSet(store, { ...instructionCtx(flags), paths: positional, actor_id: actor });
+    if (flags['json']) process.stdout.write(JSON.stringify({ results, head: store.chain.head() }, null, 2) + '\n');
+    else if (results.length === 0) process.stdout.write('no instruction files found\n');
+    else for (const r of results) process.stdout.write(describeSync(r) + '\n');
+    return results.some((r) => r.action === 'error') ? 1 : 0;
+  } finally {
+    store.close();
+  }
+}
+
+async function watchCommand(dataDir: string, positional: string[], flags: Record<string, string | true>): Promise<number> {
+  const ctx = instructionCtx(flags);
+  if (flags['list'] === true) {
+    const { rc, entries, patterns } = resolveWatchSet({ ...ctx, paths: positional });
+    if (flags['json']) {
+      process.stdout.write(
+        JSON.stringify(
+          {
+            project_root: rc.projectRoot,
+            memory_dir: rc.memoryDir,
+            memory_rule: rc.memoryRule,
+            patterns,
+            files: entries.map((e) => ({ path: e.path, slug: e.slug, kind: e.kind, source_path: e.recordPath })),
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+    } else {
+      process.stdout.write(`project root: ${rc.projectRoot}\nauto memory:  ${rc.memoryDir} (${rc.memoryRule})\n`);
+      for (const e of entries) process.stdout.write(`${e.slug}\t${e.path}\n`);
+      if (entries.length === 0) process.stdout.write('(no instruction files present yet; watching for them)\n');
+    }
+    return 0;
+  }
+  const store = new KronicleLite({ dataDir });
+  const log = (line: string) => process.stderr.write(`${new Date().toISOString()} ${line}\n`);
+  const watcher = new InstructionWatcher(store, {
+    ...ctx,
+    paths: positional,
+    actor_id: str(flags['actor']) ?? 'watch',
+    ...(num(flags['interval']) !== undefined ? { intervalMs: num(flags['interval'])! } : {}),
+    ...(num(flags['debounce']) !== undefined ? { debounceMs: num(flags['debounce'])! } : {}),
+    poll: flags['poll'] === true,
+    onEvent: (e) => {
+      if (e.type === 'synced') log(describeSync(e.result));
+      else if (e.type === 'warning') log(`warning: ${e.message}`);
+      else log(`watching ${e.files.length} file(s) in ${e.dirs} dir(s) (${e.mode}); data dir ${dataDir}; Ctrl-C to stop`);
+    },
+  });
+  watcher.start();
+  if (flags['once'] === true) {
+    watcher.close();
+    store.close();
+    return 0;
+  }
+  await new Promise<void>((resolve) => {
+    process.once('SIGINT', resolve);
+    process.once('SIGTERM', resolve);
+  });
+  watcher.close();
+  store.close();
+  return 0;
 }
 
 main(process.argv.slice(2)).then(

@@ -158,4 +158,18 @@ CREATE TABLE IF NOT EXISTS anchors (
   fetched_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS anchors_range_idx ON anchors (chain_id, from_seq, to_seq);
+
+-- 0.4.0, additive projection: provenance of each document from the optional
+-- \`source\` field of its latest document.put (instruction import, git binding).
+-- Rebuilt from the chain like every other projection table.
+CREATE TABLE IF NOT EXISTS doc_sources (
+  doc_id      TEXT PRIMARY KEY REFERENCES documents(doc_id),
+  slug        TEXT NOT NULL,
+  revision    INTEGER NOT NULL,
+  chain_seq   INTEGER NOT NULL,
+  kind        TEXT NOT NULL,
+  path        TEXT NOT NULL,
+  source_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS doc_sources_kind_idx ON doc_sources (kind, slug);
 `;

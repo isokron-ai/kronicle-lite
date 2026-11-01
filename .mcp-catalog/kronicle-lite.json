@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-01T00:51:59.764Z",
+  "capturedAt": "2026-11-01T01:00:48.423Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -1143,10 +1143,12 @@
                         "type": "string"
                       },
                       "kind": {
+                        "description": "instruction = a CLAUDE.md / AGENTS.md / rule / memory block changed on disk.",
                         "enum": [
                           "tombstone",
                           "supersession",
-                          "retraction"
+                          "retraction",
+                          "instruction"
                         ],
                         "type": "string"
                       },
@@ -2312,5 +2314,5 @@
     "title": "kronicle-lite",
     "version": "0.3.0"
   },
-  "sha256": "337f412d40909bf96ea607ddff46fd3da3db8c76796040a0915a7e85260aa160"
+  "sha256": "c7e42de8222f92baed55208340476284fb6c2d2a8e8e3163cafaefeb9a05e7be"
 }

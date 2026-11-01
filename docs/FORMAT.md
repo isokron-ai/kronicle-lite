@@ -172,7 +172,7 @@ renamed heading keeps its address.
 
 | event_type | payload fields |
 |---|---|
-| `document.put` | `doc_id, slug, title, revision, markdown, markdown_hash (BLAKE3), block_ids[], carried[{block_id, ordinal, heading_path}]` |
+| `document.put` | `doc_id, slug, title, revision, markdown, markdown_hash (BLAKE3), block_ids[], carried[{block_id, ordinal, heading_path}]`, optional `source` (0.4.0, §3.4) |
 | `document.revised` | `doc_id, slug, title, revision, markdown, markdown_hash, cause` |
 | `block.created` | `block_id, doc_id, doc_slug, revision, ordinal, kind, level, heading_path[], content, content_hash` |
 | `block.superseded` | `block_id, successor_block_id, doc_id, doc_slug, revision, reason` |
@@ -199,6 +199,44 @@ On a re-put, live blocks are compared to the freshly parsed set:
 `blocks.superseded_by` forms a chain. `verify()` follows it with a recursive
 query to the lineage head. A block is **live** when `valid_to IS NULL AND
 tombstoned_at IS NULL`.
+
+### 3.4 Slugs and provenance (0.4.0, additive)
+
+Slugs are either flat (`^[a-z0-9][a-z0-9._-]{0,127}$`, unchanged) or
+**namespaced**: a lowercase namespace and `/`-separated segments that keep
+the source file's case, at most 128 characters
+(`^[a-z0-9][a-z0-9._-]{0,63}(/[A-Za-z0-9][A-Za-z0-9._-]{0,127}){1,16}$`).
+Namespaced slugs come from file import; the MCP `put_document` tool still
+takes flat slugs only. The `instructions/` and `memory/` namespaces are
+reserved for instruction files:
+
+| file (relative to the project root) | slug |
+|---|---|
+| `CLAUDE.md`, `AGENTS.md`, `CLAUDE.local.md` | `instructions/claude-md`, `instructions/agents-md`, `instructions/claude-local-md` |
+| `<dir>/CLAUDE.md` | `instructions/<dir>/claude-md` |
+| `.claude/rules/<path>.md` | `instructions/claude-rules/<path>` |
+| `.cursor/rules/<path>` | `instructions/cursor-rules/<path>` (a trailing `.md` dropped) |
+| Claude Code auto memory `<memory dir>/<name>.md` | `memory/<name>` (e.g. `memory/MEMORY`) |
+| any other file | `instructions/<path without .md>` |
+
+Segments are sanitized (`[^A-Za-z0-9._-]` → `-`, leading `._-` and trailing
+`-` dropped); a slug over 128 characters is cut to 119 and suffixed with `-`
+and 8 hex chars of `sha256(full slug)`. In resource URIs a namespaced slug is
+percent-encoded: `kronicle://docs/instructions%2Fclaude-md`.
+
+`document.put` may carry `source`, recorded only when the caller supplies it
+(a put without it hashes exactly as in 0.3.0):
+
+```json
+{ "kind": "instruction" | "memory" | "file", "path": "CLAUDE.md" }
+```
+
+`path` is project-relative, `~/`-relative or absolute, always
+`/`-separated. The `doc_sources` table projects the latest put's `source`
+per document (a later put without one clears it) and is rebuilt by `import`
+like every other projection table. A supersession or tombstone in an
+`instructions/` or `memory/` document is reported by orient as a retraction
+of kind `instruction`.
 
 ## 4. Receipts (v2)
 

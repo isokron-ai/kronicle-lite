@@ -25,6 +25,7 @@ import { z } from 'zod';
 import { VERIFY_REASONS } from './recall/verify-receipt.js';
 import { ReceiptSchema } from './recall/receipt.js';
 import { FOCUSES, RECOVERY_METHODS } from './orient/orient.js';
+import { RETRACTION_KINDS } from './orient/retraction.js';
 
 const HEX64 = z.string().regex(/^[0-9a-f]{64}$/).describe('lowercase hex sha256');
 
@@ -70,7 +71,7 @@ export const DigestSchema = z.object({
 export const RetractionSchema = z.object({
   seq: z.number().int().positive(),
   event_type: z.string(),
-  kind: z.enum(['tombstone', 'supersession', 'retraction']),
+  kind: z.enum(RETRACTION_KINDS).describe('instruction = a CLAUDE.md / AGENTS.md / rule / memory block changed on disk.'),
   severity: z.enum(['safety', 'behavioral', 'informational']),
   block_id: z.string().nullable(),
   doc_slug: z.string().nullable(),

@@ -89,7 +89,7 @@ export interface TombstoneBlockResult {
 export class DocumentError extends Error {
   override readonly name = 'DocumentError';
   constructor(
-    readonly code: 'unknown_block' | 'block_not_live' | 'unknown_document' | 'invalid_slug' | 'empty_content',
+    readonly code: 'unknown_block' | 'block_not_live' | 'unknown_document' | 'invalid_slug' | 'empty_content' | 'invalid_source',
     message: string,
   ) {
     super(message);
@@ -97,6 +97,59 @@ export class DocumentError extends Error {
 }
 
 export const SLUG_RE = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+/**
+ * 0.4.0: namespaced slugs for documents imported from files — a lowercase
+ * namespace, then `/`-separated segments that keep the file's case
+ * (`instructions/claude-md`, `instructions/claude-rules/frontend/react`,
+ * `memory/MEMORY`). At most 128 characters, so they fit receipts. The
+ * `instructions/` and `memory/` namespaces are reserved for instruction
+ * import (their supersessions are retractions of kind `instruction`).
+ */
+export const PATH_SLUG_RE = /^[a-z0-9][a-z0-9._-]{0,63}(?:\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}){1,16}$/;
+export const INSTRUCTION_NAMESPACES = ['instructions/', 'memory/'] as const;
+
+export function isValidSlug(slug: string): boolean {
+  return slug.length <= 128 && (SLUG_RE.test(slug) || PATH_SLUG_RE.test(slug));
+}
+
+export function isInstructionSlug(slug: string | null | undefined): boolean {
+  return typeof slug === 'string' && INSTRUCTION_NAMESPACES.some((n) => slug.startsWith(n));
+}
+
+/**
+ * Where a document's markdown came from (0.4.0, optional `source` field of
+ * the `document.put` payload). Chained into the event hash like every other
+ * payload field; absent on every 0.3.0 event.
+ */
+export interface DocumentSource {
+  /** instruction | memory | file */
+  kind: string;
+  /** Path as recorded: project-relative, `~/`-relative or absolute, `/`-separated. */
+  path: string;
+  /** Present when bound with bind_git (FORMAT §3.4). */
+  git?: GitBinding;
+}
+
+export interface GitBinding {
+  /** Absolute repository root (`git rev-parse --show-toplevel`). */
+  repo_root: string;
+  /** HEAD commit at put time, or null in a repository without commits. */
+  commit: string | null;
+  /** Path relative to repo_root, `/`-separated. */
+  path: string;
+  /** `git hash-object <file>` at put time. */
+  blob_sha: string;
+}
+
+export interface DocSourceRow {
+  doc_id: string;
+  slug: string;
+  revision: number;
+  chain_seq: number;
+  kind: string;
+  path: string;
+  source_json: string;
+}
 export const HP_SEP = ' > ';
 
 export function joinHeadingPath(p: readonly string[]): string {
@@ -156,6 +209,32 @@ export class DocumentStore {
       .all(doc_id) as BlockRow[];
   }
 
+  /** Current provenance of a document (from its latest document.put), or null. */
+  getSource(doc_id: string): (DocSourceRow & { source: DocumentSource }) | null {
+    const r = this.db.prepare(`SELECT * FROM doc_sources WHERE doc_id = ?`).get(doc_id) as DocSourceRow | undefined;
+    return r ? { ...r, source: JSON.parse(r.source_json) as DocumentSource } : null;
+  }
+
+  /** Every document whose latest put recorded a source, optionally filtered by kind. */
+  listSources(kind?: string): (DocSourceRow & { source: DocumentSource })[] {
+    const rows = (
+      kind === undefined
+        ? this.db.prepare(`SELECT * FROM doc_sources ORDER BY slug`).all()
+        : this.db.prepare(`SELECT * FROM doc_sources WHERE kind = ? ORDER BY slug`).all(kind)
+    ) as DocSourceRow[];
+    return rows.map((r) => ({ ...r, source: JSON.parse(r.source_json) as DocumentSource }));
+  }
+
+  /** BLAKE3 of the current revision's markdown, or null for an unknown slug. */
+  currentMarkdownHash(slug: string): string | null {
+    const r = this.db
+      .prepare(
+        `SELECT r.content_hash FROM documents d JOIN document_revisions r ON r.doc_id = d.doc_id AND r.revision = d.current_revision WHERE d.slug = ?`,
+      )
+      .get(slug) as { content_hash: string } | undefined;
+    return r?.content_hash ?? null;
+  }
+
   getRevisionMarkdown(doc_id: string, revision: number): string | null {
     const r = this.db
       .prepare(`SELECT markdown FROM document_revisions WHERE doc_id = ? AND revision = ?`)
@@ -190,9 +269,14 @@ export class DocumentStore {
     markdown: string;
     actor_id: string;
     idempotency_key?: string;
+    /** 0.4.0: provenance recorded in the document.put payload (`source`). */
+    source?: DocumentSource;
   }): PutDocumentResult {
-    if (!SLUG_RE.test(args.slug)) {
-      throw new DocumentError('invalid_slug', `slug must match ${SLUG_RE}`);
+    if (!isValidSlug(args.slug)) {
+      throw new DocumentError('invalid_slug', `slug must match ${SLUG_RE} or the namespaced form ${PATH_SLUG_RE}`);
+    }
+    if (args.source !== undefined && (typeof args.source.kind !== 'string' || typeof args.source.path !== 'string')) {
+      throw new DocumentError('invalid_source', 'source needs string kind and path');
     }
     const parsed = parseMarkdown(args.markdown);
     const markdown = normalizeMarkdown(args.markdown);
@@ -238,6 +322,9 @@ export class DocumentStore {
           markdown_hash,
           block_ids: liveBlockIds,
           carried,
+          // Additive (0.4.0): only present when the caller supplied it, so a
+          // put without a source hashes exactly as in 0.3.0.
+          ...(args.source !== undefined ? { source: args.source as unknown as Record<string, unknown> } : {}),
         },
       });
       for (const c of [...created, ...replaced]) {
@@ -529,6 +616,22 @@ export class DocumentStore {
         const carried = (p['carried'] as { block_id: string; ordinal: number; heading_path: string[] }[] | undefined) ?? [];
         const upd = this.db.prepare(`UPDATE blocks SET ordinal = ?, heading_path = ? WHERE block_id = ?`);
         for (const c of carried) upd.run(c.ordinal, joinHeadingPath(c.heading_path), c.block_id);
+        if (ev.event_type === 'document.put') {
+          // The latest full put decides provenance: a put without `source`
+          // (every 0.3.0 put) clears any earlier binding.
+          const source = p['source'] as DocumentSource | undefined;
+          if (source && typeof source === 'object' && typeof source.kind === 'string' && typeof source.path === 'string') {
+            this.db
+              .prepare(
+                `INSERT INTO doc_sources (doc_id, slug, revision, chain_seq, kind, path, source_json) VALUES (?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(doc_id) DO UPDATE SET slug = excluded.slug, revision = excluded.revision, chain_seq = excluded.chain_seq,
+                   kind = excluded.kind, path = excluded.path, source_json = excluded.source_json`,
+              )
+              .run(doc_id, slug, revision, ev.seq, source.kind, source.path, JSON.stringify(source));
+          } else {
+            this.db.prepare(`DELETE FROM doc_sources WHERE doc_id = ?`).run(doc_id);
+          }
+        }
         return;
       }
       case 'block.created': {

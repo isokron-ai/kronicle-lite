@@ -53,6 +53,40 @@ on; kronicle-lite's own DB, key and Merkle code replace the duplicates).
   `KRONICLE_ANCHOR_WORKER_DIR` set they also run against the real Worker
   under Miniflare. Plus unreachable-service, config and export cases.
 
+### Added — chained instructions and `watch`
+
+- `kronicle-lite watch [paths…] [--interval MS] [--debounce MS] [--poll]
+  [--cwd DIR] [--list [--json]] [--once]`: re-put instruction files when
+  they change. `fs.watch` on the containing directories (non-recursive,
+  rename-safe) with a debounce, plus a polling pass that rescans the
+  patterns (new rule files, new subdirectories, deletions) and catches what
+  `fs.watch` misses; `--poll` for polling only. No new dependency.
+- Default set: `CLAUDE.md`, `AGENTS.md`, `.claude/rules/**/*.md`,
+  `.cursor/rules/**`, and Claude Code's auto memory `MEMORY.md` at
+  `<config>/projects/<project>/memory/` — `<project>` derived from the git
+  repository's main worktree root (non-alphanumerics → `-`; >200 chars found
+  by prefix), with `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_PROJECT_DIR_NAME` and
+  `autoMemoryDirectory` honoured, per code.claude.com/docs/en/memory.md and
+  /sessions.md (checked 2026-10-31).
+- Deterministic namespaced slugs (`instructions/claude-md`,
+  `instructions/claude-rules/<path>`, `memory/MEMORY`, …; FORMAT §3.4).
+- A changed instruction is a supersession; orient reports it as a
+  retraction of the new kind `instruction` (severity of the underlying
+  event; a deleted file tombstones its blocks → `safety`).
+- `kronicle-lite put --from-instructions [paths…]`: one-shot import;
+  unchanged files append nothing. `--stdin-hook` makes it a Claude Code
+  hook: `SessionStart` syncs and answers `watchPaths`, `FileChanged`
+  re-puts the changed file; never fails the hook. README documents the
+  hook wiring (cc-anchor's `watchPaths`/`FileChanged` shape) as the
+  in-Claude-Code way and `watch` as the everywhere-else way.
+- `document.put` gains an optional `source {kind, path}` (recorded only
+  when given; puts without it hash as before) projected into a new
+  `doc_sources` table.
+- MCP resources: namespaced slugs are listed percent-encoded
+  (`kronicle://docs/instructions%2Fclaude-md`) and decoded on read.
+- CLI arg parser: boolean flags never swallow the next positional;
+  `--flag=value` accepted.
+
 ## [0.3.0] — 2026-11-01
 
 MCP spec **2026-07-28** and the TypeScript SDK **v2**

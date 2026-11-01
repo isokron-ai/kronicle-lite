@@ -221,6 +221,78 @@ kronicle-lite anchor status            # last anchor, status, events since (no n
 - Exit codes: 0 ok, 1 divergence or conflict, 2 usage or I/O (incl.
   unreachable).
 
+## Chained instructions (0.4.0)
+
+Your agent's instructions are notes too, and they go stale the same way:
+someone edits `CLAUDE.md`, a rule file is rewritten, Claude Code's auto
+memory index changes. kronicle-lite can chain them, so a changed instruction
+is a **supersession** and the next `get_system_state` lists it as a
+retraction of kind `instruction` ("instruction block … was CHANGED in
+instructions/claude-md; re-read kronicle://docs/instructions%2Fclaude-md").
+A deleted file retires its blocks (severity `safety`).
+
+Default set, relative to the git worktree root (or the working directory):
+
+| file | slug |
+|---|---|
+| `CLAUDE.md` | `instructions/claude-md` |
+| `AGENTS.md` | `instructions/agents-md` |
+| `.claude/rules/**/*.md` | `instructions/claude-rules/<path>` |
+| `.cursor/rules/**` | `instructions/cursor-rules/<path>` |
+| Claude Code auto memory `MEMORY.md` | `memory/MEMORY` |
+
+Auto memory lives at `~/.claude/projects/<project>/memory/MEMORY.md`, where
+`<project>` is the git repository's main worktree root (shared by all
+worktrees and subdirectories; outside git, the working directory) with every
+non-alphanumeric character replaced by `-`. `CLAUDE_CONFIG_DIR`,
+`CLAUDE_CODE_PROJECT_DIR_NAME` and `autoMemoryDirectory` are honoured as
+Claude Code documents them
+([memory](https://code.claude.com/docs/en/memory.md#storage-location),
+[sessions](https://code.claude.com/docs/en/sessions.md#where-transcripts-are-stored)).
+`kronicle-lite watch --list` prints what it resolved.
+
+```sh
+kronicle-lite put --from-instructions          # one shot: chain whatever changed
+kronicle-lite watch                            # keep chaining while files change (Ctrl-C to stop)
+kronicle-lite watch docs/ AGENTS.md --interval 5000
+kronicle-lite watch --list [--json]            # show the resolved set and slugs
+```
+
+Unchanged files append nothing. `watch` uses `fs.watch` on the containing
+directories with a debounce (150 ms; `--debounce`) plus a polling pass
+(`--interval`, default 2000 ms) that also discovers new rule files;
+`--poll` uses polling only.
+
+**Inside Claude Code: hooks, not a watcher.** Claude Code already watches
+files: a `SessionStart` hook can return `watchPaths`, and a `FileChanged`
+hook runs whenever one of them changes on disk, whoever wrote it
+([hooks: FileChanged](https://code.claude.com/docs/en/hooks.md#filechanged)).
+`put --from-instructions --stdin-hook` is both hooks: on `SessionStart` it
+syncs the set and answers with its `watchPaths`; on `FileChanged` it re-puts
+the one file and posts a one-line `systemMessage` when something changed. It
+never fails the hook. This is the shape of cc-anchor's `watchPaths` /
+`FileChanged` hook; with a cc-anchor that does not ship it yet, or without
+cc-anchor, add it to `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "kronicle-lite put --from-instructions --stdin-hook", "timeout": 30 }] }
+    ],
+    "FileChanged": [
+      { "hooks": [{ "type": "command", "command": "kronicle-lite put --from-instructions --stdin-hook", "timeout": 30 }] }
+    ]
+  }
+}
+```
+
+The `FileChanged` group has no `matcher` on purpose: it then runs for every
+path in the dynamic watch list. Install kronicle-lite globally for hooks
+(`npx` adds seconds per call) and pass the same `--data-dir` your MCP server
+uses. **Everywhere else** — Cursor, Codex, Copilot, a plain editor — run
+`kronicle-lite watch` in a terminal or as a user service.
+
 ## Tools
 
 | tool | what it does | writes chain |

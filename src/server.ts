@@ -431,7 +431,9 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     new ResourceTemplate('kronicle://docs/{slug}', {
       list: () => ({
         resources: store.docs.listDocuments(200).map((d) => ({
-          uri: `kronicle://docs/${d.slug}`,
+          // Namespaced slugs (instructions/claude-md) are percent-encoded so
+          // they match the single-segment {slug} template; flat slugs are unchanged.
+          uri: `kronicle://docs/${encodeURIComponent(d.slug)}`,
           name: d.slug,
           title: d.title,
           description: `revision ${d.current_revision}, updated ${d.updated_at}`,
@@ -446,7 +448,13 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
       cacheHint: CACHE_HINTS['resources/read'],
     },
     (uri, vars) => {
-      const slug = String(vars['slug']);
+      const raw = String(vars['slug']);
+      let slug: string;
+      try {
+        slug = decodeURIComponent(raw);
+      } catch {
+        slug = raw;
+      }
       const doc = store.docs.getDocument(slug);
       if (!doc) throw new Error(`no document ${slug}`);
       const markdown = store.docs.getRevisionMarkdown(doc.doc_id, doc.current_revision) ?? '';
@@ -496,7 +504,7 @@ export function renderSystemStateMarkdown(s: SystemState): string {
       `${s.digest.documents} document(s), ${s.digest.live_blocks} live block(s), ${s.digest.checkpoints} checkpoint(s). Genesis \`${s.digest.genesis_hash.slice(0, 12)}…\`.`,
     );
     for (const d of s.digest.recent_documents) {
-      lines.push(`- \`${d.slug}\` — ${d.title} (rev ${d.revision}, ${d.updated_at}) → kronicle://docs/${d.slug}`);
+      lines.push(`- \`${d.slug}\` — ${d.title} (rev ${d.revision}, ${d.updated_at}) → kronicle://docs/${encodeURIComponent(d.slug)}`);
     }
   }
 
