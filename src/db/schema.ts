@@ -5,6 +5,19 @@
 
 export const SCHEMA_VERSION = 1;
 
+/**
+ * Columns added to existing tables after 0.3.0; `openDatabase` adds them to
+ * older databases (ALTER TABLE … ADD COLUMN), then creates their indexes.
+ */
+export const ADDED_COLUMNS: readonly { table: string; column: string; ddl: string; index?: string }[] = [
+  {
+    table: 'receipts',
+    column: 'actor_id',
+    ddl: 'ALTER TABLE receipts ADD COLUMN actor_id TEXT',
+    index: 'CREATE INDEX IF NOT EXISTS receipts_actor_idx ON receipts (actor_id, issued_at)',
+  },
+];
+
 export const SCHEMA_SQL = `
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -118,7 +131,10 @@ CREATE TABLE IF NOT EXISTS receipts (
   chain_seq       INTEGER NOT NULL,
   query_hash      TEXT NOT NULL,
   issued_at       TEXT NOT NULL,
-  receipt_json    TEXT NOT NULL
+  receipt_json    TEXT NOT NULL,
+  -- 0.6.0, additive, local only (not in the signed receipt or any hash): the
+  -- actor recall served, so a later recall can lower what it already read.
+  actor_id        TEXT
 );
 CREATE INDEX IF NOT EXISTS receipts_block_idx ON receipts (block_id);
 

@@ -37,6 +37,7 @@ import {
   VerifyChainResultSchema,
   VerifyResultSchema,
 } from './schemas.js';
+import { scrubDeep, SecretDetectedError } from './secrets/guard.js';
 import type { KronicleLite } from './store.js';
 import { VERSION } from './version.js';
 
@@ -50,7 +51,15 @@ export interface ServerOptions {
    * directory; embedders pass their own or leave it unscoped.
    */
   project?: ProjectScope | null;
+  /**
+   * 0.6.0: `core` serves only CORE_TOOLS (≤ 6) for small context windows;
+   * `full` (default) serves every tool.
+   */
+  profile?: 'full' | 'core';
 }
+
+/** 0.6.0: the `--core` profile: orient, grade, search, check a receipt, write, fix one block. */
+export const CORE_TOOLS = ['get_system_state', 'audit_assumptions', 'recall', 'verify', 'put_document', 'supersede_block'] as const;
 
 /**
  * Server instructions. Codex reads only the first 512 characters, so the
@@ -78,6 +87,8 @@ const ACTOR = z.string().min(1).max(200).optional().describe('Your agent id (def
 
 const CURSOR = z.string().optional().describe('Your latest cursor (for the stale-write advisory).');
 
+const REDACT = z.boolean().default(false).describe('Store a redacted copy instead of refusing a detected secret.');
+
 type ToolResult = {
   content: { type: 'text'; text: string }[];
   structuredContent?: Record<string, unknown>;
@@ -93,6 +104,10 @@ function json(value: object): ToolResult {
 }
 
 function errorResult(err: unknown): ToolResult {
+  if (err instanceof SecretDetectedError) {
+    // Findings name the detector and line only; the secret is never echoed.
+    return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err.code, message: err.message, findings: err.findings }) }] };
+  }
   if (err instanceof DocumentError) {
     return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err.code, message: err.message }) }] };
   }
@@ -133,10 +148,17 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
   );
 
   const actorOf = (a: string | undefined) => a ?? defaultActor;
+  // 0.6.0: the core profile registers only CORE_TOOLS.
+  const core = opts.profile === 'core';
+  const register = server.registerTool.bind(server);
+  const registerTool = ((name: string, ...rest: unknown[]) =>
+    core && !(CORE_TOOLS as readonly string[]).includes(name)
+      ? undefined
+      : (register as (...a: unknown[]) => unknown)(name, ...rest)) as typeof server.registerTool;
 
   // ───────────────────────────── orient ─────────────────────────────
 
-  server.registerTool(
+  registerTool(
     'get_system_state',
     {
       title: 'Orient against the chain',
@@ -179,7 +201,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     },
   );
 
-  server.registerTool(
+  registerTool(
     'audit_assumptions',
     {
       title: 'Grade beliefs against the chain',
@@ -199,24 +221,29 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
       outputSchema: lean(AuditSummarySchema, 'output'),
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
-    (args) => json(store.auditor.audit(args.claims)),
+    (args) => json(scrubDeep(store.auditor.audit(args.claims)).value),
   );
 
   // ───────────────────────────── recall / verify ─────────────────────────────
 
-  server.registerTool(
+  registerTool(
     'recall',
     {
       title: 'Search blocks with signed receipts',
       description:
-        'Full-text search over live blocks. Each hit carries a signed receipt: keep it with what you derive and pass it to ' +
-        'verify() before relying on it later. Blocks whose stored text fails its integrity check are withheld, never served.',
+        'Full-text search over live blocks. Each hit carries a signed receipt (pass it to verify() before relying on it later) ' +
+        'and authority: can_act | inspect_only | never_act with a reason; only can_act is safe to act on unchecked. absence says what was and was not ' +
+        'searched: an empty result is not proof of absence unless verdict is absent_in_searched. Pass cursor: hits you already ' +
+        'read this session rank lower.',
       inputSchema: lean(
         z.object({
           query: z.string().min(1).max(2000),
           top_k: z.number().int().min(1).max(50).default(12),
           include_tombstoned: z.boolean().default(false),
           include_receipts: z.boolean().default(true),
+          max_chars: z.number().int().min(200).max(400_000).default(16_000).describe('Content budget; longer hits are cut with a pointer.'),
+          cursor: CURSOR,
+          actor_id: ACTOR,
         }),
         'input',
       ),
@@ -225,14 +252,25 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     },
     (args) => {
       try {
-        return json(store.recall.recall(args));
+        const actor_id = actorOf(args.actor_id);
+        return json(
+          store.recall.recall({
+            query: args.query,
+            top_k: args.top_k,
+            include_tombstoned: args.include_tombstoned,
+            include_receipts: args.include_receipts,
+            max_chars: args.max_chars,
+            actor_id,
+            session_since: store.orient.sessionStart(actor_id, args.cursor),
+          }),
+        );
       } catch (err) {
         return errorResult(err);
       }
     },
   );
 
-  server.registerTool(
+  registerTool(
     'verify',
     {
       title: 'Verify a retrieval receipt',
@@ -246,7 +284,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     (args) => json(store.verifier.verify(args.receipt)),
   );
 
-  server.registerTool(
+  registerTool(
     'verify_chain',
     {
       title: 'Verify chain integrity',
@@ -261,7 +299,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     (args) => json(store.verifyAll(args.from_seq, args.to_seq)),
   );
 
-  server.registerTool(
+  registerTool(
     'checkpoint_chain',
     {
       title: 'Sign a Merkle checkpoint',
@@ -291,7 +329,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     },
   );
 
-  server.registerTool(
+  registerTool(
     'anchor_status',
     {
       title: 'Hosted anchor status',
@@ -315,14 +353,15 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
 
   // ───────────────────────────── writes ─────────────────────────────
 
-  server.registerTool(
+  registerTool(
     'put_document',
     {
       title: 'Create or replace a document',
       description:
         'Create or re-put a Markdown document by slug. Unchanged blocks keep their ids; changed blocks are superseded and ' +
         'removed ones tombstoned, which other agents see as retractions. bind_git with source_path ties the document to ' +
-        'that file\'s git blob (verify reports STALE_SOURCE when the file changes).',
+        'that file\'s git blob (verify reports STALE_SOURCE when the file changes). Refuses text holding a secret (API key, ' +
+        'token, private key, connection string): the chain cannot forget it.',
       inputSchema: lean(
         z.object({
           slug: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,127}$/),
@@ -331,6 +370,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
           idempotency_key: z.string().min(1).max(200).optional(),
           source_path: z.string().min(1).max(4096).optional().describe('File the markdown came from.'),
           bind_git: z.boolean().default(false),
+          redact_secrets: REDACT,
           cursor: CURSOR,
           actor_id: ACTOR,
         }),
@@ -363,6 +403,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
           actor_id,
           ...(args.idempotency_key !== undefined ? { idempotency_key: args.idempotency_key } : {}),
           ...(source !== undefined ? { source } : {}),
+          ...(args.redact_secrets ? { secrets: 'redact' as const } : {}),
         });
         return json({
           ...result,
@@ -376,7 +417,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     },
   );
 
-  server.registerTool(
+  registerTool(
     'supersede_block',
     {
       title: 'Replace one block',
@@ -386,6 +427,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
           block_id: z.uuid(),
           new_content: z.string().min(1).max(200_000),
           reason: z.string().min(1).max(1000),
+          redact_secrets: REDACT,
           cursor: CURSOR,
           actor_id: ACTOR,
         }),
@@ -403,6 +445,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
           new_content: args.new_content,
           reason: args.reason,
           actor_id,
+          ...(args.redact_secrets ? { secrets: 'redact' as const } : {}),
         });
         return json({ ...result, stale_write_advisory });
       } catch (err) {
@@ -411,7 +454,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     },
   );
 
-  server.registerTool(
+  registerTool(
     'tombstone_block',
     {
       title: 'Retire one block',
@@ -470,7 +513,8 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
       // 0.5.0: never serve text that does not hash to the chain.
       const problem = checkRevisionRow(store.chain, rev);
       if (problem) throw new Error(`integrity failure (${problem}) in ${slug}@${rev.revision}: the stored text does not match the chain; run kronicle-lite verify-chain`);
-      const markdown = rev.markdown;
+      // 0.6.0: read-time secret scrub (independent of the write-time guard).
+      const markdown = scrubDeep(rev.markdown).value;
       return { contents: [{ uri: uri.href, mimeType: 'text/markdown', text: markdown }] };
     },
   );
@@ -545,10 +589,11 @@ export function renderSystemStateMarkdown(s: SystemState): string {
     }
   } else if (s.retractions) {
     lines.push('');
-    lines.push('## Retractions: none');
+    // 0.6.0: a hidden scope degrades "none" — it was not reviewed, not cleared.
+    lines.push(s.scope?.verdict === 'partial' ? '## Retractions: none in this project (partial view)' : '## Retractions: none');
   }
   if (s.scope && s.scope.hidden_retractions > 0) {
-    lines.push(`_${s.scope.hidden_retractions} instruction retraction(s) from other projects hidden (all_projects: true shows them)._`);
+    lines.push(`_${s.scope.hidden_retractions} instruction retraction(s) from other projects hidden and not reviewed (all_projects: true shows them)._`);
   }
 
   if (s.source_drift && s.source_drift.length > 0) {

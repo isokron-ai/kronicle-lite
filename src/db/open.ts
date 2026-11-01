@@ -10,7 +10,7 @@ import {
   loadOrCreateIdentity,
   type ServerIdentity,
 } from '../crypto/keys.js';
-import { SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
+import { ADDED_COLUMNS, SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
 
 export type Db = Database.Database;
 
@@ -60,8 +60,18 @@ export function openDatabase(opts: OpenOptions = {}): Opened {
   }
 
   db.exec(SCHEMA_SQL);
+  addColumns(db);
   initialize(db, identity);
   return { db, identity, dataDir };
+}
+
+/** Additive migrations for databases created by an older version. */
+function addColumns(db: Db): void {
+  for (const c of ADDED_COLUMNS) {
+    const cols = db.prepare(`SELECT name FROM pragma_table_info(?)`).all(c.table) as { name: string }[];
+    if (!cols.some((x) => x.name === c.column)) db.exec(c.ddl);
+    if (c.index) db.exec(c.index);
+  }
 }
 
 function initialize(db: Db, identity: ServerIdentity): void {

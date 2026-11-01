@@ -17,7 +17,11 @@ kronicle-lite is a small SQLite-backed document store where:
 - `get_system_state` gives the agent an **orient** call: pass your last
   cursor, get exactly what changed since, a **drift banner** when you have
   been away too long, and a **retraction list** of things you may have relied
-  on that are now wrong.
+  on that are now wrong;
+- every hit carries an **honest label** — `can_act`, `inspect_only` or
+  `never_act`, with the reason — and an empty answer says what was searched,
+  what was not, and whether the index was fresh. Secrets are refused before
+  they reach the append-only chain.
 
 It is one process, one file, no accounts. It runs over stdio next to Claude
 Code, Cursor, Claude Desktop, Codex, GitHub Copilot or any MCP client, and
@@ -43,8 +47,24 @@ orient says, before it acts:
 
 Then someone edits the SQLite file by hand: `recall` withholds the edited
 text, the old receipt verifies `UNVERIFIED (content_tampered)`,
-`verify-chain` exits 1, `rebuild` restores the text from the chain, and an
-edit to the chain itself is caught at its seq.
+`verify-chain` exits 1, `rebuild` restores the text from the chain. A put
+holding an API key is refused before anything is chained, an empty recall
+answers `absent_in_searched` with the scopes it did not search, and an edit
+to the chain itself is caught at its seq.
+
+> **0.6.0 — honest labels** (unreleased). Every `recall` hit carries
+> `authority: can_act | inspect_only | never_act` with a reason; only
+> block-level evidence (the block's exact text found, now, in its recorded
+> source file) reaches `can_act`; superseded, tombstoned, withheld and drifted
+> text never does. `absence {searched, not_searched, index_fresh, verdict}`
+> separates "searched, found nothing" from "not searched", and a stale or
+> cold index never certifies "not found". Hits you already read this session
+> rank lower (never hidden). Secrets (API keys, tokens, private keys,
+> connection strings) are refused on put / import / watch, or stored redacted
+> on request; served text is scrubbed again at read time. `serve --core`
+> serves six tools; `recall` caps content with a "read the whole document"
+> pointer. Rules: [`docs/HONESTY.md`](docs/HONESTY.md). All additive: no hash,
+> receipt, cursor or event layout changed.
 
 > **0.5.0** closes the gaps an adoption audit found: what the agent reads
 > is now checked against the chain, not only the log (`recall`, `verify`,
@@ -404,25 +424,64 @@ no-ops there, with an `icacls` line to lock the data dir down.
 |---|---|---|
 | `get_system_state` | Orient. `since_cursor` → delta since then; drift banner; retractions with `old_text` / `new_text` / `diff`; integrity pass; new cursor. `focus`: `orientation` (default), `recent_changes`, `retractions`, `pulse`. `response_format`: `markdown` (default) or `json`. `all_projects`: include other projects' instruction retractions. | no |
 | `audit_assumptions` | Grade claims `{symbol, value}` (block id, doc slug, or `head`) → `current \| stale \| contradicted \| retracted \| unknown \| stale_source` with the current truth and a reconcile line. | no |
-| `recall` | FTS5 bm25 search over live blocks; each hit carries a receipt v2 bound to the chain head. A block whose stored text no longer hashes to the chain is withheld (`withheld`), never served. `top_k`, `include_tombstoned`, `include_receipts`. | no (stores receipts) |
+| `recall` | FTS5 bm25 search over live blocks; each hit carries a receipt v2 bound to the chain head and (0.6.0) `authority` / `authority_reason` / `authority_basis`; the result carries `authority_floor`, `absence` and, with `cursor`, an attention rerank (`already_read`). A block whose stored text no longer hashes to the chain is withheld (`withheld`), never served. `top_k`, `include_tombstoned`, `include_receipts`, `max_chars`, `cursor`, `actor_id`. | no (stores receipts) |
 | `verify` | Re-derive a receipt against the live store: signature, block existence, re-hashed block text vs the chain, chain binding, supersession walk, git-bound source → `VERIFIED \| SUPERSEDED \| TOMBSTONED \| UNVERIFIED \| STALE_SOURCE` + reason. | no |
 | `verify_chain` | Recompute every hash and link in a range; first mismatch; checkpoint results; over the whole chain also the projection (every stored document and block re-derived and re-hashed). | no |
 | `checkpoint_chain` | Sign a Merkle root over a seq range with the local key; `push: true` also anchors it off-box. | no (checkpoints, anchors tables) |
 | `anchor_status` | Last off-box anchor, events since, and whether the local chain still matches it (`remote: true` asks the service). | no |
-| `put_document` | Create or re-put a Markdown document by slug. Unchanged blocks keep their ids; changed ones are superseded; removed ones tombstoned. `bind_git` + `source_path` bind it to a file's git blob. | yes |
-| `supersede_block` | Replace one live block with new content and a reason. | yes |
+| `put_document` | Create or re-put a Markdown document by slug. Unchanged blocks keep their ids; changed ones are superseded; removed ones tombstoned. `bind_git` + `source_path` bind it to a file's git blob. Refuses a detected secret (`secret_detected`); `redact_secrets: true` stores a redacted copy. | yes |
+| `supersede_block` | Replace one live block with new content and a reason (secret guard as for `put_document`). | yes |
 | `tombstone_block` | Retire one live block with a reason. | yes |
 
 Every write tool accepts an optional `cursor` and returns the new chain head
-plus a `stale_write_advisory` (advisory only; nothing is ever blocked). The
-`kronicle://docs/{slug}` resource serves a document's current revision.
+plus a `stale_write_advisory` (advisory only; the stale-write check never
+blocks; the secret guard does). The `kronicle://docs/{slug}` resource serves
+a document's current revision.
+
+**`serve --core`** (0.6.0) serves only `get_system_state`,
+`audit_assumptions`, `recall`, `verify`, `put_document` and
+`supersede_block`, for small context windows: `tools/list` is 9.9 KB
+instead of 13.6 KB. Its catalog is pinned separately
+([`.mcp-catalog/kronicle-lite-core.json`](.mcp-catalog/kronicle-lite-core.json)).
+
+### Honest labels (0.6.0)
+
+| you see | it means | do |
+|---|---|---|
+| `authority: can_act` | this exact block text is in its recorded source file right now | act on it |
+| `authority: inspect_only` | no block-level evidence (no source, document-level provenance only, model-written memory, or the source could not be read) | reason with it; verify before acting |
+| `authority: never_act` | superseded, tombstoned, withheld for integrity, or the source no longer holds it / is gone | don't act on it; re-read the source or recall the successor |
+| `absence.verdict: absent_in_searched` | nothing matched in the scopes listed in `searched`, with a fresh index | treat as absent *there*; `not_searched` lists where it was not looked for |
+| `absence.verdict: cannot_certify` | the index was stale/cold, a match was withheld, or nothing was searched | no conclusion; fix the store (`verify-chain`, `rebuild`) or the query |
+| `already_read: true` | you read it earlier this session (it ranks lower) | skip it unless you need it again |
+| `truncated` | the content was cut to fit `max_chars` | read `truncated.read` or raise `max_chars` |
+
+Full rule table and invariants: [`docs/HONESTY.md`](docs/HONESTY.md).
+
+### Secrets are refused, not tombstoned (0.6.0)
+
+The chain is append-only and every byte of a put is hashed into it. A
+tombstone hides a block from `recall`; it does not remove the secret from the
+events table, from `export`, or from any backup, and deleting it would break
+verification by design. So `put_document`, `supersede_block`,
+`tombstone_block`, `kronicle-lite put`, `put --from-instructions`, `watch`
+and `import` scan for common secret shapes (provider API keys and tokens,
+private keys, JWTs, `scheme://user:password@` connection strings, bearer
+headers, `…_PASSWORD=` / `…_TOKEN=` assignments) **before** anything is
+chained, and refuse with `secret_detected` naming the detector and line
+(never the secret). Overrides: `redact_secrets: true` / `--redact-secrets`
+chains a copy with `[REDACTED:<detector>]` in place of each match;
+`import --allow-secrets` imports verbatim (chained bytes cannot be redacted
+without breaking their hashes). An independent read-time ruleset masks
+anything that got in anyway (pre-0.6.0 data, `--allow-secrets`) in `recall`,
+orient, `audit_assumptions` and the document resource.
 
 Every tool declares an `outputSchema` and returns the same JSON as
 `structuredContent` and as a text block (`get_system_state` renders Markdown
 in the text block by default; `response_format: "json"` makes the text the
 JSON too). Since 0.5.0 `tools/list` advertises compact output schemas (every
 top-level field with its type, enum and `required`; nested shapes as bare
-types) and short descriptions: **12.4 KB instead of 43.2 KB**. Results are
+types) and short descriptions: **12.4 KB instead of 43.2 KB** (13.6 KB in 0.6.0 with the honest-label fields). Results are
 still validated against the full schemas, which the
 `kronicle://schemas/tools` resource serves; the orient skill carries the
 longer guidance. The emitted catalog is pinned in
@@ -468,6 +527,9 @@ told.
   model before relying on it for anything adversarial.
 - Orienting never fails on a bad cursor; the server recovers position from the
   flight recorder and says so.
+- (0.6.0) `can_act` comes only from block-level evidence; an empty `recall`
+  never claims "not found" from a stale or cold index; a briefing that hid a
+  scope says it is partial.
 
 ## Development
 

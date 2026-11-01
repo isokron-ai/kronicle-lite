@@ -21,6 +21,7 @@ import type { Chain, ChainEvent, ChainHead } from '../chain/index.js';
 import { blake3Hex } from '../crypto/hash.js';
 import { checkGitBinding, type DiffStat, type SourceState } from '../git/binding.js';
 import type { Db } from '../db/open.js';
+import { guardFields, type SecretFinding, type SecretPolicy } from '../secrets/guard.js';
 import { normalizeMarkdown, parseMarkdown, renderBlocks, type BlockKind, type ParsedBlock } from './parser.js';
 
 export interface BlockRow {
@@ -70,6 +71,8 @@ export interface PutDocumentResult {
   head: ChainHead;
   blocks: BlockSummary[];
   events: number;
+  /** 0.6.0: present when secrets: 'redact' replaced something before chaining. */
+  redactions?: SecretFinding[];
 }
 
 export interface SupersedeBlockResult {
@@ -79,6 +82,8 @@ export interface SupersedeBlockResult {
   doc_slug: string;
   revision: number;
   head: ChainHead;
+  /** 0.6.0: present when secrets: 'redact' replaced something before chaining. */
+  redactions?: SecretFinding[];
 }
 
 export interface TombstoneBlockResult {
@@ -362,7 +367,11 @@ export class DocumentStore {
     idempotency_key?: string;
     /** 0.4.0: provenance recorded in the document.put payload (`source`). */
     source?: DocumentSource;
+    /** 0.6.0: what to do with a detected secret (default refuse; nothing is chained). */
+    secrets?: SecretPolicy;
   }): PutDocumentResult {
+    const guarded = guardFields({ title: args.title, markdown: args.markdown }, args.secrets ?? 'refuse', `document ${args.slug}`);
+    args = { ...args, ...guarded.fields };
     if (!isValidSlug(args.slug)) {
       throw new DocumentError('invalid_slug', `slug must match ${SLUG_RE} or the namespaced form ${PATH_SLUG_RE}`);
     }
@@ -537,7 +546,8 @@ export class DocumentStore {
         events: pending.length,
       };
     });
-    return run.immediate();
+    const result = run.immediate();
+    return guarded.redactions.length > 0 ? { ...result, redactions: guarded.redactions } : result;
   }
 
   private describePut(putEvent: ChainEvent): PutDocumentResult {
@@ -567,7 +577,11 @@ export class DocumentStore {
     new_content: string;
     reason: string;
     actor_id: string;
+    /** 0.6.0: see putDocument. */
+    secrets?: SecretPolicy;
   }): SupersedeBlockResult {
+    const guarded = guardFields({ new_content: args.new_content, reason: args.reason }, args.secrets ?? 'refuse', `block content`);
+    args = { ...args, ...guarded.fields };
     const content = normalizeMarkdown(args.new_content).trim();
     if (content.length === 0) throw new DocumentError('empty_content', 'new_content is empty');
     const run = this.db.transaction((): SupersedeBlockResult => {
@@ -611,7 +625,8 @@ export class DocumentStore {
       const head = this.emitRevised(doc, revision, args.actor_id, 'supersede_block');
       return { old_block_id: old.block_id, new_block_id, content_hash, doc_slug: doc.slug, revision, head };
     });
-    return run.immediate();
+    const result = run.immediate();
+    return guarded.redactions.length > 0 ? { ...result, redactions: guarded.redactions } : result;
   }
 
   /**
@@ -636,7 +651,8 @@ export class DocumentStore {
     return run.immediate();
   }
 
-  tombstoneBlock(args: { block_id: string; reason: string; actor_id: string }): TombstoneBlockResult {
+  tombstoneBlock(args: { block_id: string; reason: string; actor_id: string; secrets?: SecretPolicy }): TombstoneBlockResult {
+    args = { ...args, ...guardFields({ reason: args.reason }, args.secrets ?? 'refuse', 'tombstone reason', 'reword the reason').fields };
     const run = this.db.transaction((): TombstoneBlockResult => {
       const old = this.requireLive(args.block_id);
       const doc = this.getDocumentById(old.doc_id)!;

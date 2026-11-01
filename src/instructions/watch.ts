@@ -29,6 +29,7 @@ import {
   type ResolvedContext,
   type WatchPattern,
 } from './paths.js';
+import type { SecretPolicy } from '../secrets/guard.js';
 import { syncInstructionFile, type SyncResult } from './sync.js';
 
 export interface WatchOptions extends InstructionContext {
@@ -41,6 +42,8 @@ export interface WatchOptions extends InstructionContext {
   /** Polling only; no fs.watch. */
   poll?: boolean;
   actor_id?: string;
+  /** 0.6.0: secret policy for every sync (default refuse). */
+  secrets?: SecretPolicy;
   onEvent?: (e: WatchEvent) => void;
 }
 
@@ -58,9 +61,13 @@ export function resolveWatchSet(opts: WatchOptions = {}): { rc: ResolvedContext;
 }
 
 /** One-shot: sync every file of the watch set (put --from-instructions). */
+function syncOpts(opts: WatchOptions): { actor_id?: string; secrets?: SecretPolicy } {
+  return { ...(opts.actor_id !== undefined ? { actor_id: opts.actor_id } : {}), ...(opts.secrets !== undefined ? { secrets: opts.secrets } : {}) };
+}
+
 export function syncInstructionSet(store: KronicleLite, opts: WatchOptions = {}): SyncResult[] {
   const { entries } = resolveWatchSet(opts);
-  return entries.map((e) => syncInstructionFile(store, e, opts.actor_id !== undefined ? { actor_id: opts.actor_id } : {}));
+  return entries.map((e) => syncInstructionFile(store, e, syncOpts(opts)));
 }
 
 export class InstructionWatcher {
@@ -143,7 +150,7 @@ export class InstructionWatcher {
     const entry = this.known.get(abs) ?? entryFor(abs, this.rc);
     this.known.set(abs, entry);
     this.stamps.set(abs, this.stamp(abs));
-    const result = syncInstructionFile(this.store, entry, this.opts.actor_id !== undefined ? { actor_id: this.opts.actor_id } : {});
+    const result = syncInstructionFile(this.store, entry, syncOpts(this.opts));
     if (trigger === 'start' || (result.action !== 'unchanged' && result.action !== 'missing')) {
       this.emit({ type: 'synced', result, trigger });
     }

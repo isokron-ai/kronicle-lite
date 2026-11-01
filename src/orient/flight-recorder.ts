@@ -65,6 +65,14 @@ export class FlightRecorder {
     return r ? fromRow(r) : null;
   }
 
+  /** 0.6.0: the actor's latest briefing issued at head `to_seq` (what a compact cursor points at). */
+  briefingAt(actor_id: string, to_seq: number): FlightRecord | null {
+    const r = this.db
+      .prepare(`SELECT * FROM flight_recorder WHERE actor_id = ? AND to_seq = ? ORDER BY issued_at DESC, rowid DESC LIMIT 1`)
+      .get(actor_id, to_seq) as Row | undefined;
+    return r ? fromRow(r) : null;
+  }
+
   findById(briefing_id: string): FlightRecord | null {
     const r = this.db.prepare(`SELECT * FROM flight_recorder WHERE briefing_id = ?`).get(briefing_id) as Row | undefined;
     return r ? fromRow(r) : null;

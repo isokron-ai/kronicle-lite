@@ -4,6 +4,10 @@
     {
       "name": "kronicle-lite",
       "command": ["node", "dist/cli.js", "serve", "--data-dir", ".mcp-catalog/.data"]
+    },
+    {
+      "name": "kronicle-lite-core",
+      "command": ["node", "dist/cli.js", "serve", "--core", "--data-dir", ".mcp-catalog/.data"]
     }
   ]
 }

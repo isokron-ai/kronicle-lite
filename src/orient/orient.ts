@@ -26,6 +26,7 @@ import {
   type DriftSignals,
   type StaleWriteAdvisory,
 } from './drift.js';
+import { scrubDeep } from '../secrets/guard.js';
 import { FlightRecorder } from './flight-recorder.js';
 import { computeRetractions, type Retraction } from './retraction.js';
 
@@ -119,8 +120,12 @@ export interface SystemState {
   source_drift: SourceDrift[] | null;
   /** 0.5.0: chain + live-block integrity over what this briefing read; null for focus=pulse. */
   integrity: IntegritySummary | null;
-  /** 0.5.0: project scoping applied to instruction retractions; null when unscoped. */
-  scope: { project_keys: string[]; hidden_retractions: number } | null;
+  /**
+   * 0.5.0: project scoping applied to instruction retractions; null when unscoped.
+   * 0.6.0 `verdict`: `partial` when retractions were hidden, so "no retractions"
+   * here is not a clean bill for the hidden projects.
+   */
+  scope: { project_keys: string[]; hidden_retractions: number; verdict: 'complete' | 'partial' } | null;
   delta: TypedDelta | null;
   retractions: Retraction[] | null;
   digest: Digest | null;
@@ -186,6 +191,30 @@ export class Orient {
       }
     }
     return composeStaleWriteAdvisory(this.driftSignals(actor_id, now, pos), this.rules);
+  }
+
+  /**
+   * 0.6.0: when the actor's current session started, for recall's attention
+   * rerank: the issue time of the briefing behind the cursor it presents (a
+   * full cursor carries it; a compact one is looked up in the flight
+   * recorder), else the actor's latest briefing. null when the actor never
+   * oriented. A cursor issued to another actor is ignored.
+   */
+  sessionStart(actor_id: string, cursor?: string | undefined): string | null {
+    if (cursor) {
+      try {
+        const parsed = parseAnyCursor(cursor, actor_id, this.secret);
+        if (parsed.form === 'full') {
+          if (parsed.body.actor_id === actor_id) return parsed.body.issued_at;
+        } else {
+          const b = this.recorder.briefingAt(actor_id, parsed.chain_seq);
+          if (b) return b.issued_at;
+        }
+      } catch {
+        // fall through to the flight recorder
+      }
+    }
+    return this.recorder.latestForActor(actor_id)?.issued_at ?? null;
   }
 
   recover(actor_id: string, since_cursor: string | undefined, head: ChainHead): Recovery {
@@ -356,16 +385,20 @@ export class Orient {
           const key = doc_id ? this.docs.getSource(doc_id)?.source.project?.key : undefined;
           return key === undefined || keys.has(key);
         });
-        scope = { project_keys: input.project.keys, hidden_retractions: all.length - retractions.length };
+        const hidden = all.length - retractions.length;
+        scope = { project_keys: input.project.keys, hidden_retractions: hidden, verdict: hidden > 0 ? 'partial' : 'complete' };
       } else {
         retractions = all;
       }
-      if (focus === 'orientation' || recovery.method === 'genesis') digest = this.digest();
+      // 0.6.0: read-time secret scrub on the text this briefing serves.
+      retractions = scrubDeep(retractions).value;
+      if (delta.entries.length > 0) delta = { ...delta, entries: scrubDeep(delta.entries).value };
+      if (focus === 'orientation' || recovery.method === 'genesis') digest = scrubDeep(this.digest()).value;
       source_drift = this.docs.listSourceDrift();
       integrity = this.quickIntegrity(recovery.from_seq, head);
     }
 
-    const next_steps = nextSteps({ focus, recovery, drift_banner, retractions, source_drift, integrity });
+    const next_steps = nextSteps({ focus, recovery, drift_banner, retractions, source_drift, integrity, scope });
     const lastAnchor = this.chain.lastAnchor();
     const anchor: AnchorSummary | null = lastAnchor
       ? {
@@ -430,6 +463,7 @@ function nextSteps(args: {
   retractions: Retraction[] | null;
   source_drift: SourceDrift[] | null;
   integrity: IntegritySummary | null;
+  scope?: SystemState['scope'];
 }): string[] {
   const steps: string[] = [];
   if (args.integrity && !args.integrity.ok) {
@@ -452,6 +486,11 @@ function nextSteps(args: {
   if (args.retractions && args.retractions.length > 0) {
     steps.push(
       `Reconcile ${args.retractions.length} retraction(s)${safety ? ` (${safety} safety)` : ''} BEFORE acting: for each, affirm the current truth (cite seq), name the old claim once, and drop it as a decision premise.`,
+    );
+  }
+  if (args.scope && args.scope.verdict === 'partial') {
+    steps.push(
+      `${args.scope.hidden_retractions} instruction retraction(s) from other projects were hidden and not reviewed: this briefing is not a clean bill for those projects (pass all_projects: true to see them).`,
     );
   }
   if (args.source_drift && args.source_drift.length > 0) {

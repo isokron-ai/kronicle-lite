@@ -4,7 +4,7 @@
  */
 
 export { KronicleLite, type KronicleLiteOptions } from './store.js';
-export { createServer, createServerFactory, renderSystemStateMarkdown, anchorLine, INSTRUCTIONS, CACHE_HINTS, type ServerOptions } from './server.js';
+export { createServer, createServerFactory, renderSystemStateMarkdown, anchorLine, INSTRUCTIONS, CACHE_HINTS, CORE_TOOLS, type ServerOptions } from './server.js';
 export { serveHttp, createHttpListener, loadOrCreateBearer, DEFAULT_HTTP_PORT, DEFAULT_HTTP_PATH, type HttpServeOptions, type HttpServeHandle } from './http.js';
 export * as toolSchemas from './schemas.js';
 export * from './chain/index.js';
@@ -42,7 +42,37 @@ export {
 } from './docs/integrity.js';
 export { parseMarkdown, renderBlocks, normalizeMarkdown, type ParsedBlock, type BlockKind } from './docs/parser.js';
 export * from './recall/receipt.js';
-export { Recall, toMatchExpression, type RecallInput, type RecallResult, type RecallHit, type WithheldHit } from './recall/recall.js';
+export { Recall, toMatchExpression, applyContentBudget, DEFAULT_MAX_CHARS, type RecallInput, type RecallResult, type RecallHit, type WithheldHit } from './recall/recall.js';
+export {
+  AUTHORITIES,
+  AUTHORITY_BASES,
+  AUTHORITY_REASONS,
+  HONESTY_RULES,
+  SOURCE_CHECKS,
+  resolveAuthority,
+  authorityFloor,
+  type Authority,
+  type AuthorityBasis,
+  type AuthorityReason,
+  type Honesty,
+  type HonestyInput,
+  type SourceCheck as BlockSourceCheck,
+} from './recall/honesty.js';
+export { certifyRecallAbsence, indexFreshness, RECALL_SCOPES, ABSENCE_VERDICTS, type Absence, type AbsenceVerdict, type RecallScope } from './recall/absence.js';
+export { attentionRerank, READ_WEIGHT } from './recall/attention.js';
+export { SourceChecker, sourceFileOf } from './recall/source-check.js';
+export {
+  scanForSecrets,
+  redactSecrets,
+  scrubForRead,
+  scrubDeep,
+  scanValue,
+  guardFields,
+  SecretDetectedError,
+  WRITE_DETECTORS,
+  type SecretFinding,
+  type SecretPolicy,
+} from './secrets/guard.js';
 export { ReceiptVerifier, VERIFY_REASONS, VERIFY_STATUSES, type VerifyResult, type VerifyStatus, type VerifyReason } from './recall/verify-receipt.js';
 export * from './orient/index.js';
 export * as anchor from './anchor/index.js';
@@ -50,7 +80,7 @@ export * as instructions from './instructions/index.js';
 export { InstructionWatcher, syncInstructionSet, resolveWatchSet, type WatchOptions, type WatchEvent } from './instructions/watch.js';
 export { syncInstructionFile, type SyncResult } from './instructions/sync.js';
 export { runDoctor, renderDoctor, findMcpClients, type DoctorReport, type DoctorCheck, type DoctorOptions, type CheckStatus } from './doctor.js';
-export { CATALOG_FINGERPRINT, CATALOG_VERSION, liveCatalogFingerprint } from './catalog.js';
+export { CATALOG_FINGERPRINT, CORE_CATALOG_FINGERPRINT, CATALOG_VERSION, liveCatalogFingerprint } from './catalog.js';
 export { bindGit, checkGitBinding, diffStat, type BindResult, type SourceCheck, type DiffStat } from './git/binding.js';
 export {
   pushCheckpoint,

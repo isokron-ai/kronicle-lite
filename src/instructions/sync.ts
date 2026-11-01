@@ -11,6 +11,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { blake3Hex } from '../crypto/hash.js';
 import { normalizeMarkdown } from '../docs/parser.js';
 import type { ChainHead } from '../chain/chain.js';
+import { redactSecrets, type SecretPolicy } from '../secrets/guard.js';
 import type { KronicleLite } from '../store.js';
 import type { InstructionEntry } from './paths.js';
 
@@ -76,7 +77,13 @@ function readText(path: string): { text: string } | { missing: true } | { tooLar
   }
 }
 
-export function syncInstructionFile(store: KronicleLite, entry: InstructionEntry, opts: { actor_id?: string } = {}): SyncResult {
+/**
+ * 0.6.0: `secrets` (default `refuse`) applies the write-time secret guard. A
+ * refused file syncs as `action: 'error'` (`secret_detected: …`) and nothing is
+ * chained; `redact` chains a redacted copy and compares the redacted text on
+ * later syncs, so an unchanged file stays `unchanged`.
+ */
+export function syncInstructionFile(store: KronicleLite, entry: InstructionEntry, opts: { actor_id?: string; secrets?: SecretPolicy } = {}): SyncResult {
   const actor_id = opts.actor_id ?? 'instructions';
   const base: Pick<SyncResult, 'slug' | 'path' | 'kind' | 'created' | 'superseded' | 'tombstoned' | 'migrated_from'> = {
     slug: entry.slug,
@@ -105,7 +112,8 @@ export function syncInstructionFile(store: KronicleLite, entry: InstructionEntry
       removing = true;
     } else {
       markdown = read.text;
-      const hash = blake3Hex(normalizeMarkdown(markdown));
+      const stored = opts.secrets === 'redact' ? redactSecrets(markdown).text : markdown;
+      const hash = blake3Hex(normalizeMarkdown(stored));
       const src = existing ? store.docs.getSource(existing.doc_id) : null;
       if (
         existing &&
@@ -122,6 +130,7 @@ export function syncInstructionFile(store: KronicleLite, entry: InstructionEntry
       markdown,
       actor_id,
       source: { kind: entry.kind, path: entry.recordPath, ...(entry.project ? { project: entry.project } : {}) },
+      ...(opts.secrets !== undefined ? { secrets: opts.secrets } : {}),
     });
     let created = 0;
     let superseded = 0;

@@ -45,7 +45,7 @@ describe('recall re-hashes what it serves', () => {
     const { store, hit } = tampered();
     const r = store.recall.recall({ query: 'canary cluster' });
     expect(r.hits.map((h) => h.content).join('\n')).not.toContain('prod-db-DROP');
-    expect(r.withheld).toEqual([{ block_id: hit.block_id, doc_slug: 'runbook', problem: 'content_hash_mismatch' }]);
+    expect(r.withheld).toEqual([{ block_id: hit.block_id, doc_slug: 'runbook', problem: 'content_hash_mismatch', authority: 'never_act', authority_reason: 'integrity_failed' }]);
     expect(store.db.prepare(`SELECT COUNT(*) n FROM receipts WHERE block_id = ?`).get(hit.block_id)).toEqual({ n: 1 }); // only the pre-tamper one
     store.close();
   });
@@ -262,6 +262,12 @@ describe('first run', () => {
       /verify\(receipt\) → UNVERIFIED \(content_tampered\)/,
       /INTEGRITY FAILURE/,
       /rebuild → replayed \d+ event\(s\); projection matches the chain/,
+      // 0.6.0: honest labels
+      /refused: secret_detected: aws_access_key \(markdown line \d+\)/,
+      /nothing chained \(head seq still \d+\)/,
+      /recall "kubernetes namespace" → 0 hit\(s\): absent_in_searched/,
+      /not searched: tombstoned_blocks, superseded_blocks/,
+      /authority inspect_only \(no_source\)/,
       /hash_mismatch at seq 1/,
     ]) {
       expect(r.stdout).toMatch(line);

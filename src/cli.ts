@@ -2,18 +2,18 @@
 /**
  * kronicle-lite CLI
  *
- *   kronicle-lite serve [--data-dir DIR] [--actor ID]   stdio MCP server (dual-era: 2026-07-28 + 2025 initialize)
+ *   kronicle-lite serve [--data-dir DIR] [--actor ID] [--core]   stdio MCP server (dual-era: 2026-07-28 + 2025 initialize)
  *   kronicle-lite serve --http [--port N] [--host H] [--bearer T | --bearer-file F] [--modern-only]   Streamable HTTP
  *   kronicle-lite verify-chain [--data-dir DIR] [--from N] [--to N]
  *   kronicle-lite checkpoint [--data-dir DIR] [--from N] [--to N] [--push [--key K] [--url U]]
  *   kronicle-lite verify [--remote [--offline] [--url U] [--json]]   local by default (= verify-chain)
  *   kronicle-lite anchor status [--url U] [--json]
  *   kronicle-lite export [--data-dir DIR] [--out FILE]  JSONL of events (stdout default)
- *   kronicle-lite import [--data-dir DIR] --in FILE     into an empty store
+ *   kronicle-lite import [--data-dir DIR] --in FILE [--allow-secrets]   into an empty store
  *   kronicle-lite keys [--data-dir DIR]                 show key id + public key
- *   kronicle-lite put SLUG FILE.md [--title T] [--data-dir DIR] [--bind-git]
+ *   kronicle-lite put SLUG FILE.md [--title T] [--data-dir DIR] [--bind-git] [--redact-secrets]
  *   kronicle-lite put --from-instructions [PATHS…] [--cwd DIR] [--json] [--stdin-hook]
- *   kronicle-lite watch [PATHS…] [--interval MS] [--debounce MS] [--poll] [--cwd DIR] [--list [--json]]
+ *   kronicle-lite watch [PATHS…] [--interval MS] [--debounce MS] [--poll] [--cwd DIR] [--redact-secrets] [--list [--json]]
  *   kronicle-lite doctor [--json] [--no-network] [--full] [--cwd DIR]
  *   kronicle-lite orient [--data-dir DIR] [--actor ID] [--cursor C] [--focus F] [--all-projects]
  *   kronicle-lite verify-chain [--full] | rebuild | demo [--dir D] [--keep]
@@ -67,6 +67,9 @@ const BOOLEAN_FLAGS = new Set([
   'keep',
   'all-projects',
   'modern-only',
+  'core',
+  'redact-secrets',
+  'allow-secrets',
 ]);
 
 function parseArgs(argv: string[]): Args {
@@ -116,7 +119,8 @@ function num(v: string | true | undefined): number | undefined {
 const HELP = `kronicle-lite ${VERSION} — hash-chained document store with signed receipts and an orient protocol
 
 Usage:
-  kronicle-lite serve        [--data-dir DIR] [--actor ID]        run the stdio MCP server
+  kronicle-lite serve        [--data-dir DIR] [--actor ID] [--core]
+                                                                 run the stdio MCP server (--core: 6 tools for small contexts)
   kronicle-lite serve --http [--port N] [--host H] [--bearer T | --bearer-file F] [--allow-origin H]... [--modern-only]
                                                                  Streamable HTTP, 127.0.0.1:${DEFAULT_HTTP_PORT}/mcp, bearer from
                                                                  DIR/http-bearer.token (created 0600); 2026-07-28 and 2025-era
@@ -134,17 +138,21 @@ Usage:
                                                                  range, exit 1 on "local chain diverges from anchor at [a,b]"
   kronicle-lite anchor status [--url U] [--json]                 last anchor, its status, events since (no network)
   kronicle-lite export       [--data-dir DIR] [--out FILE]        JSONL of all events (stdout by default)
-  kronicle-lite import       [--data-dir DIR] --in FILE           rebuild an EMPTY store from JSONL
+  kronicle-lite import       [--data-dir DIR] --in FILE [--allow-secrets]
+                                                                 rebuild an EMPTY store from JSONL; refused when an event
+                                                                 holds a secret unless --allow-secrets (imported verbatim)
   kronicle-lite keys         [--data-dir DIR]                     print key id + public key PEM
   kronicle-lite put SLUG FILE.md [--title T] [--data-dir DIR] [--json]
                                                                  store a document (one-line summary; --json for every block)
                  [--bind-git]                                    record {repo_root, commit, path, blob_sha}; verify and
                                                                  audit report stale_source when the file changes
-  kronicle-lite put --from-instructions [PATHS…] [--cwd DIR] [--json]
+                 [--redact-secrets]                              store a redacted copy instead of refusing a detected secret
+                                                                 (put, put --from-instructions and watch refuse by default)
+  kronicle-lite put --from-instructions [PATHS…] [--cwd DIR] [--json] [--redact-secrets]
                                                                  chain CLAUDE.md, AGENTS.md, .claude/rules/**/*.md,
                                                                  .cursor/rules/** and Claude Code auto memory (one shot)
                  [--stdin-hook]                                  as a Claude Code SessionStart / FileChanged hook
-  kronicle-lite watch [PATHS…] [--interval MS] [--debounce MS] [--poll] [--cwd DIR]
+  kronicle-lite watch [PATHS…] [--interval MS] [--debounce MS] [--poll] [--cwd DIR] [--redact-secrets]
                                                                  re-put instruction files on change (fs.watch + polling)
                  [--list [--json]]                               print the resolved watch set and exit
   kronicle-lite doctor       [--data-dir DIR] [--json] [--no-network] [--full] [--cwd DIR]
@@ -188,6 +196,8 @@ async function main(argv: string[]): Promise<number> {
       const store = new KronicleLite({ dataDir });
       const factory = createServerFactory(store, {
         version: VERSION,
+        // 0.6.0: --core serves the 6-tool profile (orient, audit, recall, verify, put, supersede).
+        ...(flags['core'] === true ? { profile: 'core' as const } : {}),
         ...(str(flags['actor']) !== undefined ? { defaultActorId: str(flags['actor'])! } : {}),
         // 0.5.0: orient hides other projects' instruction retractions (the project is the working directory's).
         project: flags['all-projects'] === true ? null : projectScopeFor(instructionCtx(flags)),
@@ -377,7 +387,8 @@ async function main(argv: string[]): Promise<number> {
       if (!file) throw new Error('import requires --in FILE');
       if (!existsSync(file)) throw new Error(`cannot read ${file}: ENOENT`);
       const store = new KronicleLite({ dataDir });
-      const r = await store.importEvents(createReadStream(file));
+      const r = await store.importEvents(createReadStream(file), { allow_secrets: flags['allow-secrets'] === true });
+      if (flags['allow-secrets'] === true) process.stderr.write('warning: --allow-secrets: any secret in the export is now chained verbatim (the read-time scrub masks it in recall)\n');
       process.stdout.write(`imported ${r.events} events; head seq ${r.head.seq} hash ${r.head.hash}\n`);
       store.close();
       return 0;
@@ -414,8 +425,10 @@ async function main(argv: string[]): Promise<number> {
         markdown,
         actor_id: str(flags['actor']) ?? 'cli',
         ...(source !== undefined ? { source } : {}),
+        ...(flags['redact-secrets'] === true ? { secrets: 'redact' as const } : {}),
       });
       for (const w of warnings) process.stderr.write(`warning: ${w}\n`);
+      if (r.redactions) process.stderr.write(`warning: redacted ${r.redactions.length} secret(s) before chaining: ${r.redactions.map((f) => `${f.detector} (line ${f.line})`).join(', ')}\n`);
       if (flags['json'] === true) {
         process.stdout.write(JSON.stringify({ ...r, ...(source !== undefined ? { source } : {}), ...(warnings.length > 0 ? { warnings } : {}) }, null, 2) + '\n');
       } else {
@@ -492,6 +505,7 @@ function instructionCtx(flags: Record<string, string | true>, cwdOverride?: stri
  */
 async function putFromInstructions(dataDir: string, positional: string[], flags: Record<string, string | true>): Promise<number> {
   const actor = str(flags['actor']) ?? 'instructions';
+  const secrets = flags['redact-secrets'] === true ? { secrets: 'redact' as const } : {};
   if (flags['stdin-hook'] === true) {
     let input: { hook_event_name?: string; file_path?: string; cwd?: string } = {};
     try {
@@ -504,13 +518,13 @@ async function putFromInstructions(dataDir: string, positional: string[], flags:
     try {
       if (input.hook_event_name === 'FileChanged' && typeof input.file_path === 'string') {
         const rc = resolveContext(ctx);
-        const r = syncInstructionFile(store, entryFor(input.file_path, rc), { actor_id: actor });
+        const r = syncInstructionFile(store, entryFor(input.file_path, rc), { actor_id: actor, ...secrets });
         if (r.action !== 'unchanged' && r.action !== 'missing') {
           process.stdout.write(JSON.stringify({ systemMessage: `kronicle-lite: ${describeSync(r)}` }) + '\n');
         }
         return 0;
       }
-      const results = syncInstructionSet(store, { ...ctx, actor_id: actor });
+      const results = syncInstructionSet(store, { ...ctx, actor_id: actor, ...secrets });
       const { entries, patterns } = resolveWatchSet(ctx);
       const watchPaths = [...new Set([...entries.map((e) => e.path), ...patterns.filter((p) => p.type === 'file').map((p) => p.path)])];
       const changed = results.filter((r) => r.action !== 'unchanged' && r.action !== 'missing');
@@ -530,7 +544,7 @@ async function putFromInstructions(dataDir: string, positional: string[], flags:
   }
   const store = new KronicleLite({ dataDir });
   try {
-    const results: SyncResult[] = syncInstructionSet(store, { ...instructionCtx(flags), paths: positional, actor_id: actor });
+    const results: SyncResult[] = syncInstructionSet(store, { ...instructionCtx(flags), paths: positional, actor_id: actor, ...secrets });
     if (flags['json']) process.stdout.write(JSON.stringify({ results, head: store.chain.head() }, null, 2) + '\n');
     else if (results.length === 0) process.stdout.write('no instruction files found\n');
     else for (const r of results) process.stdout.write(describeSync(r) + '\n');
@@ -571,6 +585,7 @@ async function watchCommand(dataDir: string, positional: string[], flags: Record
     ...ctx,
     paths: positional,
     actor_id: str(flags['actor']) ?? 'watch',
+    ...(flags['redact-secrets'] === true ? { secrets: 'redact' as const } : {}),
     ...(num(flags['interval']) !== undefined ? { intervalMs: num(flags['interval'])! } : {}),
     ...(num(flags['debounce']) !== undefined ? { debounceMs: num(flags['debounce'])! } : {}),
     poll: flags['poll'] === true,

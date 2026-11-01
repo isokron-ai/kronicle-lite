@@ -11,7 +11,7 @@
  *   - src/orient/drift.ts         DriftBanner, StaleWriteAdvisory
  *   - src/orient/retraction.ts    Retraction
  *   - src/orient/audit.ts         AuditSummary, AuditResult
- *   - src/recall/recall.ts        RecallResult, RecallHit
+ *   - src/recall/recall.ts        RecallResult, RecallHit (0.6.0: honesty.ts, absence.ts)
  *   - src/recall/receipt.ts       Receipt
  *   - src/recall/verify-receipt.ts VerifyResult
  *   - src/chain/chain.ts          ChainHead, Checkpoint, VerifyChainResult
@@ -28,6 +28,8 @@ import { ReceiptSchema } from './recall/receipt.js';
 import { FOCUSES, RECOVERY_METHODS } from './orient/orient.js';
 import { RETRACTION_KINDS } from './orient/retraction.js';
 import { ROW_PROBLEMS } from './docs/integrity.js';
+import { ABSENCE_VERDICTS, RECALL_SCOPES } from './recall/absence.js';
+import { AUTHORITIES, AUTHORITY_BASES, AUTHORITY_REASONS } from './recall/honesty.js';
 
 // ───────────────────────────── lean JSON Schema (0.5.0) ─────────────────────────────
 
@@ -268,7 +270,13 @@ export const SystemStateSchema = z.object({
   integrity: z
     .object({ ok: z.boolean(), events_checked: z.number().int().nonnegative(), blocks_checked: z.number().int().nonnegative(), problem: z.string().nullable() })
     .nullable(),
-  scope: z.object({ project_keys: z.array(z.string()), hidden_retractions: z.number().int().nonnegative() }).nullable(),
+  scope: z
+    .object({
+      project_keys: z.array(z.string()),
+      hidden_retractions: z.number().int().nonnegative(),
+      verdict: z.enum(['complete', 'partial']).describe('partial: retractions were hidden, so "none" is not a clean bill for them.'),
+    })
+    .nullable(),
   delta: TypedDeltaSchema.nullable().describe('null for focus=retractions and focus=pulse.'),
   retractions: z.array(RetractionSchema).nullable().describe('null for focus=pulse.'),
   digest: DigestSchema.nullable().describe('Present on cold start and focus=orientation.'),
@@ -314,6 +322,23 @@ export const RecallHitSchema = z.object({
   superseded_by: z.string().nullable(),
   tombstone_reason: z.string().nullable(),
   receipt: ReceiptSchema.nullable().describe('Signed receipt v2; null when include_receipts=false.'),
+  authority: z.enum(AUTHORITIES).describe('0.6.0: can_act only from block-level evidence (docs/HONESTY.md).'),
+  authority_reason: z.enum(AUTHORITY_REASONS),
+  authority_basis: z.enum(AUTHORITY_BASES),
+  already_read: z.boolean().describe('Read by this actor this session; ranked lower, never hidden.'),
+  read_scrubbed: z.array(z.string()).optional().describe('Read-time secret rules that masked part of the content.'),
+  truncated: z
+    .object({ shown_chars: z.number().int().nonnegative(), total_chars: z.number().int().nonnegative(), read: z.string() })
+    .optional()
+    .describe('Content cut to fit max_chars; `read` is the whole document. The receipt covers the whole block.'),
+});
+
+export const AbsenceSchema = z.object({
+  searched: z.array(z.enum(RECALL_SCOPES)),
+  not_searched: z.array(z.enum(RECALL_SCOPES)),
+  index_fresh: z.boolean(),
+  verdict: z.enum(ABSENCE_VERDICTS).describe('found | absent_in_searched (fresh index, nothing withheld) | cannot_certify'),
+  reason: z.string(),
 });
 
 export const RecallResultSchema = z.object({
@@ -322,7 +347,19 @@ export const RecallResultSchema = z.object({
   head: ChainHeadSchema,
   match_mode: z.enum(['all_terms', 'any_term', 'none']),
   hits: z.array(RecallHitSchema),
-  withheld: z.array(z.object({ block_id: z.string(), doc_slug: z.string(), problem: z.enum(ROW_PROBLEMS) })),
+  withheld: z.array(
+    z.object({
+      block_id: z.string(),
+      doc_slug: z.string(),
+      problem: z.enum(ROW_PROBLEMS),
+      authority: z.literal('never_act'),
+      authority_reason: z.literal('integrity_failed'),
+    }),
+  ),
+  authority_floor: z.enum(AUTHORITIES).nullable().describe('Meet of the hits\' authority; null when there are no hits.'),
+  absence: AbsenceSchema,
+  attention: z.object({ actor_id: z.string(), session_since: z.string(), already_read: z.number().int().nonnegative() }).nullable(),
+  truncated: z.object({ hits: z.number().int().positive(), max_chars: z.number().int().positive(), hint: z.string() }).nullable(),
 });
 
 export const VerifyResultSchema = z.object({
@@ -434,6 +471,8 @@ export const AnchorStatusResultSchema = z.object({
   }),
 });
 
+export const SecretFindingSchema = z.object({ field: z.string(), detector: z.string(), line: z.number().int().positive() });
+
 export const BlockSummarySchema = z.object({
   block_id: z.string(),
   ordinal: z.number().int().nonnegative(),
@@ -470,6 +509,7 @@ export const PutDocumentResultSchema = z.object({
   events: z.number().int().nonnegative().describe('Events appended by this call (0 on idempotent replay).'),
   source: DocumentSourceSchema.optional(),
   warnings: z.array(z.string()).optional().describe('Non-fatal notes, e.g. bind_git outside a git repository.'),
+  redactions: z.array(SecretFindingSchema).optional().describe('0.6.0: secrets replaced before chaining (redact_secrets).'),
   stale_write_advisory: StaleWriteAdvisorySchema,
 });
 
@@ -480,6 +520,7 @@ export const SupersedeBlockResultSchema = z.object({
   doc_slug: z.string(),
   revision: z.number().int().positive(),
   head: ChainHeadSchema,
+  redactions: z.array(SecretFindingSchema).optional().describe('0.6.0: secrets replaced before chaining (redact_secrets).'),
   stale_write_advisory: StaleWriteAdvisorySchema,
 });
 

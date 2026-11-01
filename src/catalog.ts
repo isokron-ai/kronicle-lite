@@ -19,9 +19,11 @@ import { sha256Hex } from './crypto/hash.js';
 import { createServerFactory } from './server.js';
 import { KronicleLite } from './store.js';
 
-export const CATALOG_FINGERPRINT = '7eed4b72e51af9da660f2a0af4749205791f67338e632104819009600257337f';
+export const CATALOG_FINGERPRINT = '0c25eb80d24f3cecab677dabcfc139f970c0440391a53539d5a820bb265e5e64';
 /** Package version the fingerprint above was pinned for. */
 export const CATALOG_VERSION = '0.5.0';
+/** 0.6.0: the `serve --core` catalog (.mcp-catalog/kronicle-lite-core.json). */
+export const CORE_CATALOG_FINGERPRINT = '47b3f289201a66ec3983fc82e60d355af1da1869a6563ed00efb55f5e0227b42';
 
 const MODERN = '2026-07-28';
 
@@ -38,9 +40,9 @@ function byKey<T extends Record<string, unknown>>(key: string) {
  * in-memory store) through the same SDK entry `serve --http` uses, and
  * fingerprint the result.
  */
-export async function liveCatalogFingerprint(): Promise<{ fingerprint: string; tools: number; resourceTemplates: number }> {
+export async function liveCatalogFingerprint(opts: { profile?: 'full' | 'core' } = {}): Promise<{ fingerprint: string; tools: number; resourceTemplates: number }> {
   const store = new KronicleLite({ memory: true });
-  const handler = createMcpHandler(createServerFactory(store), {});
+  const handler = createMcpHandler(createServerFactory(store, opts.profile !== undefined ? { profile: opts.profile } : {}), {});
   try {
     const call = async (method: string): Promise<Record<string, unknown>> => {
       const res = await handler.fetch(

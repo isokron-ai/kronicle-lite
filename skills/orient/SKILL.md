@@ -51,7 +51,9 @@ your beliefs aligned with what the store actually says now.
       to learn the current truth. Reconcile EACH before acting on the
       touched documents (step 4). Instruction retractions from other
       projects are hidden (`scope.hidden_retractions`); pass
-      `all_projects: true` only when the operator asks.
+      `all_projects: true` only when the operator asks. When
+      `scope.verdict` is `partial`, "no retractions" covers this project
+      only: the hidden ones were not reviewed, not cleared.
    4. `delta.entries` — what changed since your cursor, oldest first.
       Rollups (`volume_rollup`) carry a count and the most recent sample;
       nothing has been dropped, only folded.
@@ -112,6 +114,42 @@ in the session — and always before writing — call `verify(receipt)`:
 listed under `withheld` instead. A non-empty `withheld` is an integrity
 failure too.
 
+## Honest labels on recall (0.6.0)
+
+Read the label before the text. Full table: `docs/HONESTY.md`.
+
+- `authority: can_act` — the block's exact text is in its recorded source
+  file right now. You may act on it (still keep the receipt).
+- `authority: inspect_only` — reason with it, but verify before acting
+  (check the source, ask the operator, or `audit_assumptions`). This is the
+  normal label for notes put without a source file, for anything resting on
+  document-level provenance only, and for model-written memory.
+- `authority: never_act` — do not act on it. `superseded` / `tombstoned`:
+  recall the successor or drop the claim. `not_in_source` /
+  `source_missing`: the file moved on; re-read the file. `integrity_failed`
+  (under `withheld`): stop, tell the operator.
+- `authority_floor` is the weakest label in the result. Plan by the floor
+  when you combine hits; it is `null` for an empty result.
+- `absence.verdict`: `absent_in_searched` means "not in the scopes listed in
+  `searched`, with a fresh index" — say it that way, and name
+  `not_searched` if it matters. `cannot_certify` means no conclusion: do not
+  report "not found". Never turn an empty result into "it doesn't exist".
+- Pass your `cursor` to `recall`: blocks you already read this session come
+  back with `already_read: true` and rank lower (never hidden).
+- `truncated` on a hit: the content was cut to fit `max_chars`; read the
+  `truncated.read` resource or raise `max_chars` before quoting it whole.
+
+## Secrets
+
+Never put credentials into the store. `put_document` / `supersede_block`
+refuse text holding an API key, token, private key or password-bearing
+connection string (`secret_detected`, with detector and line): the chain is
+append-only, and a tombstone cannot erase what was chained. Replace the
+value with a reference (`${ENV_VAR}`, "stored in the vault") and put again.
+Use `redact_secrets: true` only when the operator wants a redacted copy
+stored. A `read_scrubbed` field on a hit means a secret was masked on the
+way out: tell the operator, it should not be in the store.
+
 ## Stale-write advisory
 
 Write tools return `stale_write_advisory`. It never blocks the write. If
@@ -132,7 +170,11 @@ Orient before the next write and re-check anything the delta touched.
   `presented_stale`, `flight_recorder`, `genesis`).
 - `recall`: bm25 over live blocks; superseded blocks are never returned,
   tombstoned only with `include_tombstoned`; `include_receipts: false`
-  for a lean result.
+  for a lean result (no receipt is stored, so the read is not remembered
+  for `already_read`); `max_chars` (default 16000) bounds the content.
+- Small context? The operator can run `kronicle-lite serve --core`: six
+  tools (`get_system_state`, `audit_assumptions`, `recall`, `verify`,
+  `put_document`, `supersede_block`).
 - `verify`: malformed input yields `UNVERIFIED / malformed_receipt`, never
   a tool error. `SUPERSEDED` carries `current_block_id` and
   `current_content_hash`; `STALE_SOURCE` carries `source_drift`.

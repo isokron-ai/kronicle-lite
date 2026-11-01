@@ -10,7 +10,10 @@
  *   5. someone edits the database directly: recall withholds the text,
  *      verify says UNVERIFIED, verify-chain fails, orient raises an
  *      integrity banner;  6. rebuild from the chain repairs it;
- *   7. an edit to the chain itself is caught at its seq.
+ *   7. (0.6.0) honest labels: a put holding an API key is refused before
+ *      anything is chained; an empty recall says what it searched and what
+ *      it did not; a hit says whether it may be acted on;
+ *   8. an edit to the chain itself is caught at its seq.
  *
  * Every step is also checked; the exit code is 1 if the story did not play
  * out as printed (so the demo doubles as a smoke test of a fresh install).
@@ -22,6 +25,7 @@ import { join } from 'node:path';
 import type { Writable } from 'node:stream';
 
 import { describeProjection } from './docs/integrity.js';
+import { SecretDetectedError } from './secrets/guard.js';
 import { KronicleLite } from './store.js';
 
 export interface DemoOptions {
@@ -131,7 +135,36 @@ export function runDemo(opts: DemoOptions): number {
 
     // 7 ─────────────────────────────────────────────
     say();
-    say('7. Editing the chain itself is caught at the exact event.');
+    say('7. Honest labels: a secret is refused before it is chained; an empty answer says what it means.');
+    // Assembled at runtime so no secret-shaped literal sits in the source.
+    const fakeKey = ['AKIA', 'ZQ7W3XKD9PL2M4NB'].join('');
+    const creds = `# Bucket access\n\nThe deploy bot uses key ${fakeKey} for the artifacts bucket.\n`;
+    writeFileSync(join(dir, 'creds.md'), creds);
+    const before = store.chain.head().seq;
+    let refused: SecretDetectedError | null = null;
+    try {
+      store.docs.putDocument({ slug: 'creds', title: 'Bucket access', markdown: creds, actor_id: 'agent' });
+    } catch (err) {
+      if (err instanceof SecretDetectedError) refused = err;
+      else throw err;
+    }
+    const after = store.chain.head().seq;
+    expect(refused !== null && after === before, 'secret refused, nothing chained');
+    say(`   $ kronicle-lite put creds creds.md            (creds.md holds an AWS access key)`);
+    say(`   refused: secret_detected: ${refused?.findings.map((f) => `${f.detector} (${f.field} line ${f.line})`).join(', ') ?? '(not refused!)'}; nothing chained (head seq still ${after})`);
+    say('   (the chain is append-only: a tombstone could hide the block, never erase the key; --redact-secrets stores a redacted copy)');
+    const miss = store.recall.recall({ query: 'kubernetes namespace' });
+    expect(miss.hits.length === 0 && miss.absence.verdict === 'absent_in_searched', 'honest absence');
+    say(`   recall "kubernetes namespace" → ${miss.hits.length} hit(s): ${miss.absence.verdict} — ${miss.absence.reason}`);
+    say(`   (absent from what was searched, with a fresh index; a stale or cold index would answer cannot_certify instead)`);
+    const labelled = store.recall.recall({ query: 'staging cluster' }).hits[0];
+    expect(labelled?.authority === 'inspect_only' && labelled.authority_reason === 'no_source', 'hit labelled inspect_only / no_source');
+    say(`   recall "staging cluster" → authority ${labelled?.authority} (${labelled?.authority_reason}): stored without a source file, so read it, verify before acting`);
+    say('   (put with --bind-git and the same hit is can_act while the file still holds that exact text)');
+
+    // 8 ─────────────────────────────────────────────
+    say();
+    say('8. Editing the chain itself is caught at the exact event.');
     store.db.prepare(`UPDATE events SET payload_canonical = replace(payload_canonical, 'stg-west-2', 'stg-west-9') WHERE seq = 1`).run();
     const vc2 = store.chain.verify();
     expect(!vc2.ok && vc2.first_mismatch?.seq === 1, 'chain edit caught at seq 1');

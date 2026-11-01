@@ -102,6 +102,7 @@ a forged cursor just makes the server fall back to the flight recorder.
 **No confidentiality.** Nothing is encrypted. Block content, document markdown,
 receipts and the flight recorder are plaintext in the SQLite file and in the
 chain payloads. Treat the data dir like any other private file (`0700`).
+See "Secrets" below for what keeps credentials out in the first place.
 
 **No access control, no multi-tenancy.** `actor_id` is a label the caller
 supplies. It drives per-actor orient state (cursor binding, flight recorder,
@@ -159,6 +160,51 @@ server user can read. On stdio that is the same user as the client; over
 and writes the whole store. `STALE_SOURCE` says the file changed since it
 was bound; it does not say who changed it, and a working tree is as
 writable as the database next to it.
+
+## Secrets (0.6.0)
+
+**Why refuse at write time.** The chain is append-only and every byte of a
+put (title, markdown, block content, reasons) is hashed into an event. A
+`tombstone_block` hides a block from `recall`; the secret stays in the
+`events` table, in every `export`, in every backup and in any anchored copy,
+and removing it from the events breaks `verify-chain` by design (that is the
+point of the chain). There is no "delete" that keeps the guarantees. So the
+only safe moment to stop a credential is before it is chained.
+
+**What runs, where.**
+
+| path | default | override |
+|---|---|---|
+| `put_document`, `supersede_block` (MCP) | refuse: `secret_detected` with `{field, detector, line}` findings, nothing appended | `redact_secrets: true` chains a copy with `[REDACTED:<detector>]` and returns `redactions` |
+| `tombstone_block` reason | refuse | reword the reason |
+| `kronicle-lite put`, `put --from-instructions`, `watch` | refuse (exit 1; a refused instruction file syncs as `error`) | `--redact-secrets` (an unchanged file then stays `unchanged`; no re-put loop) |
+| `kronicle-lite import` | refuse the whole import, nothing committed | `--allow-secrets` imports **verbatim**: chained bytes cannot be redacted without breaking their hashes |
+| everything served (`recall` content, orient retractions and delta payloads, `audit_assumptions`, `kronicle://docs/{slug}`) | independent read-time scrub: `[REDACTED:read:<rule>]`; a hit says `read_scrubbed` and loses `can_act` | none |
+
+The write ruleset aims at precision so a refusal is worth reading: provider
+token shapes (AWS, GitHub, GitLab, Anthropic, OpenAI, Slack, Stripe, Google,
+npm, Vault, Doppler), private-key blocks with a body, JWTs,
+`scheme://user:password@host` with a non-placeholder password, `Bearer` /
+`Basic` credentials, `…_PASSWORD=` / `…_TOKEN=` / `…_SECRET=` / `…_API_KEY=`
+assignments and `password:` / `api_key =` config keys with a literal value
+holding letters and digits. Placeholders (`<password>`, `${VAR}`,
+`your-api-key`, AWS `…EXAMPLE` keys) pass. The read ruleset is written
+separately and is broader (a bare private-key armor line, any URL password,
+shorter tokens) on the assumption that the write ruleset has a bug. Error
+messages and findings carry the detector and line, never the matched text.
+
+**What it does not give you.** Pattern matching, not a guarantee: a
+password in prose ("the password is hunter2"), a custom token format or a
+base64-wrapped key gets through, and IsoKron's entropy detector was
+deliberately not ported (on Markdown and code it flags URLs and
+identifiers). Data chained before 0.6.0, or imported with `--allow-secrets`,
+is still in the chain: the read scrub masks it in what the agent sees, the
+SQLite file and exports still hold it. The fix for a chained secret is to
+rotate the credential; then, if the history must go, export, edit and
+re-import into a new store (a new chain, with the old receipts
+`UNVERIFIED`). The `can_act` label (docs/HONESTY.md) says the text is the
+current text of its source file, not that the source is trustworthy: a
+file anyone can write grants `can_act` to whatever they write.
 
 ## Assumed deployment
 

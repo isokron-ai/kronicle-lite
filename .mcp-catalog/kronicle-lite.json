@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-01T02:43:32.883Z",
+  "capturedAt": "2026-11-01T03:50:15.076Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -388,7 +388,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Create or re-put a Markdown document by slug. Unchanged blocks keep their ids; changed blocks are superseded and removed ones tombstoned, which other agents see as retractions. bind_git with source_path ties the document to that file's git blob (verify reports STALE_SOURCE when the file changes).",
+        "description": "Create or re-put a Markdown document by slug. Unchanged blocks keep their ids; changed blocks are superseded and removed ones tombstoned, which other agents see as retractions. bind_git with source_path ties the document to that file's git blob (verify reports STALE_SOURCE when the file changes). Refuses text holding a secret (API key, token, private key, connection string): the chain cannot forget it.",
         "inputSchema": {
           "properties": {
             "actor_id": {
@@ -413,6 +413,11 @@
             "markdown": {
               "maxLength": 2000000,
               "type": "string"
+            },
+            "redact_secrets": {
+              "default": false,
+              "description": "Store a redacted copy instead of refusing a detected secret.",
+              "type": "boolean"
             },
             "slug": {
               "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
@@ -455,6 +460,9 @@
             "head": {
               "type": "object"
             },
+            "redactions": {
+              "type": "array"
+            },
             "revision": {
               "type": "integer"
             },
@@ -494,9 +502,19 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Full-text search over live blocks. Each hit carries a signed receipt: keep it with what you derive and pass it to verify() before relying on it later. Blocks whose stored text fails its integrity check are withheld, never served.",
+        "description": "Full-text search over live blocks. Each hit carries a signed receipt (pass it to verify() before relying on it later) and authority: can_act | inspect_only | never_act with a reason; only can_act is safe to act on unchecked. absence says what was and was not searched: an empty result is not proof of absence unless verdict is absent_in_searched. Pass cursor: hits you already read this session rank lower.",
         "inputSchema": {
           "properties": {
+            "actor_id": {
+              "description": "Your agent id (default: server --actor). Cursors are bound to it.",
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "cursor": {
+              "description": "Your latest cursor (for the stale-write advisory).",
+              "type": "string"
+            },
             "include_receipts": {
               "default": true,
               "type": "boolean"
@@ -504,6 +522,13 @@
             "include_tombstoned": {
               "default": false,
               "type": "boolean"
+            },
+            "max_chars": {
+              "default": 16000,
+              "description": "Content budget; longer hits are cut with a pointer.",
+              "maximum": 400000,
+              "minimum": 200,
+              "type": "integer"
             },
             "query": {
               "maxLength": 2000,
@@ -525,6 +550,21 @@
         "name": "recall",
         "outputSchema": {
           "properties": {
+            "absence": {
+              "type": "object"
+            },
+            "attention": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "authority_floor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "head": {
               "type": "object"
             },
@@ -545,6 +585,12 @@
             "query_hash": {
               "type": "string"
             },
+            "truncated": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
             "withheld": {
               "type": "array"
             }
@@ -555,7 +601,11 @@
             "head",
             "match_mode",
             "hits",
-            "withheld"
+            "withheld",
+            "authority_floor",
+            "absence",
+            "attention",
+            "truncated"
           ],
           "type": "object"
         },
@@ -594,6 +644,11 @@
               "maxLength": 1000,
               "minLength": 1,
               "type": "string"
+            },
+            "redact_secrets": {
+              "default": false,
+              "description": "Store a redacted copy instead of refusing a detected secret.",
+              "type": "boolean"
             }
           },
           "required": [
@@ -620,6 +675,9 @@
             },
             "old_block_id": {
               "type": "string"
+            },
+            "redactions": {
+              "type": "array"
             },
             "revision": {
               "type": "integer"
@@ -895,5 +953,5 @@
     "title": "kronicle-lite",
     "version": "0.5.0"
   },
-  "sha256": "7eed4b72e51af9da660f2a0af4749205791f67338e632104819009600257337f"
+  "sha256": "0c25eb80d24f3cecab677dabcfc139f970c0440391a53539d5a820bb265e5e64"
 }

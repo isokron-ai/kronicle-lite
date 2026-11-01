@@ -16,6 +16,7 @@ import { AssumptionAuditor } from './orient/audit.js';
 import { Orient, type OrientOptions } from './orient/orient.js';
 import { Recall } from './recall/recall.js';
 import { ReceiptVerifier } from './recall/verify-receipt.js';
+import { scanValue, SecretDetectedError } from './secrets/guard.js';
 
 export interface KronicleLiteOptions extends OpenOptions {
   orient?: OrientOptions;
@@ -115,8 +116,14 @@ export class KronicleLite {
    * Import a JSONL export into an EMPTY store, verifying every hash and link
    * as it goes and rebuilding documents/blocks from the events. Throws on the
    * first inconsistency; nothing is committed in that case.
+   *
+   * 0.6.0: every event payload is scanned with the write-time secret rules
+   * first and the import is refused (SecretDetectedError, nothing committed)
+   * when any matches. Chained bytes cannot be redacted without breaking their
+   * hashes, so the override (`allow_secrets`) imports them verbatim; the
+   * read-time scrub still masks them on the way out.
    */
-  async importEvents(input: Readable): Promise<{ events: number; head: { seq: number; hash: string } }> {
+  async importEvents(input: Readable, opts: { allow_secrets?: boolean } = {}): Promise<{ events: number; head: { seq: number; hash: string } }> {
     if (this.chain.head().seq !== 0) throw new Error('import requires an empty store (head seq must be 0)');
     const lines = createInterface({ input, crlfDelay: Infinity });
     const events: ChainEvent[] = [];
@@ -134,6 +141,10 @@ export class KronicleLite {
         }
       }
       events.push(ChainEventSchema.parse(obj));
+    }
+    if (opts.allow_secrets !== true) {
+      const findings = events.flatMap((ev) => scanValue(ev.payload, `seq ${ev.seq} ${ev.event_type}`));
+      if (findings.length > 0) throw new SecretDetectedError(findings, 'this import', 'import with --allow-secrets (verbatim: chained bytes cannot be redacted)');
     }
     const tx = this.db.transaction(() => {
       // Keep the exporting server's public key so its receipts and

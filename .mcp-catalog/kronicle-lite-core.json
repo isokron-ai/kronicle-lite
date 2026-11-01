@@ -1,0 +1,691 @@
+{
+  "capturedAt": "2026-11-01T03:50:15.554Z",
+  "capturedWith": "mcp-catalog-snap/0.1.0",
+  "catalog": {
+    "prompts": [],
+    "resourceTemplates": [
+      {
+        "description": "Current revision of a stored document as Markdown.",
+        "mimeType": "text/markdown",
+        "name": "document",
+        "title": "Documents",
+        "uriTemplate": "kronicle://docs/{slug}"
+      }
+    ],
+    "tools": [
+      {
+        "annotations": {
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Grade facts before acting on them. claims: [{symbol, value}]; symbol is a block id (value: content or content_hash), a document slug (value: revision, markdown hash or markdown) or \"head\" (value: seq or hash). Verdict per claim: current | stale | contradicted | retracted | unknown | stale_source, with the current truth.",
+        "inputSchema": {
+          "properties": {
+            "claims": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "symbol": {
+                    "maxLength": 300,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "value": {
+                    "anyOf": [
+                      {
+                        "maxLength": 200000,
+                        "type": "string"
+                      },
+                      {
+                        "type": "number"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "symbol",
+                  "value"
+                ],
+                "type": "object"
+              },
+              "maxItems": 100,
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "claims"
+          ],
+          "type": "object"
+        },
+        "name": "audit_assumptions",
+        "outputSchema": {
+          "properties": {
+            "checked_at": {
+              "type": "string"
+            },
+            "counts": {
+              "type": "object"
+            },
+            "head": {
+              "type": "object"
+            },
+            "results": {
+              "type": "array"
+            }
+          },
+          "required": [
+            "checked_at",
+            "head",
+            "results",
+            "counts"
+          ],
+          "type": "object"
+        },
+        "title": "Grade beliefs against the chain"
+      },
+      {
+        "annotations": {
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Orient. Call at session start and before writes with your last cursor as since_cursor. Returns what changed since (delta), a drift banner, and retractions: things you relied on that changed, with old → new text. Reconcile retractions before acting. A bad or missing cursor never fails. focus: orientation (default) | recent_changes | retractions | pulse (head + banner only). Carry the returned cursor forward.",
+        "inputSchema": {
+          "properties": {
+            "actor_id": {
+              "description": "Your agent id (default: server --actor). Cursors are bound to it.",
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "all_projects": {
+              "default": false,
+              "description": "Include instruction retractions from other projects.",
+              "type": "boolean"
+            },
+            "budget_tokens": {
+              "default": 3000,
+              "maximum": 64000,
+              "minimum": 200,
+              "type": "integer"
+            },
+            "focus": {
+              "default": "orientation",
+              "enum": [
+                "orientation",
+                "recent_changes",
+                "retractions",
+                "pulse"
+              ],
+              "type": "string"
+            },
+            "response_format": {
+              "default": "markdown",
+              "enum": [
+                "markdown",
+                "json"
+              ],
+              "type": "string"
+            },
+            "since_cursor": {
+              "description": "cursor or cursor_compact from your last call",
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "name": "get_system_state",
+        "outputSchema": {
+          "properties": {
+            "actor_id": {
+              "type": "string"
+            },
+            "anchor": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "briefing_id": {
+              "type": "string"
+            },
+            "cursor": {
+              "type": "string"
+            },
+            "cursor_compact": {
+              "type": "string"
+            },
+            "delta": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "digest": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "drift_banner": {
+              "type": "object"
+            },
+            "focus": {
+              "enum": [
+                "orientation",
+                "recent_changes",
+                "retractions",
+                "pulse"
+              ],
+              "type": "string"
+            },
+            "format": {
+              "const": "kronicle-lite/1",
+              "type": "string"
+            },
+            "head": {
+              "type": "object"
+            },
+            "integrity": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "issued_at": {
+              "type": "string"
+            },
+            "next_steps": {
+              "type": "array"
+            },
+            "recovery": {
+              "type": "object"
+            },
+            "retractions": {
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "scope": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "source_drift": {
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "stale_write_advisory": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "format",
+            "briefing_id",
+            "issued_at",
+            "actor_id",
+            "focus",
+            "head",
+            "cursor",
+            "cursor_compact",
+            "recovery",
+            "drift_banner",
+            "stale_write_advisory",
+            "anchor",
+            "source_drift",
+            "integrity",
+            "scope",
+            "delta",
+            "retractions",
+            "digest",
+            "next_steps"
+          ],
+          "type": "object"
+        },
+        "title": "Orient against the chain"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "description": "Create or re-put a Markdown document by slug. Unchanged blocks keep their ids; changed blocks are superseded and removed ones tombstoned, which other agents see as retractions. bind_git with source_path ties the document to that file's git blob (verify reports STALE_SOURCE when the file changes). Refuses text holding a secret (API key, token, private key, connection string): the chain cannot forget it.",
+        "inputSchema": {
+          "properties": {
+            "actor_id": {
+              "description": "Your agent id (default: server --actor). Cursors are bound to it.",
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "bind_git": {
+              "default": false,
+              "type": "boolean"
+            },
+            "cursor": {
+              "description": "Your latest cursor (for the stale-write advisory).",
+              "type": "string"
+            },
+            "idempotency_key": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "markdown": {
+              "maxLength": 2000000,
+              "type": "string"
+            },
+            "redact_secrets": {
+              "default": false,
+              "description": "Store a redacted copy instead of refusing a detected secret.",
+              "type": "boolean"
+            },
+            "slug": {
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+              "type": "string"
+            },
+            "source_path": {
+              "description": "File the markdown came from.",
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            },
+            "title": {
+              "maxLength": 300,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "slug",
+            "title",
+            "markdown"
+          ],
+          "type": "object"
+        },
+        "name": "put_document",
+        "outputSchema": {
+          "properties": {
+            "blocks": {
+              "type": "array"
+            },
+            "chain_seq": {
+              "type": "integer"
+            },
+            "doc_id": {
+              "type": "string"
+            },
+            "events": {
+              "type": "integer"
+            },
+            "head": {
+              "type": "object"
+            },
+            "redactions": {
+              "type": "array"
+            },
+            "revision": {
+              "type": "integer"
+            },
+            "slug": {
+              "type": "string"
+            },
+            "source": {
+              "type": "object"
+            },
+            "stale_write_advisory": {
+              "type": "object"
+            },
+            "title": {
+              "type": "string"
+            },
+            "warnings": {
+              "type": "array"
+            }
+          },
+          "required": [
+            "doc_id",
+            "slug",
+            "title",
+            "revision",
+            "chain_seq",
+            "head",
+            "blocks",
+            "events",
+            "stale_write_advisory"
+          ],
+          "type": "object"
+        },
+        "title": "Create or replace a document"
+      },
+      {
+        "annotations": {
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Full-text search over live blocks. Each hit carries a signed receipt (pass it to verify() before relying on it later) and authority: can_act | inspect_only | never_act with a reason; only can_act is safe to act on unchecked. absence says what was and was not searched: an empty result is not proof of absence unless verdict is absent_in_searched. Pass cursor: hits you already read this session rank lower.",
+        "inputSchema": {
+          "properties": {
+            "actor_id": {
+              "description": "Your agent id (default: server --actor). Cursors are bound to it.",
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "cursor": {
+              "description": "Your latest cursor (for the stale-write advisory).",
+              "type": "string"
+            },
+            "include_receipts": {
+              "default": true,
+              "type": "boolean"
+            },
+            "include_tombstoned": {
+              "default": false,
+              "type": "boolean"
+            },
+            "max_chars": {
+              "default": 16000,
+              "description": "Content budget; longer hits are cut with a pointer.",
+              "maximum": 400000,
+              "minimum": 200,
+              "type": "integer"
+            },
+            "query": {
+              "maxLength": 2000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "top_k": {
+              "default": 12,
+              "maximum": 50,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "type": "object"
+        },
+        "name": "recall",
+        "outputSchema": {
+          "properties": {
+            "absence": {
+              "type": "object"
+            },
+            "attention": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "authority_floor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "head": {
+              "type": "object"
+            },
+            "hits": {
+              "type": "array"
+            },
+            "match_mode": {
+              "enum": [
+                "all_terms",
+                "any_term",
+                "none"
+              ],
+              "type": "string"
+            },
+            "query": {
+              "type": "string"
+            },
+            "query_hash": {
+              "type": "string"
+            },
+            "truncated": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "withheld": {
+              "type": "array"
+            }
+          },
+          "required": [
+            "query",
+            "query_hash",
+            "head",
+            "match_mode",
+            "hits",
+            "withheld",
+            "authority_floor",
+            "absence",
+            "attention",
+            "truncated"
+          ],
+          "type": "object"
+        },
+        "title": "Search blocks with signed receipts"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "description": "Replace one live block's content, with a reason. Receipts for the old block then verify as SUPERSEDED.",
+        "inputSchema": {
+          "properties": {
+            "actor_id": {
+              "description": "Your agent id (default: server --actor). Cursors are bound to it.",
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "block_id": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "cursor": {
+              "description": "Your latest cursor (for the stale-write advisory).",
+              "type": "string"
+            },
+            "new_content": {
+              "maxLength": 200000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "reason": {
+              "maxLength": 1000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "redact_secrets": {
+              "default": false,
+              "description": "Store a redacted copy instead of refusing a detected secret.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "block_id",
+            "new_content",
+            "reason"
+          ],
+          "type": "object"
+        },
+        "name": "supersede_block",
+        "outputSchema": {
+          "properties": {
+            "content_hash": {
+              "type": "string"
+            },
+            "doc_slug": {
+              "type": "string"
+            },
+            "head": {
+              "type": "object"
+            },
+            "new_block_id": {
+              "type": "string"
+            },
+            "old_block_id": {
+              "type": "string"
+            },
+            "redactions": {
+              "type": "array"
+            },
+            "revision": {
+              "type": "integer"
+            },
+            "stale_write_advisory": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "old_block_id",
+            "new_block_id",
+            "content_hash",
+            "doc_slug",
+            "revision",
+            "head",
+            "stale_write_advisory"
+          ],
+          "type": "object"
+        },
+        "title": "Replace one block"
+      },
+      {
+        "annotations": {
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Re-check a recall() receipt against the store (signature, re-hashed block text, chain position, supersession): VERIFIED | SUPERSEDED (see current_block_id) | TOMBSTONED | STALE_SOURCE | UNVERIFIED, with a reason. Fail-closed.",
+        "inputSchema": {
+          "properties": {
+            "receipt": {
+              "description": "The receipt object from recall().",
+              "type": "object"
+            }
+          },
+          "required": [
+            "receipt"
+          ],
+          "type": "object"
+        },
+        "name": "verify",
+        "outputSchema": {
+          "properties": {
+            "block_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "chain_head": {
+              "type": "object"
+            },
+            "checked_at": {
+              "type": "string"
+            },
+            "current_block_id": {
+              "type": "string"
+            },
+            "current_content_hash": {
+              "type": "string"
+            },
+            "integrity_problem": {
+              "enum": [
+                "content_hash_mismatch",
+                "chain_event_missing",
+                "chain_event_mismatch",
+                "chain_event_hash_mismatch"
+              ],
+              "type": "string"
+            },
+            "reason": {
+              "enum": [
+                "verified",
+                "malformed_receipt",
+                "unsigned_receipt",
+                "unknown_key",
+                "key_revoked",
+                "signature_invalid",
+                "unknown_block",
+                "content_hash_mismatch",
+                "chain_seq_unknown",
+                "chain_head_mismatch",
+                "superseded_by_newer_head",
+                "tombstoned",
+                "stale_source",
+                "content_tampered",
+                "projection_mismatch"
+              ],
+              "type": "string"
+            },
+            "receipt_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "source_drift": {
+              "type": "object"
+            },
+            "status": {
+              "enum": [
+                "VERIFIED",
+                "SUPERSEDED",
+                "TOMBSTONED",
+                "UNVERIFIED",
+                "STALE_SOURCE"
+              ],
+              "type": "string"
+            },
+            "supersession_depth": {
+              "type": "integer"
+            },
+            "tombstone_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "receipt_id",
+            "block_id",
+            "checked_at",
+            "chain_head"
+          ],
+          "type": "object"
+        },
+        "title": "Verify a retrieval receipt"
+      }
+    ]
+  },
+  "format": "mcp-catalog-snap/1",
+  "protocolVersion": "2025-11-25",
+  "server": {
+    "name": "kronicle-lite",
+    "title": "kronicle-lite",
+    "version": "0.5.0"
+  },
+  "sha256": "47b3f289201a66ec3983fc82e60d355af1da1869a6563ed00efb55f5e0227b42"
+}

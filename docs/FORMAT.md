@@ -257,7 +257,8 @@ percent-encoded: `kronicle://docs/instructions%2Fclaude-md`.
 (0.5.0) is present on instruction and memory imports from inside a project;
 `get_system_state` leaves instruction retractions whose document recorded a
 different project key out of `retractions` (counted in
-`scope.hidden_retractions`) unless the caller asks for `all_projects`.
+`scope.hidden_retractions`, with `scope.verdict: "partial"` since 0.6.0)
+unless the caller asks for `all_projects`.
 
 `path` is project-relative, `~/`-relative or absolute, always
 `/`-separated. The `doc_sources` table projects the latest put's `source`
@@ -340,6 +341,14 @@ payload = {"block_id":"9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d","chain_head_hash":"
 ```
 
 `key_id` is `"ed25519-" + first 16 hex chars of sha256(SPKI DER of the public key)`.
+
+0.6.0, additive and local: the `receipts` table gains a nullable `actor_id`
+column (added to older databases on open) recording which actor `recall`
+served, for the attention rerank (docs/HONESTY.md §3). It is not part of
+the receipt JSON, its signature or any hash; the receipt layout above is
+unchanged. Recall results gain `authority*`, `authority_floor`, `absence`,
+`already_read`, `attention`, `read_scrubbed` and `truncated` (labels
+computed at read time, never stored or chained; docs/HONESTY.md).
 
 ### 4.1 Verification (`verify`)
 
