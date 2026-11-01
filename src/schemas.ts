@@ -161,6 +161,40 @@ export const DigestSchema = z.object({
   ),
 });
 
+/** Unreleased: why a derived note is stale (src/lineage/lineage.ts StaleSource). */
+export const StaleSourceSchema = z.object({
+  source_block_id: z.string(),
+  source_content_hash: z.string().describe('The version the note was derived from.'),
+  source_doc_slug: z.string().nullable(),
+  change: z.enum(['superseded', 'moved', 'tombstoned', 'missing']),
+  seq: z.number().int().positive().nullable().describe('First real change after that version.'),
+  current_block_id: z.string().nullable(),
+  current_content_hash: z.string().nullable(),
+  old_text: z.string().nullable(),
+  new_text: z.string().nullable(),
+  inferred: z.boolean().describe('Lineage inferred from what the author read (not declared).'),
+  via: z.string().optional().describe('Set when the source is itself a stale derived note: its slug.'),
+});
+
+const VersionRefSchema = z.object({ block_id: z.string(), content_hash: z.string() });
+
+/** Unreleased: one unreconciled change for an actor (docs/PUSH.md "pending"). */
+export const PendingItemSchema = z.object({
+  kind: z.enum(['supersession', 'tombstone', 'instruction', 'derived']),
+  change: z.enum(['superseded', 'moved', 'tombstoned', 'missing']),
+  severity: z.enum(['safety', 'behavioral']),
+  seq: z.number().int().positive().nullable(),
+  doc_slug: z.string().nullable(),
+  heading_path: z.array(z.string()),
+  read: VersionRefSchema.extend({ head_seq: z.number().int().nonnegative().nullable() }).describe('The version you read (derived: the version the note was derived from).'),
+  current: VersionRefSchema.nullable().describe('The current version; null when removed.'),
+  old_text: z.string().nullable(),
+  new_text: z.string().nullable(),
+  diff: z.string().nullable(),
+  derived_notes: z.array(z.string()).optional(),
+  resolve: z.string(),
+});
+
 export const RetractionSchema = z.object({
   seq: z.number().int().positive(),
   event_type: z.string(),
@@ -179,6 +213,7 @@ export const RetractionSchema = z.object({
   format_rules: z.array(z.enum(FORMAT_RULES)).optional(),
   hint: z.enum(['likely_typo']).optional().describe('Presentation label only; never changes delivery or severity.'),
   new_heading_path: z.array(z.string()).optional().describe('Set when the block moved to another section; heading_path is the old one.'),
+  derived_from_change: StaleSourceSchema.optional().describe('kind=derived: the source change that made the note stale.'),
 });
 
 export const CosmeticEditSchema = z.object({
@@ -307,6 +342,10 @@ export const SystemStateSchema = z.object({
   format_only_edits: z.array(CosmeticEditSchema).nullable().optional().describe('Edits with the same Markdown tree and identical text since the cursor (not retractions); null for focus=pulse.'),
   cosmetic_edits: z.array(CosmeticEditSchema).nullable().optional().describe('Deprecated alias of format_only_edits.'),
   carried_notes: z.array(CarriedNoteSchema).nullable().optional().describe('Your own notes written since the cursor, bounded text.'),
+  pending: z.array(PendingItemSchema).nullable().optional().describe('Changes to what you read that you have not re-read at the current version (≤ 20).'),
+  pending_count: z.number().int().nonnegative().nullable().optional(),
+  pending_actor: z.string().nullable().optional(),
+  pending_hidden: z.number().int().nonnegative().nullable().optional(),
   digest: DigestSchema.nullable().describe('Present on cold start and focus=orientation.'),
   next_steps: z.array(z.string()),
 });
@@ -344,6 +383,7 @@ export const RecallHitSchema = z.object({
   kind: z.string(),
   heading_path: z.array(z.string()),
   content: z.string(),
+  stale_derived: z.array(StaleSourceSchema).optional().describe('Derived note whose sources changed: never_act until re-derived.'),
   content_hash: HEX64.describe('BLAKE3 of the block content.'),
   score: z.number(),
   status: z.enum(['live', 'superseded', 'tombstoned']),
@@ -532,6 +572,9 @@ export const DocumentSourceSchema = z
   })
   .describe('Provenance recorded in the document.put event.');
 
+/** Unreleased: lineage recorded on a write. */
+export const LineageCountsSchema = z.object({ derived_from: z.number().int().nonnegative(), derived_from_inferred: z.number().int().nonnegative() });
+
 export const PutDocumentResultSchema = z.object({
   doc_id: z.string(),
   slug: z.string(),
@@ -544,6 +587,7 @@ export const PutDocumentResultSchema = z.object({
   source: DocumentSourceSchema.optional(),
   warnings: z.array(z.string()).optional().describe('Non-fatal notes, e.g. bind_git outside a git repository.'),
   redactions: z.array(SecretFindingSchema).optional().describe('0.6.0: secrets replaced before chaining (redact_secrets).'),
+  lineage: LineageCountsSchema.optional(),
   stale_write_advisory: StaleWriteAdvisorySchema,
 });
 
@@ -555,6 +599,7 @@ export const SupersedeBlockResultSchema = z.object({
   revision: z.number().int().positive(),
   head: ChainHeadSchema,
   redactions: z.array(SecretFindingSchema).optional().describe('0.6.0: secrets replaced before chaining (redact_secrets).'),
+  lineage: LineageCountsSchema.optional(),
   stale_write_advisory: StaleWriteAdvisorySchema,
 });
 

@@ -15,7 +15,10 @@
  *   kronicle-lite put --from-instructions [PATHS…] [--cwd DIR] [--json] [--stdin-hook]
  *   kronicle-lite watch [PATHS…] [--interval MS] [--debounce MS] [--poll] [--cwd DIR] [--redact-secrets] [--list [--json]]
  *   kronicle-lite doctor [--json] [--no-network] [--full] [--cwd DIR]
- *   kronicle-lite orient [--data-dir DIR] [--actor ID] [--cursor C] [--focus F] [--json] [--all-projects] [--include-format-only]
+ *   kronicle-lite orient [--data-dir DIR] [--actor ID] [--cursor C] [--focus F] [--json] [--all-projects] [--include-format-only] [--pending-actor A]
+ *   kronicle-lite supersede BLOCK_ID FILE|- --reason R [--derived-from ID:HASH,…] [--actor A] [--cursor C] [--json]
+ *   kronicle-lite get SLUG | --block ID [--actor A] [--json]          read (recorded for --actor)
+ *   kronicle-lite pending --actor A [--json] [--cwd DIR] [--all-projects] [--limit N]   unreconciled changes (hooks)
  *   kronicle-lite verify-chain [--full] | rebuild | demo [--dir D] [--keep]
  */
 
@@ -27,8 +30,11 @@ import type { AnchorCallOptions } from './anchor/anchor.js';
 import { defaultDataDir } from './db/open.js';
 import { isValidSlug, type DocumentSource } from './docs/documents.js';
 import { describeProjection } from './docs/integrity.js';
+import type { LineageRef } from './docs/documents.js';
 import { bindGit } from './git/binding.js';
-import { renderSystemStateMarkdown } from './orient/render.js';
+import { pendingLines, renderSystemStateMarkdown } from './orient/render.js';
+import { checkBlockRow, checkRevisionRow } from './docs/integrity.js';
+import { scrubDeep } from './secrets/guard.js';
 import { KronicleLite } from './store.js';
 import { FOCUSES, type Focus } from './orient/orient.js';
 import { entryFor, projectScopeFor, resolveContext } from './instructions/paths.js';
@@ -148,6 +154,17 @@ Usage:
                                                                  audit report stale_source when the file changes
                  [--redact-secrets]                              store a redacted copy instead of refusing a detected secret
                                                                  (put, put --from-instructions and watch refuse by default)
+                 [--derived-from ID:HASH,…] [--actor A] [--cursor C]
+                                                                 lineage: blocks this note was derived from (also inferred from
+                                                                 what --actor read since its cursor); stale when one changes
+  kronicle-lite supersede BLOCK_ID FILE|- --reason R [--derived-from ID:HASH,…] [--actor A] [--cursor C] [--json]
+                                                                 replace one live block (FILE or stdin)
+  kronicle-lite get SLUG | --block ID [--actor A] [--json]       print the current document (or one block) and record the read:
+                                                                 re-reading the current version resolves a pending change
+  kronicle-lite pending --actor A [--json] [--cwd DIR] [--all-projects] [--limit N]
+                                                                 changes to what A read (or notes it relied on) that A has not
+                                                                 re-read at the current version; the hook-gate contract
+                                                                 (docs/PUSH.md); exit 0, gate on pending_count
   kronicle-lite put --from-instructions [PATHS…] [--cwd DIR] [--json] [--redact-secrets]
                                                                  chain CLAUDE.md, AGENTS.md, .claude/rules/**/*.md,
                                                                  .cursor/rules/** and Claude Code auto memory (one shot)
@@ -158,7 +175,7 @@ Usage:
   kronicle-lite doctor       [--data-dir DIR] [--json] [--no-network] [--full] [--cwd DIR]
                                                                  health checks (read-only); exit 1 when any check fails
   kronicle-lite orient       [--data-dir DIR] [--actor ID] [--cursor C] [--focus F] [--json] [--cwd DIR] [--all-projects]
-                 [--include-format-only]                         scoped to the project at --cwd (default: the working
+                 [--include-format-only] [--pending-actor A]     scoped to the project at --cwd (default: the working
                                                                  directory); "--cursor C --focus retractions --json" is the
                                                                  hook contract (docs/PUSH.md); format-only edits are listed
                                                                  under format_only_edits unless --include-format-only
@@ -429,11 +446,14 @@ async function main(argv: string[]): Promise<number> {
         source = b.binding ? { kind: 'file', path: b.binding.path, git: b.binding } : { kind: 'file', path: file.split(/[\\/]+/).join('/') };
         if (b.warning) warnings.push(b.warning);
       }
+      const derived = lineageFlag(flags);
       const r = store.docs.putDocument({
         slug,
         title: str(flags['title']) ?? basename(file).replace(/\.md$/i, ''),
         markdown,
         actor_id: str(flags['actor']) ?? 'cli',
+        ...(derived !== undefined ? { derived_from: derived } : {}),
+        ...(str(flags['cursor']) !== undefined ? { cursor: str(flags['cursor'])! } : {}),
         ...(source !== undefined ? { source } : {}),
         ...(flags['redact-secrets'] === true ? { secrets: 'redact' as const } : {}),
         // Unreleased (next): the document belongs to the project at --cwd (recall/orient scope).
@@ -466,11 +486,92 @@ async function main(argv: string[]): Promise<number> {
         ...(num(flags['budget']) !== undefined ? { budget_tokens: num(flags['budget'])! } : {}),
         project: flags['all-projects'] === true ? null : projectScopeFor(instructionCtx(flags)),
         include_format_only: flags['include-format-only'] === true || flags['include-cosmetic'] === true,
+        ...(str(flags['pending-actor']) !== undefined ? { pending_actor: str(flags['pending-actor'])! } : {}),
       });
       // --json is the push-hook contract (docs/PUSH.md): one JSON object, the SystemState.
       process.stdout.write(flags['json'] ? JSON.stringify(state, null, 2) + '\n' : renderSystemStateMarkdown(state) + '\n');
       store.close();
       return 0;
+    }
+    case 'supersede': {
+      const [block_id, file] = positional;
+      if (!block_id || !file) throw new Error('supersede requires BLOCK_ID and FILE (or - for stdin)');
+      const reason = str(flags['reason']);
+      if (!reason) throw new Error('supersede requires --reason');
+      let content: string;
+      try {
+        content = file === '-' ? await readStreamText(process.stdin) : readFileSync(file, 'utf8');
+      } catch (err) {
+        throw new Error(`cannot read ${file}: ${(err as NodeJS.ErrnoException).code ?? (err as Error).message}`);
+      }
+      const store = new KronicleLite({ dataDir });
+      try {
+        const derived = lineageFlag(flags);
+        const r = store.docs.supersedeBlock({
+          block_id,
+          new_content: content,
+          reason,
+          actor_id: str(flags['actor']) ?? 'cli',
+          ...(flags['redact-secrets'] === true ? { secrets: 'redact' as const } : {}),
+          ...(derived !== undefined ? { derived_from: derived } : {}),
+          ...(str(flags['cursor']) !== undefined ? { cursor: str(flags['cursor'])! } : {}),
+        });
+        process.stdout.write(flags['json'] ? JSON.stringify(r, null, 2) + '\n' : `${r.doc_slug} rev ${r.revision}: ${r.old_block_id} → ${r.new_block_id}; head seq ${r.head.seq}\n`);
+        return 0;
+      } finally {
+        store.close();
+      }
+    }
+    case 'get': {
+      const store = new KronicleLite({ dataDir });
+      try {
+        const actor = str(flags['actor']) ?? 'cli';
+        const blockId = str(flags['block']);
+        if (blockId !== undefined) {
+          const b = store.docs.getBlock(blockId);
+          if (!b) throw new Error(`no block ${blockId}`);
+          if (checkBlockRow(store.chain, b) !== null) throw new Error(`integrity failure in block ${blockId}: the stored text does not match the chain; run kronicle-lite verify-chain`);
+          const status = b.tombstoned_at ? 'tombstoned' : b.valid_to ? 'superseded' : 'live';
+          store.lineage.recordBlockReads(actor, [b], 'recall');
+          const text = scrubDeep(b.content).value;
+          process.stdout.write(
+            flags['json']
+              ? JSON.stringify({ block_id: b.block_id, doc_slug: store.docs.getDocumentById(b.doc_id)?.slug ?? null, status, superseded_by: b.superseded_by, content_hash: b.content_hash, content: text }, null, 2) + '\n'
+              : `${text}\n${status === 'live' ? '' : `[${status}${b.superseded_by ? ` by ${b.superseded_by}` : ''}]\n`}`,
+          );
+          return 0;
+        }
+        const [slug] = positional;
+        if (!slug) throw new Error('get requires SLUG or --block ID');
+        const doc = store.docs.getDocument(slug);
+        if (!doc) throw new Error(`no document ${slug}`);
+        const rev = store.docs.getRevision(doc.doc_id, doc.current_revision);
+        if (!rev) throw new Error(`no revision ${doc.current_revision} of ${slug}`);
+        if (checkRevisionRow(store.chain, rev) !== null) throw new Error(`integrity failure in ${slug}@${rev.revision}: the stored text does not match the chain; run kronicle-lite verify-chain`);
+        store.lineage.recordDocumentRead(actor, doc.doc_id, 'document');
+        const markdown = scrubDeep(rev.markdown).value;
+        process.stdout.write(flags['json'] ? JSON.stringify({ slug, revision: rev.revision, markdown_hash: rev.content_hash, markdown }, null, 2) + '\n' : markdown + (markdown.endsWith('\n') ? '' : '\n'));
+        return 0;
+      } finally {
+        store.close();
+      }
+    }
+    case 'pending': {
+      const actor = str(flags['actor']);
+      if (!actor) throw new Error('pending requires --actor A (whose reads to check)');
+      const store = new KronicleLite({ dataDir });
+      try {
+        const scope = flags['all-projects'] === true ? null : projectScopeFor(instructionCtx(flags));
+        const p = store.lineage.pending(actor, { project_keys: scope?.keys ?? null, limit: num(flags['limit']) ?? 50 });
+        const head = store.chain.head();
+        const out = { format: 'kronicle-lite/1' as const, actor_id: actor, head, pending_count: p.count, pending_hidden: p.hidden, pending: scrubDeep(p.items).value };
+        if (flags['json']) process.stdout.write(JSON.stringify(out, null, 2) + '\n');
+        else if (p.count === 0) process.stdout.write(`kronicle-lite: nothing pending for ${actor} (head seq ${head.seq})\n`);
+        else process.stdout.write(`kronicle-lite: ${p.count} pending for ${actor} — re-read the current version before acting:\n${pendingLines({ pending: out.pending, pending_count: p.count }, 50).join('\n')}\n`);
+        return 0;
+      } finally {
+        store.close();
+      }
     }
     case 'watch':
       return watchCommand(dataDir, positional, flags);
@@ -504,6 +605,18 @@ function printVerifyAll(store: KronicleLite, flags: Record<string, string | true
     process.stderr.write(lines.join('\n') + '\n');
   }
   return r.ok ? 0 : 1;
+}
+
+/** `--derived-from ID:HASH[,ID:HASH…]` (unreleased); undefined when absent, [] for an explicit empty value. */
+function lineageFlag(flags: Record<string, string | true>): LineageRef[] | undefined {
+  const v = flags['derived-from'];
+  if (v === undefined) return undefined;
+  if (v === true) return [];
+  return list(v).map((pair) => {
+    const [block_id, content_hash, ...rest] = pair.split(':');
+    if (!block_id || !content_hash || rest.length > 0) throw new Error(`--derived-from expects BLOCK_ID:CONTENT_HASH pairs, got "${pair}"`);
+    return { block_id, content_hash };
+  });
 }
 
 /** The primary project (instruction key + root) of a working directory. */

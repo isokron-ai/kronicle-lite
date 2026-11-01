@@ -26,6 +26,7 @@ export const AUTHORITY_REASONS = [
   'block_matches_source',
   'superseded',
   'tombstoned',
+  'stale_derived',
   'integrity_failed',
   'source_missing',
   'not_in_source',
@@ -48,6 +49,12 @@ export interface HonestyInput {
   source_check: SourceCheck;
   /** The read-time scrub changed the text being served. */
   read_scrubbed: boolean;
+  /**
+   * Unreleased: the hit's document is a derived note and a block it was
+   * derived from changed (superseded, moved, tombstoned) without the note
+   * being re-derived from the current version (src/lineage/lineage.ts).
+   */
+  stale_derived?: boolean;
 }
 
 export interface Honesty {
@@ -69,13 +76,14 @@ interface Rule {
 export const HONESTY_RULES: readonly Rule[] = [
   { n: 1, when: 'block was tombstoned', authority: 'never_act', reason: 'tombstoned', basis: 'block', test: (i) => i.status === 'tombstoned' },
   { n: 2, when: 'block was superseded', authority: 'never_act', reason: 'superseded', basis: 'block', test: (i) => i.status === 'superseded' },
-  { n: 3, when: 'recorded source file is gone', authority: 'never_act', reason: 'source_missing', basis: 'document', test: (i) => i.source_check === 'missing' },
-  { n: 4, when: "source file exists but no longer holds this block's text", authority: 'never_act', reason: 'not_in_source', basis: 'block', test: (i) => i.source_check === 'not_in_source' },
-  { n: 5, when: 'document is model-written memory (source kind memory)', authority: 'inspect_only', reason: 'model_memory', basis: 'document', test: (i) => i.source_kind === 'memory' },
-  { n: 6, when: "source file holds this block's exact text now", authority: 'can_act', reason: 'block_matches_source', basis: 'block', test: (i) => i.source_check === 'match' },
-  { n: 7, when: 'source recorded but could not be checked (repo/file unreadable, too large)', authority: 'inspect_only', reason: 'source_unavailable', basis: 'document', test: (i) => i.source_check === 'unavailable' },
-  { n: 8, when: 'source recorded, no block-level check possible (e.g. relative path, no root)', authority: 'inspect_only', reason: 'document_source_only', basis: 'document', test: (i) => i.source_kind !== null },
-  { n: 9, when: 'no source recorded (put by an agent or a human)', authority: 'inspect_only', reason: 'no_source', basis: 'none', test: () => true },
+  { n: 3, when: 'derived note: a block it was derived from changed or was removed (not re-derived)', authority: 'never_act', reason: 'stale_derived', basis: 'document', test: (i) => i.stale_derived === true },
+  { n: 4, when: 'recorded source file is gone', authority: 'never_act', reason: 'source_missing', basis: 'document', test: (i) => i.source_check === 'missing' },
+  { n: 5, when: "source file exists but no longer holds this block's text", authority: 'never_act', reason: 'not_in_source', basis: 'block', test: (i) => i.source_check === 'not_in_source' },
+  { n: 6, when: 'document is model-written memory (source kind memory)', authority: 'inspect_only', reason: 'model_memory', basis: 'document', test: (i) => i.source_kind === 'memory' },
+  { n: 7, when: "source file holds this block's exact text now", authority: 'can_act', reason: 'block_matches_source', basis: 'block', test: (i) => i.source_check === 'match' },
+  { n: 8, when: 'source recorded but could not be checked (repo/file unreadable, too large)', authority: 'inspect_only', reason: 'source_unavailable', basis: 'document', test: (i) => i.source_check === 'unavailable' },
+  { n: 9, when: 'source recorded, no block-level check possible (e.g. relative path, no root)', authority: 'inspect_only', reason: 'document_source_only', basis: 'document', test: (i) => i.source_kind !== null },
+  { n: 10, when: 'no source recorded (put by an agent or a human)', authority: 'inspect_only', reason: 'no_source', basis: 'none', test: () => true },
 ];
 
 const RANK: Readonly<Record<Authority, number>> = { never_act: 0, inspect_only: 1, can_act: 2 };

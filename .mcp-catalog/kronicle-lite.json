@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-01T16:16:33.529Z",
+  "capturedAt": "2026-11-01T18:06:16.297Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -359,6 +359,30 @@
             "next_steps": {
               "type": "array"
             },
+            "pending": {
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "pending_actor": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pending_count": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "pending_hidden": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "recovery": {
               "type": "object"
             },
@@ -433,6 +457,29 @@
               "description": "Your latest cursor (for the stale-write advisory).",
               "type": "string"
             },
+            "derived_from": {
+              "description": "Blocks (from recall) this text was derived from; when one changes, this note is marked stale. Inferred from your reads when omitted.",
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "block_id": {
+                    "format": "uuid",
+                    "type": "string"
+                  },
+                  "content_hash": {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "block_id",
+                  "content_hash"
+                ],
+                "type": "object"
+              },
+              "maxItems": 200,
+              "type": "array"
+            },
             "idempotency_key": {
               "maxLength": 200,
               "minLength": 1,
@@ -486,6 +533,9 @@
               "type": "integer"
             },
             "head": {
+              "type": "object"
+            },
+            "lineage": {
               "type": "object"
             },
             "redactions": {
@@ -683,6 +733,29 @@
               "description": "Your latest cursor (for the stale-write advisory).",
               "type": "string"
             },
+            "derived_from": {
+              "description": "Blocks (from recall) this text was derived from; when one changes, this note is marked stale. Inferred from your reads when omitted.",
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "block_id": {
+                    "format": "uuid",
+                    "type": "string"
+                  },
+                  "content_hash": {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "block_id",
+                  "content_hash"
+                ],
+                "type": "object"
+              },
+              "maxItems": 200,
+              "type": "array"
+            },
             "new_content": {
               "maxLength": 200000,
               "minLength": 1,
@@ -716,6 +789,9 @@
               "type": "string"
             },
             "head": {
+              "type": "object"
+            },
+            "lineage": {
               "type": "object"
             },
             "new_block_id": {
@@ -1004,5 +1080,5 @@
     "title": "kronicle-lite",
     "version": "0.7.0"
   },
-  "sha256": "f683f7d0e36344006385e336e59e3b046cf2055da930d81797c157e24d165c27"
+  "sha256": "2e47e0a7236e8640cea65a10228f1cf7b8e4602226635ad50cb35e6bbfca9d40"
 }

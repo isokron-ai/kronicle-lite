@@ -4,6 +4,93 @@ All notable changes to kronicle-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
+## [Unreleased]
+
+### Added — derived-note lineage (Track A S1 "next-session stale copy")
+
+- A note an agent writes from what it read now records which exact block
+  versions it rests on: `put_document` / `supersede_block` take
+  `derived_from: [{block_id, content_hash}]` (CLI `put` / new `supersede`:
+  `--derived-from ID:HASH,…`), and every write also records
+  `derived_from_inferred`: each block the writing actor read (recall hits,
+  document reads) since its session started (the briefing behind the
+  `cursor` it passes, else its latest orient). Inference over-approximates
+  on purpose, is never truncated, and downgrades exactly like declared
+  lineage. Instruction-file imports infer nothing. Chained as additive
+  payload fields (`document.put`, `block.created`); a write without lineage
+  hashes as before. Projection table `doc_lineage`, checked by the
+  projection check and rebuilt by `rebuild` / `import` (docs/FORMAT.md §3.10).
+- When a source block is superseded, moved to another section or
+  tombstoned (format-only edits excepted) and the note was not re-derived
+  from the current version, the note's recall hits are `never_act` /
+  `stale_derived` (new honesty rule 3, rows after it renumbered 4–10) and
+  carry `stale_derived: [{source_block_id, source_content_hash,
+  source_doc_slug, change, seq, current_block_id, current_content_hash,
+  old_text, new_text, inferred, via?}]`. A note derived from a stale note is
+  stale (`via`). `can_act` is impossible for a stale note, whatever its own
+  file says (docs/HONESTY.md §6).
+- `get_system_state` lists a retraction of the new kind `derived` for each
+  note made stale by a change in the window: the note's slug and text, the
+  source's word diff, and `derived_from_change`.
+- Re-deriving clears it: a put / supersede of the note that (declares or
+  infers) the current version. A `put` with an explicit `derived_from`
+  (even `[]`) replaces the note's lineage; every other write adds to it.
+
+### Added — version-bound reconciliation (`pending`)
+
+- A local read log (`reads`, never chained; docs/FORMAT.md §4.2) records the
+  exact version each actor read: recall hits (with or without receipts),
+  document reads (`kronicle://docs/<slug>`, new CLI `get`), and the actor's
+  own writes.
+- `pending`: per actor, every change to a block it read or wrote — or to a
+  source of a note it read or wrote — that it has not re-read at the CURRENT
+  version (the live lineage head or a format-only twin; for a removal, the
+  document or the tombstone read after it). Delivery never clears it;
+  reading an older version never clears a newer change. Format-only edits
+  are never pending. Project-scoped (`pending_hidden`).
+- Exposed on `get_system_state` and every `orient --json` focus (`pulse` and
+  `retractions` included) as `pending[]` (≤ 20), `pending_count`,
+  `pending_actor`, `pending_hidden`; `orient --pending-actor A` computes it
+  for the agent while the hook keeps its own actor. New CLI
+  `kronicle-lite pending --actor A --json` for hook gates (docs/PUSH.md
+  "Pending"). Rendered as a "Pending" section (and a pulse line); a briefing
+  with pending items is never the one-line quiet answer.
+- Contract: additive only. Every existing field keeps its meaning;
+  `retractions[].kind` gains the value `derived`.
+
+### Bench (agent-memory-bench Track A, branch `kl-lineage`, 20 seeds)
+
+- **S1 next-session stale copy served unmarked: 20/20 → 0/20**
+  (`nextSessionPass` 0/20 → 20/20), with the bench's unchanged adapter: the
+  agent never declares lineage, so this is inference alone. S1, S5, S7, S8,
+  S11 grades identical on every seed. Touch views where something the agent
+  read changed grow by the `derived` retraction and the Pending section
+  (S1 2.45 → 3.24 KB, S5 3.10 → 3.60 KB, S7 alarm seeds ~+0.3 KB); quiet
+  cells are byte-identical. `results/track-a-kl-lineage-COMPARE.md`.
+- Hook path, 300-document store, 2.2k reads, 50 changed blocks read:
+  `pending` ≈ 87 ms in-process; `orient --focus retractions --json
+  --pending-actor` ≈ 0.39 s per CLI call vs ≈ 0.29 s without pending items
+  (Node start-up dominates). A partial expression index on the retiring
+  block id of `block.superseded` / `block.tombstoned` events (the same
+  expression `chainRetired` uses) keeps change lookups indexed.
+
+### Changed
+
+- `tools/list` (full): 14,418 → 15,462 bytes (+1,044: `derived_from` on
+  `put_document` and `supersede_block`; `pending*` and `lineage` in output
+  schemas). `--core`: 10,655 → 10,879 bytes (+224; `derived_from` is not
+  offered in `--core`, inference still runs there). Catalog re-pinned:
+  `2e47e0a7236e8640cea65a10228f1cf7b8e4602226635ad50cb35e6bbfca9d40` (full),
+  `65245f5a33d781ba611716bc18cd42234088e874e95d67f6676ba8ec799a1611` (core).
+- Tests: `test/lineage.test.ts` (unit), `test/lineage-cli.test.ts` (CLI and
+  MCP contract), `test/lineage-property.test.ts` (seeded: 60 random
+  supersede / format-only / tombstone / move / rename sequences never leave
+  a derived note `can_act` after a real source change, and format-only edits
+  or renames alone never mark it; 60 random edit / read-a-random-version /
+  remove sequences resolve only on a current-version read). Four mutants of
+  the rules (older read resolves, removal counts as fresh, no format-only
+  equivalence, moves as format-only) are each killed by the suite.
+
 ## [0.7.0] — 2026-11-01
 
 ### Fixed — 0.7.0's cosmetic classifier hid real changes (release blocker)

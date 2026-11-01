@@ -12,6 +12,7 @@ import type { ServerIdentity } from './crypto/keys.js';
 import { openDatabase, type Db, type OpenOptions } from './db/open.js';
 import { DocumentStore } from './docs/documents.js';
 import { rebuildProjection, verifyProjection, type ProjectionResult } from './docs/integrity.js';
+import { Lineage } from './lineage/lineage.js';
 import { AssumptionAuditor } from './orient/audit.js';
 import { Orient, type OrientOptions } from './orient/orient.js';
 import { Recall } from './recall/recall.js';
@@ -33,6 +34,8 @@ export class KronicleLite {
   readonly verifier: ReceiptVerifier;
   readonly orient: Orient;
   readonly auditor: AssumptionAuditor;
+  /** Unreleased: derived-note lineage, the read log and per-actor pending changes. */
+  readonly lineage: Lineage;
 
   constructor(opts: KronicleLiteOptions = {}) {
     const opened = openDatabase(opts);
@@ -41,9 +44,12 @@ export class KronicleLite {
     this.dataDir = opened.dataDir;
     this.chain = new Chain(this.db, this.identity.signer);
     this.docs = new DocumentStore(this.db, this.chain);
-    this.recall = new Recall(this.db, this.chain, this.identity.signer, opts.workspace ?? 'local');
+    this.lineage = new Lineage(this.db, this.chain, this.docs);
+    this.recall = new Recall(this.db, this.chain, this.identity.signer, opts.workspace ?? 'local', this.lineage);
     this.verifier = new ReceiptVerifier(this.db, this.chain, this.docs);
-    this.orient = new Orient(this.db, this.chain, this.docs, this.identity.cursor_secret, opts.orient);
+    this.orient = new Orient(this.db, this.chain, this.docs, this.identity.cursor_secret, opts.orient, this.lineage);
+    // Lineage inference: what the author read since its session started (its cursor's briefing, else its latest orient).
+    this.docs.lineageInference = (actor_id, cursor, exclude) => this.lineage.infer(actor_id, this.orient.sessionStart(actor_id, cursor), exclude);
     this.auditor = new AssumptionAuditor(this.chain, this.docs);
   }
 

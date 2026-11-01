@@ -87,6 +87,15 @@ your beliefs aligned with what the store actually says now.
    - When you are unsure which of your beliefs are affected, pass them to
      `audit_assumptions` as `{symbol, value}` claims and act on the
      verdicts (`stale`, `contradicted`, `retracted`) it returns.
+   - A retraction of kind `derived` means a note (often your own) was
+     copied from a block that changed: do not act on the note; re-read the
+     source and re-derive the note (`put_document` again after reading the
+     current version, or `supersede_block`).
+   - `pending` lists changes to things you read that you have not yet
+     re-read at their CURRENT version. Seeing the retraction does not clear
+     it; re-reading does (`recall()` the block again, or read
+     `kronicle://docs/<slug>`). Do not run a world-changing command while
+     `pending_count > 0`.
 
 5. **Carry the new cursor.** Pass it as `since_cursor` next time and as
    `cursor` on every write tool so the stale-write advisory can be computed.

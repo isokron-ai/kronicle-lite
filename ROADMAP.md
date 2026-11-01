@@ -36,19 +36,24 @@ to land. Open an issue if one matters to you.
 *Top of the queue (2026-11-01), from the agent-memory-bench results and two
 external review rounds:*
 
-- **Derived-note lineage** — `put` takes `derived_from: [{block, hash}]`;
-  when a source block is superseded or tombstoned, notes derived from it are
-  downgraded (never `can_act`) and surface as retractions. Gate: Track A S1
-  next-session stale copy 20/20 → 0/20.
+- **Derived-note lineage** — *built on branch `lineage` (unreleased; see
+  CHANGELOG).* `put` / `supersede` take `derived_from: [{block_id,
+  content_hash}]`, lineage is also inferred from the author's reads; when a
+  source block is superseded, moved or tombstoned, derived notes are
+  downgraded (never `can_act`, `stale_derived`) and surface as `derived`
+  retractions. Gate: Track A S1 next-session stale copy 20/20 → 0/20.
 - **Exec-time pulse shims** — `kronicle-lite shim install` writes thin
   wrappers for configured commands (terraform, kubectl, `git push`,
   `npm publish`) that check for unresolved retractions at the moment the real
   binary runs, then exec it. Covers clients without hooks (Cursor, Codex,
   Hermes), changes landing during long commands, and `bash -c` / make /
   wrapper scripts.
-- **Delivered vs acknowledged retractions** — event ids and an `ack` call so
-  a cursor advances per agent only when the agent has processed the change.
-  Built only if a Track B variant shows retractions missed under compaction.
+- **Version-bound reconciliation** — *built on branch `lineage`
+  (unreleased).* Supersedes "delivered vs acknowledged": no `ack` call; a
+  change stays `pending` for an actor until it re-reads the CURRENT version
+  (an older version never clears a newer change). `kronicle-lite pending
+  --actor A --json` and `pending` on every orient focus for hook gates.
+  Next: a Track B variant that gates `deploy` on `pending_count`.
 - **Typed assertions** — `assert(key, value, scope, source)` and
   `check_conflicts(keys)`: same key and scope, different value. The tractable
   start of contradiction detection (Track A S2: 0/140 for every tool).

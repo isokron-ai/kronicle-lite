@@ -105,7 +105,7 @@ export function checkRevisionRow(chain: Chain, row: RevisionRowLike): RowProblem
 }
 
 export interface ProjectionMismatch {
-  table: 'documents' | 'document_revisions' | 'blocks' | 'doc_sources';
+  table: 'documents' | 'document_revisions' | 'blocks' | 'doc_sources' | 'doc_lineage';
   /** Primary key of the row (doc_id, doc_id@revision or block_id). */
   key: string;
   /** missing (in the chain, not stored) | extra (stored, not in the chain) | a column name | content_hash. */
@@ -161,6 +161,13 @@ const TABLES: { table: ProjectionMismatch['table']; key: string; order: string; 
     ],
   },
   { table: 'doc_sources', key: 'doc_id', order: 'doc_id', cols: ['slug', 'revision', 'chain_seq', 'kind', 'path', 'source_json'] },
+  // Unreleased: derived-note lineage is safety state (it downgrades notes); a deleted row must not pass.
+  {
+    table: 'doc_lineage',
+    key: "doc_id || '|' || source_block_id || '|' || inferred",
+    order: 'doc_id, source_block_id, inferred',
+    cols: ['source_content_hash', 'chain_seq'],
+  },
 ];
 
 function short(v: unknown): string {
@@ -282,7 +289,7 @@ export function rebuildProjection(db: Db, chain: Chain): { events: number } {
     // The delete trigger would feed possibly-corrupt old values back to FTS5;
     // drop it, clear everything, replay, then rebuild the index from scratch.
     db.exec(`INSERT INTO blocks_fts(blocks_fts) VALUES('delete-all'); DROP TRIGGER IF EXISTS blocks_ad;`);
-    db.exec(`DELETE FROM doc_sources; UPDATE blocks SET superseded_by = NULL; DELETE FROM blocks; DELETE FROM document_revisions; DELETE FROM documents;`);
+    db.exec(`DELETE FROM doc_lineage; DELETE FROM doc_sources; UPDATE blocks SET superseded_by = NULL; DELETE FROM blocks; DELETE FROM document_revisions; DELETE FROM documents;`);
     db.exec(SCHEMA_SQL.replace(/PRAGMA journal_mode = WAL;/, ''));
     for (const ev of chain.iterate()) {
       docs.applyEvent(ev);
