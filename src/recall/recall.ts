@@ -10,6 +10,7 @@ import type { Chain } from '../chain/index.js';
 import type { Signer } from '../crypto/keys.js';
 import type { Db } from '../db/open.js';
 import { splitHeadingPath, type BlockRow } from '../docs/documents.js';
+import { checkBlockRow, type RowProblem } from '../docs/integrity.js';
 import { queryHash, signReceipt, type Receipt } from './receipt.js';
 
 export interface RecallInput {
@@ -36,12 +37,21 @@ export interface RecallHit {
   receipt: Receipt | null;
 }
 
+/** A matching block whose stored text no longer hashes to the chain (0.5.0). Never served, never receipted. */
+export interface WithheldHit {
+  block_id: string;
+  doc_slug: string;
+  problem: RowProblem;
+}
+
 export interface RecallResult {
   query: string;
   query_hash: string;
   head: { seq: number; hash: string };
   match_mode: 'all_terms' | 'any_term' | 'none';
   hits: RecallHit[];
+  /** 0.5.0: hits withheld because their stored text fails the integrity check. Empty when all is well. */
+  withheld: WithheldHit[];
 }
 
 interface HitRow extends BlockRow {
@@ -95,8 +105,17 @@ export class Recall {
        VALUES (?, ?, ?, ?, ?, ?)`,
     );
     const hits: RecallHit[] = [];
+    const withheld: WithheldHit[] = [];
     const tx = this.db.transaction(() => {
       for (const r of rows) {
+        // 0.5.0: re-hash the text we are about to serve and check it against
+        // the chained block.created event. A tampered or corrupted row is
+        // withheld: no content, no receipt.
+        const problem = checkBlockRow(this.chain, r);
+        if (problem) {
+          withheld.push({ block_id: r.block_id, doc_slug: r.slug, problem });
+          continue;
+        }
         let receipt: Receipt | null = null;
         if (includeReceipts) {
           receipt = signReceipt(
@@ -138,7 +157,7 @@ export class Recall {
     });
     tx();
 
-    return { query: input.query, query_hash: qh, head, match_mode, hits };
+    return { query: input.query, query_hash: qh, head, match_mode, hits, withheld };
   }
 
   private search(expr: string, top_k: number, includeTomb: boolean): HitRow[] {

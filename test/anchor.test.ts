@@ -311,7 +311,8 @@ describe.each(backends)('anchoring against the $name backend', { timeout: 60_000
   it('anchor status: last anchor, events since, verify url; orient banner line', async () => {
     const { store } = makeStore(1);
     expect(anchorStatus(store, opts()).last).toBeNull();
-    expect(anchorLine(store.orient.getSystemState({ actor_id: 'a' }))).toBe('never anchored');
+    // 0.5.0: no anchor line at all until something was anchored.
+    expect(anchorLine(store.orient.getSystemState({ actor_id: 'a' }))).toBeNull();
     await pushCheckpoint(store, opts());
     store.docs.putDocument({ slug: 'extra', title: 'Extra', markdown: '# Extra\n\nOne more paragraph.\n', actor_id: 'tester' });
     const s = anchorStatus(store, opts());
@@ -461,7 +462,7 @@ describe('anchor service unreachable never breaks local operation', { timeout: 6
     expect(v.stderr).toMatch(/anchor service unreachable/);
     const o = await cli(['orient', '--data-dir', dataDir]);
     expect(o.status).toBe(0);
-    expect(o.stdout).toMatch(/> never anchored/);
+    expect(o.stdout).not.toMatch(/anchor/);
     const reopened = new KronicleLite({ dataDir });
     expect(reopened.chain.getCheckpoint(out.checkpoint.checkpoint_id)).not.toBeNull();
     reopened.close();

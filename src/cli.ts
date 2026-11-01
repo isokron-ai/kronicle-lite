@@ -3,7 +3,7 @@
  * kronicle-lite CLI
  *
  *   kronicle-lite serve [--data-dir DIR] [--actor ID]   stdio MCP server (dual-era: 2026-07-28 + 2025 initialize)
- *   kronicle-lite serve --http [--port N] [--host H] [--bearer T | --bearer-file F]   Streamable HTTP (2026-07-28 only)
+ *   kronicle-lite serve --http [--port N] [--host H] [--bearer T | --bearer-file F] [--modern-only]   Streamable HTTP
  *   kronicle-lite verify-chain [--data-dir DIR] [--from N] [--to N]
  *   kronicle-lite checkpoint [--data-dir DIR] [--from N] [--to N] [--push [--key K] [--url U]]
  *   kronicle-lite verify [--remote [--offline] [--url U] [--json]]   local by default (= verify-chain)
@@ -15,11 +15,12 @@
  *   kronicle-lite put --from-instructions [PATHS…] [--cwd DIR] [--json] [--stdin-hook]
  *   kronicle-lite watch [PATHS…] [--interval MS] [--debounce MS] [--poll] [--cwd DIR] [--list [--json]]
  *   kronicle-lite doctor [--json] [--no-network] [--full] [--cwd DIR]
- *   kronicle-lite orient [--data-dir DIR] [--actor ID] [--cursor C] [--focus F]
+ *   kronicle-lite orient [--data-dir DIR] [--actor ID] [--cursor C] [--focus F] [--all-projects]
+ *   kronicle-lite verify-chain [--full] | rebuild | demo [--dir D] [--keep]
  */
 
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
-import { createReadStream, createWriteStream, readFileSync } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync, readFileSync } from 'node:fs';
 import { text as readStreamText } from 'node:stream/consumers';
 import { basename } from 'node:path';
 
@@ -27,14 +28,16 @@ import { anchorStatus, tryPushCheckpoint, verifyRemote, type AnchorCallOptions }
 import { AnchorApiError, AnchorUnreachableError } from './anchor/client.js';
 import { AnchorConfigError } from './anchor/config.js';
 import { defaultDataDir } from './db/open.js';
-import type { DocumentSource } from './docs/documents.js';
+import { isValidSlug, type DocumentSource } from './docs/documents.js';
+import { describeProjection } from './docs/integrity.js';
+import { runDemo } from './demo.js';
 import { runDoctor, renderDoctor } from './doctor.js';
 import { bindGit } from './git/binding.js';
 import { DEFAULT_HTTP_PORT, loadOrCreateBearer, readBearerFile, serveHttp } from './http.js';
 import { createServerFactory, renderSystemStateMarkdown } from './server.js';
 import { KronicleLite } from './store.js';
 import { FOCUSES, type Focus } from './orient/orient.js';
-import { entryFor, resolveContext } from './instructions/paths.js';
+import { entryFor, projectScopeFor, resolveContext } from './instructions/paths.js';
 import { describeSync, syncInstructionFile, type SyncResult } from './instructions/sync.js';
 import { InstructionWatcher, resolveWatchSet, syncInstructionSet } from './instructions/watch.js';
 
@@ -61,6 +64,9 @@ const BOOLEAN_FLAGS = new Set([
   'bind-git',
   'no-network',
   'full',
+  'keep',
+  'all-projects',
+  'modern-only',
 ]);
 
 function parseArgs(argv: string[]): Args {
@@ -111,10 +117,16 @@ const HELP = `kronicle-lite ${VERSION} — hash-chained document store with sign
 
 Usage:
   kronicle-lite serve        [--data-dir DIR] [--actor ID]        run the stdio MCP server
-  kronicle-lite serve --http [--port N] [--host H] [--bearer T | --bearer-file F] [--allow-origin H]...
-                                                                 Streamable HTTP (2026-07-28), 127.0.0.1:${DEFAULT_HTTP_PORT}/mcp,
-                                                                 bearer from DIR/http-bearer.token (created 0600)
-  kronicle-lite verify-chain [--data-dir DIR] [--from N] [--to N] recompute every hash; exit 1 on mismatch
+  kronicle-lite serve --http [--port N] [--host H] [--bearer T | --bearer-file F] [--allow-origin H]... [--modern-only]
+                                                                 Streamable HTTP, 127.0.0.1:${DEFAULT_HTTP_PORT}/mcp, bearer from
+                                                                 DIR/http-bearer.token (created 0600); 2026-07-28 and 2025-era
+                                                                 clients (stateless), or 2026-07-28 only with --modern-only
+  kronicle-lite demo         [--dir D] [--keep]                    the stale-doc + tamper story end to end, in a temp dir
+  kronicle-lite verify-chain [--data-dir DIR] [--from N] [--to N] [--full]
+                                                                 recompute every hash and link; over the whole chain (or
+                                                                 --full) also re-hash every stored document and block
+                                                                 against the chain; exit 1 on any mismatch
+  kronicle-lite rebuild      [--data-dir DIR]                     re-derive documents and blocks from a verified chain
   kronicle-lite checkpoint   [--data-dir DIR] [--from N] [--to N] sign a Merkle checkpoint
                  [--push [--key K] [--url U]]                    …and anchor it off-box (hosted service countersigns)
   kronicle-lite verify       [--remote [--offline]] [--url U] [--json]
@@ -124,7 +136,8 @@ Usage:
   kronicle-lite export       [--data-dir DIR] [--out FILE]        JSONL of all events (stdout by default)
   kronicle-lite import       [--data-dir DIR] --in FILE           rebuild an EMPTY store from JSONL
   kronicle-lite keys         [--data-dir DIR]                     print key id + public key PEM
-  kronicle-lite put SLUG FILE.md [--title T] [--data-dir DIR]     store a document
+  kronicle-lite put SLUG FILE.md [--title T] [--data-dir DIR] [--json]
+                                                                 store a document (one-line summary; --json for every block)
                  [--bind-git]                                    record {repo_root, commit, path, blob_sha}; verify and
                                                                  audit report stale_source when the file changes
   kronicle-lite put --from-instructions [PATHS…] [--cwd DIR] [--json]
@@ -136,9 +149,12 @@ Usage:
                  [--list [--json]]                               print the resolved watch set and exit
   kronicle-lite doctor       [--data-dir DIR] [--json] [--no-network] [--full] [--cwd DIR]
                                                                  health checks (read-only); exit 1 when any check fails
-  kronicle-lite orient       [--data-dir DIR] [--actor ID] [--cursor C] [--focus F] [--json]
+  kronicle-lite orient       [--data-dir DIR] [--actor ID] [--cursor C] [--focus F] [--json] [--cwd DIR] [--all-projects]
+                                                                 instruction retractions are scoped to the project at
+                                                                 --cwd (default: the working directory)
 
-Data dir defaults to $KRONICLE_LITE_DATA_DIR or ~/.kronicle-lite.
+Data dir defaults to $KRONICLE_LITE_DATA_DIR or ~/.kronicle-lite. Instruction slugs carry a project key
+(<repo>-<hash8>); $KRONICLE_LITE_PROJECT overrides it.
 Anchor config: flags > KRONICLE_ANCHOR_URL / KRONICLE_ANCHOR_KEY > DIR/config.json {anchor_url, license_key}
   > https://anchor.isokron.ai. Exit codes for anchor commands: 0 ok, 1 divergence/conflict, 2 usage or I/O
   (including "anchor service unreachable").
@@ -173,6 +189,8 @@ async function main(argv: string[]): Promise<number> {
       const factory = createServerFactory(store, {
         version: VERSION,
         ...(str(flags['actor']) !== undefined ? { defaultActorId: str(flags['actor'])! } : {}),
+        // 0.5.0: orient hides other projects' instruction retractions (the project is the working directory's).
+        project: flags['all-projects'] === true ? null : projectScopeFor(instructionCtx(flags)),
       });
       if (flags['http']) {
         let bearer: string;
@@ -197,10 +215,11 @@ async function main(argv: string[]): Promise<number> {
           ...(num(flags['port']) !== undefined ? { port: num(flags['port'])! } : {}),
           ...(allowedOrigins.length > 0 ? { allowedOrigins } : {}),
           ...(allowedHosts.length > 0 ? { allowedHosts } : {}),
+          modernOnly: flags['modern-only'] === true,
           onerror: (err) => process.stderr.write(`http: ${err.message}\n`),
         });
         process.stderr.write(
-          `kronicle-lite ${VERSION} serving Streamable HTTP (2026-07-28) at ${handle.url}; ${bearerNote}; data dir ${dataDir}; key ${store.identity.signer.key_id}\n`,
+          `kronicle-lite ${VERSION} serving Streamable HTTP (${flags['modern-only'] === true ? '2026-07-28 only' : '2026-07-28 + 2025-era stateless'}) at ${handle.url}; ${bearerNote}; data dir ${dataDir}; key ${store.identity.signer.key_id}\n`,
         );
         await new Promise<void>((resolve) => {
           const stop = () => {
@@ -225,11 +244,30 @@ async function main(argv: string[]): Promise<number> {
     }
     case 'verify-chain': {
       const store = new KronicleLite({ dataDir });
-      const r = store.chain.verify(num(flags['from']) ?? 1, num(flags['to']));
-      process.stdout.write(JSON.stringify(r, null, 2) + '\n');
-      store.close();
-      return r.ok ? 0 : 1;
+      try {
+        return printVerifyAll(store, flags);
+      } finally {
+        store.close();
+      }
     }
+    case 'rebuild': {
+      const store = new KronicleLite({ dataDir });
+      try {
+        const r = store.rebuild();
+        process.stdout.write(
+          `rebuilt the projection from ${r.events} event(s): before: ${describeProjection(r.before)}; after: ${describeProjection(r.after)}\n`,
+        );
+        return r.after.ok ? 0 : 1;
+      } finally {
+        store.close();
+      }
+    }
+    case 'demo':
+      return runDemo({
+        out: process.stdout,
+        ...(str(flags['dir']) !== undefined ? { dir: str(flags['dir'])! } : {}),
+        keep: flags['keep'] === true,
+      });
     case 'checkpoint': {
       const store = new KronicleLite({ dataDir });
       const cp = store.chain.checkpoint(num(flags['from']) ?? 1, num(flags['to']));
@@ -259,12 +297,8 @@ async function main(argv: string[]): Promise<number> {
     case 'verify': {
       const store = new KronicleLite({ dataDir });
       try {
-        if (flags['remote'] !== true) {
-          // Local verification; identical to verify-chain.
-          const r = store.chain.verify(num(flags['from']) ?? 1, num(flags['to']));
-          process.stdout.write(JSON.stringify(r, null, 2) + '\n');
-          return r.ok ? 0 : 1;
-        }
+        // Local verification; identical to verify-chain.
+        if (flags['remote'] !== true) return printVerifyAll(store, flags);
         const r = await verifyRemote(store, { ...anchorOpts(flags), offline: flags['offline'] === true });
         if (flags['json']) {
           process.stdout.write(JSON.stringify(r, null, 2) + '\n');
@@ -341,6 +375,7 @@ async function main(argv: string[]): Promise<number> {
     case 'import': {
       const file = str(flags['in']);
       if (!file) throw new Error('import requires --in FILE');
+      if (!existsSync(file)) throw new Error(`cannot read ${file}: ENOENT`);
       const store = new KronicleLite({ dataDir });
       const r = await store.importEvents(createReadStream(file));
       process.stdout.write(`imported ${r.events} events; head seq ${r.head.seq} hash ${r.head.hash}\n`);
@@ -357,6 +392,14 @@ async function main(argv: string[]): Promise<number> {
       if (flags['from-instructions'] === true) return putFromInstructions(dataDir, positional, flags);
       const [slug, file] = positional;
       if (!slug || !file) throw new Error('put requires SLUG and FILE.md');
+      // Read (and fail) before the store exists: a failed put must not create the data dir or a key.
+      let markdown: string;
+      try {
+        markdown = readFileSync(file, 'utf8');
+      } catch (err) {
+        throw new Error(`cannot read ${file}: ${(err as NodeJS.ErrnoException).code ?? (err as Error).message}`);
+      }
+      if (!isValidSlug(slug)) throw new Error(`invalid slug "${slug}": lowercase letters, digits, . _ - (start with a letter or digit)`);
       const store = new KronicleLite({ dataDir });
       const warnings: string[] = [];
       let source: DocumentSource | undefined;
@@ -368,12 +411,20 @@ async function main(argv: string[]): Promise<number> {
       const r = store.docs.putDocument({
         slug,
         title: str(flags['title']) ?? basename(file).replace(/\.md$/i, ''),
-        markdown: readFileSync(file, 'utf8'),
+        markdown,
         actor_id: str(flags['actor']) ?? 'cli',
         ...(source !== undefined ? { source } : {}),
       });
       for (const w of warnings) process.stderr.write(`warning: ${w}\n`);
-      process.stdout.write(JSON.stringify({ ...r, ...(source !== undefined ? { source } : {}), ...(warnings.length > 0 ? { warnings } : {}) }, null, 2) + '\n');
+      if (flags['json'] === true) {
+        process.stdout.write(JSON.stringify({ ...r, ...(source !== undefined ? { source } : {}), ...(warnings.length > 0 ? { warnings } : {}) }, null, 2) + '\n');
+      } else {
+        const n = (st: string) => r.blocks.filter((b) => b.status === st && (st !== 'created' || !b.supersedes)).length;
+        const superseded = r.blocks.filter((b) => b.supersedes).length;
+        process.stdout.write(
+          `${r.slug} rev ${r.revision}: ${n('created')} new, ${superseded} changed, ${n('tombstoned')} removed, ${n('unchanged')} unchanged block(s); head seq ${r.head.seq}${source?.git ? ` (bound to ${source.git.path} @ ${source.git.blob_sha.slice(0, 12)})` : ''}\n`,
+        );
+      }
       store.close();
       return 0;
     }
@@ -388,6 +439,7 @@ async function main(argv: string[]): Promise<number> {
         since_cursor: str(flags['cursor']),
         focus: focusRaw as Focus | undefined,
         ...(num(flags['budget']) !== undefined ? { budget_tokens: num(flags['budget'])! } : {}),
+        project: flags['all-projects'] === true ? null : projectScopeFor(instructionCtx(flags)),
       });
       process.stdout.write(flags['json'] ? JSON.stringify(state, null, 2) + '\n' : renderSystemStateMarkdown(state) + '\n');
       store.close();
@@ -409,6 +461,21 @@ async function main(argv: string[]): Promise<number> {
       process.stderr.write(`unknown command: ${cmd}\n\n${HELP}`);
       return 2;
   }
+}
+
+/** verify-chain / verify (local): chain + projection; JSON on stdout, one summary line on stderr when it fails. */
+function printVerifyAll(store: KronicleLite, flags: Record<string, string | true>): number {
+  const r = store.verifyAll(num(flags['from']) ?? 1, num(flags['to']), flags['full'] === true ? { projection: true } : {});
+  process.stdout.write(JSON.stringify(r, null, 2) + '\n');
+  if (!r.ok) {
+    const m = r.first_mismatch;
+    const lines = [
+      ...(m ? [`chain: ${m.kind} at seq ${m.seq}`] : []),
+      ...(r.projection && !r.projection.ok ? [`projection: ${describeProjection(r.projection)}; run kronicle-lite rebuild once the chain verifies`] : []),
+    ];
+    process.stderr.write(lines.join('\n') + '\n');
+  }
+  return r.ok ? 0 : 1;
 }
 
 function instructionCtx(flags: Record<string, string | true>, cwdOverride?: string) {

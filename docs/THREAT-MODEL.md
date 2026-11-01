@@ -7,10 +7,40 @@ that it generated itself. Be precise about what that buys you.
 
 **Detection of accidental or unprivileged modification.** If a process edits
 the SQLite file directly (a sync client resolving a conflict badly, a script
-with a bug, a partial restore from backup, disk corruption), `verify_chain`
-finds the first bad `seq`, and receipts issued before the edit come back
-`UNVERIFIED` with a reason that says what moved (`content_hash_mismatch`,
-`chain_head_mismatch`, `chain_seq_unknown`).
+with a bug, a partial restore from backup, disk corruption):
+
+- an edit to the **`events` table** (the chain): `verify_chain` /
+  `verify-chain` and `doctor` report the first bad `seq` (`hash_mismatch`,
+  `link_broken`, `seq_gap`, `head_mismatch`); receipts bound to a head that
+  is no longer on the chain come back `UNVERIFIED` (`chain_head_mismatch`,
+  `chain_seq_unknown`); `get_system_state` re-checks the events of its
+  delta window (at least the last 1000) and puts an `INTEGRITY FAILURE`
+  banner first when one fails.
+- an edit to the **projection** the agent reads (`blocks`,
+  `document_revisions`, `documents`, `doc_sources`), since 0.5.0: every
+  read path that serves text re-hashes it (BLAKE3) and compares it with the
+  chained event that created it. `recall` withholds such a block (no
+  content, no receipt; listed under `withheld`), `verify` returns
+  `UNVERIFIED / content_tampered`, and a "live" answer is cross-checked
+  against the chain's `block.superseded` / `block.tombstoned` events
+  (`UNVERIFIED / projection_mismatch`); the `kronicle://docs/{slug}`
+  resource refuses a revision whose markdown does not match; orient's
+  integrity pass re-hashes the newest 2000 live blocks. `verify-chain` over
+  the whole chain (or with `--full`), the MCP `verify_chain` tool over the
+  whole chain and `doctor` replay every event into a scratch copy and
+  compare every stored row column by column, so a changed lifecycle column,
+  an extra row or a deleted row is reported too. `kronicle-lite rebuild`
+  re-derives the projection from a chain that verifies.
+
+Before 0.5.0 the projection was not checked: an edited `blocks.content`
+passed `verify_chain` and `doctor`, and `recall` served it with a receipt
+that verified `VERIFIED`.
+
+Not covered: the `receipts`, `flight_recorder`, `checkpoints` and
+`anchors` tables are not derived from the chain. Editing the flight
+recorder changes where a cursor-less orient resumes; editing a stored
+receipt breaks its signature; a checkpoint row is verified against the
+events on `verify_chain`.
 
 **Detection that an agent is reasoning from a stale block.** This is the main
 job. A receipt is a claim the agent can carry across turns, compactions and
@@ -43,8 +73,9 @@ unreachable" and every local command behaves exactly as without them.
 
 **It is not notarization.** The signing key lives next to the database and
 is readable by the same user. Anyone (or any process) who can write the
-database can also read `signing-key.pem`, rewrite the chain from any point,
-re-sign new receipts and checkpoints, and `verify_chain` will pass. Tamper-
+database can also read `signing-key.pem`, rewrite the chain from any point
+(events and the projection together, re-linking every later event), re-sign
+new receipts and checkpoints, and `verify_chain` will pass. Tamper-
 evidence against the box owner, or against malware running as the box owner,
 requires a key the box does not hold — a hardware token, a remote signer, or
 anchoring roots in a third-party log. 0.4.0 adds the last of these
@@ -103,11 +134,15 @@ LAN address is your decision; add the hostnames clients will use with
 `--allow-host`, and put TLS in front — the token travels in clear text
 otherwise. kronicle-lite does not do TLS.
 
-**Stateless, 2026-07-28 only.** No session id is minted or honored, `GET`
-and `DELETE` answer `405`, every request carries its own protocol version. A
-2025-era client that sends `initialize` gets `400` with
-`UnsupportedProtocolVersionError` naming `2026-07-28`; point it at stdio
-instead, which serves both eras.
+**Stateless, both eras (0.5.0).** No session id is minted or honored, `GET`
+and `DELETE` answer `405`. A 2026-07-28 request carries its own protocol
+version. A 2025-era client (one that opens with `initialize`, which is what
+Cursor and most clients still send) is served by the SDK's stateless legacy
+leg: every POST gets a fresh server instance over the same store, so there
+is no session to hijack or fixate and `initialize` grants nothing a later
+request relies on. It passes the same Host, Origin and bearer checks first;
+the legacy leg adds no route around them. `--modern-only` refuses those
+clients with `UnsupportedProtocolVersionError` (`-32022`) as 0.3.0/0.4.0 did.
 
 **What it is for.** A client on the same machine that cannot spawn a process,
 or a trusted single-user box reached over a tunnel you already protect. It is

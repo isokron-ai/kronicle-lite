@@ -27,6 +27,95 @@ import { AUDIT_VERDICTS } from './orient/audit.js';
 import { ReceiptSchema } from './recall/receipt.js';
 import { FOCUSES, RECOVERY_METHODS } from './orient/orient.js';
 import { RETRACTION_KINDS } from './orient/retraction.js';
+import { ROW_PROBLEMS } from './docs/integrity.js';
+
+// ───────────────────────────── lean JSON Schema (0.5.0) ─────────────────────────────
+
+type Json = { [k: string]: unknown };
+const SAFE = Number.MAX_SAFE_INTEGER;
+const OUTPUT_DEPTH = 0;
+
+function isPlain(v: unknown): v is Json {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/** Type-only summary of a nested node: what `tools/list` shows below OUTPUT_DEPTH. */
+function shallow(s: Json): Json {
+  if (Array.isArray(s['anyOf'])) {
+    const types = [...new Set((s['anyOf'] as Json[]).flatMap((x) => (x['type'] === undefined ? [] : ([] as unknown[]).concat(x['type']))))];
+    return types.length === 0 ? {} : { type: types.length === 1 ? types[0] : types };
+  }
+  const r: Json = {};
+  for (const k of ['type', 'enum', 'const']) if (s[k] !== undefined) r[k] = s[k];
+  return r;
+}
+
+/**
+ * Shrink an emitted JSON Schema without loosening anything a caller relies
+ * on. Both directions: no `$schema`, no ±2^53 integer bounds, no
+ * `propertyNames: string`, nullable `anyOf` folded into `type: [T, "null"]`.
+ * Outputs additionally lose descriptions, patterns, numeric bounds and
+ * `additionalProperties: false`, and below the top-level properties keep
+ * only their types (the full contract is the `kronicle://schemas/tools`
+ * resource and docs/FORMAT.md). A `pattern` next to a `format` is dropped. The server still validates every result against the full
+ * zod schema; the advertised one is a strict relaxation of it.
+ */
+export function compactJsonSchema(node: unknown, io: 'input' | 'output', depth = 0): unknown {
+  if (Array.isArray(node)) return node.map((x) => compactJsonSchema(x, io, depth));
+  if (!isPlain(node)) return node;
+  if (io === 'output' && depth > OUTPUT_DEPTH && (node['properties'] || node['items'] || node['anyOf'])) return shallow(node);
+  const any = node['anyOf'];
+  if (Array.isArray(any) && any.length === 2) {
+    const isNull = (x: unknown) => isPlain(x) && x['type'] === 'null' && Object.keys(x).length === 1;
+    const other = (any as unknown[]).find((x) => !isNull(x));
+    if ((any as unknown[]).some(isNull) && isPlain(other) && typeof other['type'] === 'string') {
+      const { anyOf: _drop, ...rest } = node;
+      return compactJsonSchema({ ...other, ...rest, type: [other['type'], 'null'] }, io, depth);
+    }
+  }
+  const out: Json = {};
+  for (const [k, v] of Object.entries(node)) {
+    if (k === '$schema') continue;
+    if ((k === 'maximum' && v === SAFE) || (k === 'minimum' && v === -SAFE)) continue;
+    if (k === 'propertyNames' && isPlain(v) && v['type'] === 'string' && Object.keys(v).length === 1) continue;
+    if (k === 'additionalProperties' && isPlain(v) && Object.keys(v).length === 0) continue;
+    // `format` (uuid, date-time, …) already says what the regex zod emits beside it says.
+    if (k === 'pattern' && typeof node['format'] === 'string') continue;
+    if (io === 'output') {
+      if (k === 'description' || k === 'pattern' || k === 'minimum' || k === 'maximum' || k === 'exclusiveMinimum' || k === 'exclusiveMaximum') continue;
+      if (k === 'additionalProperties' && v === false) continue;
+      if (k === 'required' && depth > 0) continue;
+    }
+    if (k === 'properties' && isPlain(v)) {
+      out[k] = Object.fromEntries(Object.entries(v).map(([pk, pv]) => [pk, compactJsonSchema(pv, io, depth + 1)]));
+      continue;
+    }
+    out[k] = compactJsonSchema(v, io, depth);
+  }
+  return out;
+}
+
+/** The full emitted JSON Schema of a zod schema (the kronicle://schemas/tools resource). */
+export function fullJsonSchema(schema: z.ZodType, io: 'input' | 'output'): Json {
+  return z.toJSONSchema(schema, { target: 'draft-2020-12', io }) as Json;
+}
+
+/**
+ * Wrap a zod schema as a Standard Schema whose advertised JSON Schema is the
+ * compact one and whose validation is the full zod schema, unchanged.
+ */
+export function lean<T extends z.ZodType>(schema: T, io: 'input' | 'output'): T {
+  const std = schema['~standard'];
+  const json = () => compactJsonSchema(fullJsonSchema(schema, io), io) as Json;
+  return {
+    '~standard': {
+      version: 1,
+      vendor: 'kronicle-lite',
+      validate: (v: unknown) => std.validate(v),
+      jsonSchema: { input: json, output: json },
+    },
+  } as unknown as T;
+}
 
 const HEX64 = z.string().regex(/^[0-9a-f]{64}$/).describe('lowercase hex sha256');
 
@@ -79,6 +168,10 @@ export const RetractionSchema = z.object({
   successor_block_id: z.string().nullable(),
   reason: z.string().nullable(),
   reason_line: z.string().describe('"You previously relied on X; current truth is Y. Reconcile before proceeding."'),
+  heading_path: z.array(z.string()).nullable(),
+  old_text: z.string().nullable(),
+  new_text: z.string().nullable(),
+  diff: z.string().nullable().describe('Word diff: [-removed-]{+added+}.'),
 });
 
 export const DeltaEventEntrySchema = z.object({
@@ -172,6 +265,10 @@ export const SystemStateSchema = z.object({
     .array(SourceDriftSchema)
     .nullable()
     .describe('Git-bound documents whose source file changed or was deleted since binding; null for focus=pulse.'),
+  integrity: z
+    .object({ ok: z.boolean(), events_checked: z.number().int().nonnegative(), blocks_checked: z.number().int().nonnegative(), problem: z.string().nullable() })
+    .nullable(),
+  scope: z.object({ project_keys: z.array(z.string()), hidden_retractions: z.number().int().nonnegative() }).nullable(),
   delta: TypedDeltaSchema.nullable().describe('null for focus=retractions and focus=pulse.'),
   retractions: z.array(RetractionSchema).nullable().describe('null for focus=pulse.'),
   digest: DigestSchema.nullable().describe('Present on cold start and focus=orientation.'),
@@ -225,6 +322,7 @@ export const RecallResultSchema = z.object({
   head: ChainHeadSchema,
   match_mode: z.enum(['all_terms', 'any_term', 'none']),
   hits: z.array(RecallHitSchema),
+  withheld: z.array(z.object({ block_id: z.string(), doc_slug: z.string(), problem: z.enum(ROW_PROBLEMS) })),
 });
 
 export const VerifyResultSchema = z.object({
@@ -237,6 +335,7 @@ export const VerifyResultSchema = z.object({
   tombstone_reason: z.string().nullable().optional(),
   supersession_depth: z.number().int().nonnegative().optional(),
   source_drift: SourceDriftSchema.optional().describe('With STALE_SOURCE: the git-bound source file changed since binding.'),
+  integrity_problem: z.enum(ROW_PROBLEMS).optional(),
   checked_at: z.string(),
   chain_head: ChainHeadSchema,
 });
@@ -247,6 +346,16 @@ export const CheckpointResultSchema = z.object({
   to_seq: z.number().int().positive(),
   ok: z.boolean(),
   reason: z.enum(['valid', 'root_mismatch', 'signature_invalid', 'unknown_key', 'range_outside_verified']),
+});
+
+export const ProjectionResultSchema = z.object({
+  ok: z.boolean(),
+  events_replayed: z.number().int().nonnegative(),
+  documents_checked: z.number().int().nonnegative(),
+  revisions_checked: z.number().int().nonnegative(),
+  blocks_checked: z.number().int().nonnegative(),
+  mismatch_count: z.number().int().nonnegative(),
+  mismatches: z.array(z.object({ table: z.string(), key: z.string(), field: z.string(), detail: z.string() })),
 });
 
 export const VerifyChainResultSchema = z.object({
@@ -264,6 +373,7 @@ export const VerifyChainResultSchema = z.object({
     .nullable(),
   head: ChainHeadSchema,
   checkpoints: z.array(CheckpointResultSchema),
+  projection: ProjectionResultSchema.nullable(),
 });
 
 export const CheckpointSchema = z.object({

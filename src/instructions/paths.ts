@@ -27,6 +27,22 @@
  *
  * Slugs are deterministic: the same file under the same project root always
  * maps to the same slug, on every OS (paths are `/`-normalized first).
+ *
+ * 0.5.0: slugs carry a project key right after the namespace, so two
+ * repositories sharing one data dir no longer overwrite (and falsely
+ * retract) each other's instructions:
+ *
+ *   CLAUDE.md in /work/acme-api   → instructions/acme-api-1a2b3c4d/claude-md
+ *   its auto memory MEMORY.md     → memory/acme-api-1a2b3c4d/MEMORY
+ *
+ * key = <basename of the root, sanitized, ≤ 40 chars>-<first 8 hex of
+ * sha256(absolute root, `/`-separated)>; the instruction key uses the git
+ * worktree toplevel, the memory key the main worktree root (the directory
+ * Claude Code keys auto memory by). $KRONICLE_LITE_PROJECT (1-64 of
+ * [a-z0-9._-]) replaces both, e.g. to keep slugs stable when a repository
+ * moves. The 0.4.0 un-keyed slug of each file is kept as `legacySlug`; the
+ * first sync that finds it holding this file's current text renames it in
+ * place (sync.ts), so blocks, receipts and retractions carry over.
  */
 
 import { createHash } from 'node:crypto';
@@ -42,6 +58,10 @@ export interface InstructionEntry {
   /** Absolute path on this machine. */
   path: string;
   slug: string;
+  /** 0.4.0 slug of the same file (no project key), or null for external files. */
+  legacySlug: string | null;
+  /** Project the file belongs to (null for files outside the project and its memory dir). */
+  project: { key: string; root: string } | null;
   kind: InstructionKind;
   /** What is recorded in the document.put `source.path`: project-relative, `~/`-relative or absolute; `/`-separated. */
   recordPath: string;
@@ -69,6 +89,25 @@ export interface ResolvedContext {
   memoryDir: string;
   /** How memoryDir was decided (for `watch --list` / doctor). */
   memoryRule: 'autoMemoryDirectory' | 'CLAUDE_CODE_PROJECT_DIR_NAME' | 'derived' | 'derived-long-name';
+  /** 0.5.0: slug key for instruction files (from projectRoot). */
+  projectKey: string;
+  /** 0.5.0: slug key for auto-memory files (from memoryRoot). */
+  memoryKey: string;
+}
+
+const PROJECT_OVERRIDE_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+/** Readable, stable key for a project root: `<basename>-<sha256(root)[:8]>`. */
+export function projectKey(root: string): string {
+  const norm = root.split(/[\\/]+/).join('/');
+  const name = (sanitizeSegment(basename(root) || 'root').toLowerCase().slice(0, 40).replace(/[._-]+$/, '') || 'root');
+  return `${name}-${hash8(norm)}`;
+}
+
+/** The keys orient scopes instruction retractions to, for a working directory. */
+export function projectScopeFor(ctx: InstructionContext = {}): { keys: string[]; root: string } {
+  const rc = resolveContext(ctx);
+  return { keys: [...new Set([rc.projectKey, rc.memoryKey])], root: rc.projectRoot };
 }
 
 export function resolveContext(ctx: InstructionContext = {}): ResolvedContext {
@@ -79,7 +118,20 @@ export function resolveContext(ctx: InstructionContext = {}): ResolvedContext {
   const memoryRoot = gitMainRoot(cwd) ?? cwd;
   const claudeDir = env['CLAUDE_CONFIG_DIR'] ? resolve(expandHome(env['CLAUDE_CONFIG_DIR'], home)) : join(home, '.claude');
   const mem = autoMemoryDir({ claudeDir, projectRoot, memoryRoot, home, env });
-  return { cwd, home, env, projectRoot, memoryRoot, claudeDir, memoryDir: mem.dir, memoryRule: mem.rule };
+  const override = env['KRONICLE_LITE_PROJECT'];
+  const fixed = override && PROJECT_OVERRIDE_RE.test(override) ? override : null;
+  return {
+    cwd,
+    home,
+    env,
+    projectRoot,
+    memoryRoot,
+    claudeDir,
+    memoryDir: mem.dir,
+    memoryRule: mem.rule,
+    projectKey: fixed ?? projectKey(projectRoot),
+    memoryKey: fixed ?? projectKey(memoryRoot),
+  };
 }
 
 function expandHome(p: string, home: string): string {
@@ -158,10 +210,14 @@ function hash8(s: string): string {
   return createHash('sha256').update(s, 'utf8').digest('hex').slice(0, 8);
 }
 
-/** Keep slugs ≤ 128 chars (receipt limit): truncate and append a short hash of the full slug. */
+/**
+ * Keep slugs ≤ 128 chars (receipt limit) and ≤ 17 `/`-segments (PATH_SLUG_RE):
+ * truncate and append a short hash of the full slug.
+ */
 function boundSlug(slug: string): string {
-  if (slug.length <= 128) return slug;
-  return slug.slice(0, 119).replace(/[/._-]+$/, '') + '-' + hash8(slug);
+  const parts = slug.split('/');
+  if (slug.length <= 128 && parts.length <= 17) return slug;
+  return parts.slice(0, 16).join('/').slice(0, 119).replace(/[/._-]+$/, '') + '-' + hash8(slug);
 }
 
 /**
@@ -169,22 +225,23 @@ function boundSlug(slug: string): string {
  * the project root (any separator); `inMemoryDir` marks a file in the auto
  * memory directory. Pure: no filesystem access.
  */
-export function instructionSlugFor(rel: string, inMemoryDir: boolean): string {
+export function instructionSlugFor(rel: string, inMemoryDir: boolean, key?: string): string {
   const parts = rel.split(/[\\/]+/).filter((p) => p.length > 0 && p !== '.');
+  const k = key !== undefined ? [key] : [];
   if (inMemoryDir) {
-    return boundSlug(['memory', ...parts.slice(0, -1).map(sanitizeSegment), sanitizeSegment(stripMd(parts[parts.length - 1] ?? 'MEMORY.md'))].join('/'));
+    return boundSlug(['memory', ...k, ...parts.slice(0, -1).map(sanitizeSegment), sanitizeSegment(stripMd(parts[parts.length - 1] ?? 'MEMORY.md'))].join('/'));
   }
   const tail = (segs: string[]) => [...segs.slice(0, -1).map(sanitizeSegment), sanitizeSegment(stripMd(segs[segs.length - 1] ?? 'x'))];
   if (parts[0] === '.claude' && parts[1] === 'rules' && parts.length > 2) {
-    return boundSlug(['instructions', 'claude-rules', ...tail(parts.slice(2))].join('/'));
+    return boundSlug(['instructions', ...k, 'claude-rules', ...tail(parts.slice(2))].join('/'));
   }
   if (parts[0] === '.cursor' && parts[1] === 'rules' && parts.length > 2) {
-    return boundSlug(['instructions', 'cursor-rules', ...tail(parts.slice(2))].join('/'));
+    return boundSlug(['instructions', ...k, 'cursor-rules', ...tail(parts.slice(2))].join('/'));
   }
   const file = parts[parts.length - 1] ?? 'x';
   const dirs = parts.slice(0, -1).map(sanitizeSegment);
   const leaf = WELL_KNOWN[file] ?? sanitizeSegment(stripMd(file));
-  return boundSlug(['instructions', ...dirs, leaf].join('/'));
+  return boundSlug(['instructions', ...k, ...dirs, leaf].join('/'));
 }
 
 function isInside(root: string, file: string): string | null {
@@ -198,14 +255,32 @@ export function entryFor(absPath: string, rc: ResolvedContext): InstructionEntry
   if (inMem !== null) {
     const homeRel = isInside(rc.home, path);
     const recordPath = homeRel !== null ? `~/${homeRel}` : path.split(/[\\/]+/).join('/');
-    return { path, slug: instructionSlugFor(inMem, true), kind: 'memory', recordPath, title: `Claude Code auto memory: ${inMem}` };
+    return {
+      path,
+      slug: instructionSlugFor(inMem, true, rc.memoryKey),
+      legacySlug: instructionSlugFor(inMem, true),
+      project: { key: rc.memoryKey, root: rc.memoryRoot },
+      kind: 'memory',
+      recordPath,
+      title: `Claude Code auto memory: ${inMem}`,
+    };
   }
   const rel = isInside(rc.projectRoot, path);
-  if (rel !== null) return { path, slug: instructionSlugFor(rel, false), kind: 'instruction', recordPath: rel, title: rel };
+  if (rel !== null) {
+    return {
+      path,
+      slug: instructionSlugFor(rel, false, rc.projectKey),
+      legacySlug: instructionSlugFor(rel, false),
+      project: { key: rc.projectKey, root: rc.projectRoot },
+      kind: 'instruction',
+      recordPath: rel,
+      title: `${basename(rc.projectRoot)}/${rel}`,
+    };
+  }
   const homeRel = isInside(rc.home, path);
   const recordPath = homeRel !== null ? `~/${homeRel}` : path.split(/[\\/]+/).join('/');
   const slug = boundSlug(`instructions/external/${hash8(recordPath)}-${sanitizeSegment(stripMd(basename(path)))}`);
-  return { path, slug, kind: 'instruction', recordPath, title: recordPath };
+  return { path, slug, legacySlug: null, project: null, kind: 'instruction', recordPath, title: recordPath };
 }
 
 // ───────────────────────────── watch set ─────────────────────────────

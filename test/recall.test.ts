@@ -151,8 +151,8 @@ describe('verify receipt', () => {
     const { verifier, receipt, db } = issued();
     db.prepare(`UPDATE blocks SET content_hash = ? WHERE block_id = ?`).run('a'.repeat(64), receipt.block_id);
     const v = verifier.verify(receipt);
-    expect(v.reason).toBe('content_hash_mismatch');
-    expect(v.status).toBe('UNVERIFIED');
+    // 0.5.0: the row no longer hashes; that is tampering, reported before the receipt comparison.
+    expect(v).toMatchObject({ status: 'UNVERIFIED', reason: 'content_tampered', integrity_problem: 'content_hash_mismatch' });
     db.prepare(`DELETE FROM blocks WHERE block_id = ?`).run(receipt.block_id);
     expect(verifier.verify(receipt).reason).toBe('unknown_block');
   });

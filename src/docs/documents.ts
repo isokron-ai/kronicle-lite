@@ -12,6 +12,7 @@
  *   block.created      one new block (carries content)
  *   block.superseded   old block → successor block
  *   block.tombstoned   block retired with a reason, no successor
+ *   document.renamed   (0.5.0) same doc_id, new slug
  */
 
 import { randomUUID } from 'node:crypto';
@@ -129,6 +130,12 @@ export interface DocumentSource {
   path: string;
   /** Present when bound with bind_git (FORMAT §3.4). */
   git?: GitBinding;
+  /**
+   * 0.5.0: the project an instruction / memory file belongs to (key derived
+   * from the git worktree root, see instructions/paths.ts). Orient uses it to
+   * keep one project's instruction retractions out of another's briefing.
+   */
+  project?: { key: string; root: string };
 }
 
 export interface GitBinding {
@@ -219,6 +226,13 @@ export class DocumentStore {
     return (this.db.prepare(`SELECT * FROM blocks WHERE block_id = ?`).get(block_id) as BlockRow | undefined) ?? null;
   }
 
+  /** Live blocks across all documents, newest first (orient's integrity pass). */
+  liveBlockRows(limit: number): BlockRow[] {
+    return this.db
+      .prepare(`SELECT * FROM blocks WHERE valid_to IS NULL AND tombstoned_at IS NULL ORDER BY chain_seq DESC LIMIT ?`)
+      .all(limit) as BlockRow[];
+  }
+
   liveBlocks(doc_id: string): BlockRow[] {
     return this.db
       .prepare(
@@ -288,11 +302,35 @@ export class DocumentStore {
     return r?.content_hash ?? null;
   }
 
+  getRevision(doc_id: string, revision: number): { doc_id: string; revision: number; markdown: string; content_hash: string; chain_seq: number } | null {
+    return (
+      (this.db
+        .prepare(`SELECT doc_id, revision, markdown, content_hash, chain_seq FROM document_revisions WHERE doc_id = ? AND revision = ?`)
+        .get(doc_id, revision) as { doc_id: string; revision: number; markdown: string; content_hash: string; chain_seq: number } | undefined) ?? null
+    );
+  }
+
   getRevisionMarkdown(doc_id: string, revision: number): string | null {
     const r = this.db
       .prepare(`SELECT markdown FROM document_revisions WHERE doc_id = ? AND revision = ?`)
       .get(doc_id, revision) as { markdown: string } | undefined;
     return r?.markdown ?? null;
+  }
+
+  /**
+   * 0.5.0: does the chain (not the projection) record a block.superseded or
+   * block.tombstoned event for this block? Used to confirm a "live" answer
+   * from the projection before signing off on it.
+   */
+  chainRetired(block_id: string): boolean {
+    return (
+      this.db
+        .prepare(
+          `SELECT 1 FROM events WHERE event_type IN ('block.superseded', 'block.tombstoned')
+             AND json_extract(payload_canonical, '$.block_id') = ? LIMIT 1`,
+        )
+        .get(block_id) !== undefined
+    );
   }
 
   /**
@@ -576,6 +614,28 @@ export class DocumentStore {
     return run.immediate();
   }
 
+  /**
+   * 0.5.0: give a document a new slug, keeping its doc_id, revisions and
+   * blocks (`document.renamed`). Used to move 0.4.0 instruction documents
+   * under their project key. Refused when the new slug is taken.
+   */
+  renameDocument(args: { doc_id: string; slug: string; actor_id: string; reason: string }): ChainHead {
+    if (!isValidSlug(args.slug)) throw new DocumentError('invalid_slug', `invalid slug ${args.slug}`);
+    const run = this.db.transaction((): ChainHead => {
+      const doc = this.getDocumentById(args.doc_id);
+      if (!doc) throw new DocumentError('unknown_document', `no document ${args.doc_id}`);
+      if (this.getDocument(args.slug)) throw new DocumentError('invalid_slug', `slug ${args.slug} is taken`);
+      const r = this.chain.append({
+        event_type: 'document.renamed',
+        actor_id: args.actor_id,
+        payload: { doc_id: doc.doc_id, from_slug: doc.slug, slug: args.slug, revision: doc.current_revision, reason: args.reason },
+      });
+      this.applyEvent(r.event);
+      return r.head;
+    });
+    return run.immediate();
+  }
+
   tombstoneBlock(args: { block_id: string; reason: string; actor_id: string }): TombstoneBlockResult {
     const run = this.db.transaction((): TombstoneBlockResult => {
       const old = this.requireLive(args.block_id);
@@ -722,6 +782,12 @@ export class DocumentStore {
               WHERE block_id = ? AND tombstoned_at IS NULL`,
           )
           .run(ev.occurred_at, p['reason'] ?? null, ev.occurred_at, p['block_id']);
+        return;
+      }
+      case 'document.renamed': {
+        // 0.5.0: same doc_id, new slug. Revisions and blocks are keyed by doc_id.
+        this.db.prepare(`UPDATE documents SET slug = ?, updated_at = ? WHERE doc_id = ?`).run(p['slug'], ev.occurred_at, p['doc_id']);
+        this.db.prepare(`UPDATE doc_sources SET slug = ? WHERE doc_id = ?`).run(p['slug'], p['doc_id']);
         return;
       }
       default:

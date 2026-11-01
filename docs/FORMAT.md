@@ -177,9 +177,12 @@ renamed heading keeps its address.
 | `block.created` | `block_id, doc_id, doc_slug, revision, ordinal, kind, level, heading_path[], content, content_hash` |
 | `block.superseded` | `block_id, successor_block_id, doc_id, doc_slug, revision, reason` |
 | `block.tombstoned` | `block_id, doc_id, doc_slug, revision, reason` |
+| `document.renamed` (0.5.0) | `doc_id, from_slug, slug, revision, reason` — same document, new slug; revisions and blocks are keyed by `doc_id` and carry over |
 
 Block content and document markdown live in the chain, so the chain alone
-rebuilds the tables (`kronicle-lite import`).
+rebuilds the tables (`kronicle-lite import`, `kronicle-lite rebuild`).
+Readers older than 0.5.0 ignore `document.renamed` (no projection), so the
+document keeps its old slug there; nothing else changes.
 
 ### 3.2 Revision diff
 
@@ -210,18 +213,35 @@ Namespaced slugs come from file import; the MCP `put_document` tool still
 takes flat slugs only. The `instructions/` and `memory/` namespaces are
 reserved for instruction files:
 
-| file (relative to the project root) | slug |
+| file (relative to the project root) | slug (0.5.0; `<key>` = project key) |
 |---|---|
-| `CLAUDE.md`, `AGENTS.md`, `CLAUDE.local.md` | `instructions/claude-md`, `instructions/agents-md`, `instructions/claude-local-md` |
-| `<dir>/CLAUDE.md` | `instructions/<dir>/claude-md` |
-| `.claude/rules/<path>.md` | `instructions/claude-rules/<path>` |
-| `.cursor/rules/<path>` | `instructions/cursor-rules/<path>` (a trailing `.md` dropped) |
-| Claude Code auto memory `<memory dir>/<name>.md` | `memory/<name>` (e.g. `memory/MEMORY`) |
-| any other file | `instructions/<path without .md>` |
+| `CLAUDE.md`, `AGENTS.md`, `CLAUDE.local.md` | `instructions/<key>/claude-md`, `…/agents-md`, `…/claude-local-md` |
+| `<dir>/CLAUDE.md` | `instructions/<key>/<dir>/claude-md` |
+| `.claude/rules/<path>.md` | `instructions/<key>/claude-rules/<path>` |
+| `.cursor/rules/<path>` | `instructions/<key>/cursor-rules/<path>` (a trailing `.md` dropped) |
+| Claude Code auto memory `<memory dir>/<name>.md` | `memory/<memory key>/<name>` (e.g. `memory/acme-api-1a2b3c4d/MEMORY`) |
+| any other file inside the project | `instructions/<key>/<path without .md>` |
+| a file outside the project and its memory dir | `instructions/external/<8 hex of sha256(path)>-<name>` (unchanged) |
+
+**Project key (0.5.0).** `<key>` = the basename of the git worktree
+toplevel (outside git: the working directory), sanitized as below,
+lowercased, at most 40 characters, then `-` and the first 8 hex chars of
+`sha256(absolute root path, '/'-separated)`: `/work/acme-api` →
+`acme-api-<8 hex>`. `<memory key>` is the same recipe over the main
+worktree root, the directory Claude Code keys auto memory by.
+`$KRONICLE_LITE_PROJECT` (`^[a-z0-9][a-z0-9._-]{0,63}$`) replaces both.
+0.4.0 wrote the same slugs without the key (`instructions/claude-md`,
+`memory/MEMORY`), so two repositories sharing a data dir overwrote each
+other. A 0.5.0 sync adopts such a legacy document for this project only when
+its current markdown hash equals the file's and its `source.path` equals the
+file's project-relative path: it appends `document.renamed` and continues
+under the keyed slug with the same `doc_id`. Otherwise the legacy document
+is left as it is.
 
 Segments are sanitized (`[^A-Za-z0-9._-]` → `-`, leading `._-` and trailing
-`-` dropped); a slug over 128 characters is cut to 119 and suffixed with `-`
-and 8 hex chars of `sha256(full slug)`. In resource URIs a namespaced slug is
+`-` dropped); a slug over 128 characters or 17 segments is cut to its first 16
+segments and 119 characters and suffixed with `-` and 8 hex chars of
+`sha256(full slug)`. In resource URIs a namespaced slug is
 percent-encoded: `kronicle://docs/instructions%2Fclaude-md`.
 
 `document.put` may carry `source`, recorded only when the caller supplies it
@@ -229,10 +249,15 @@ percent-encoded: `kronicle://docs/instructions%2Fclaude-md`.
 
 ```json
 { "kind": "instruction" | "memory" | "file", "path": "CLAUDE.md",
-  "git": { "repo_root": "/abs/repo", "commit": "<40 hex> | null", "path": "docs/deploy.md", "blob_sha": "<40 hex>" } }
+  "git": { "repo_root": "/abs/repo", "commit": "<40 hex> | null", "path": "docs/deploy.md", "blob_sha": "<40 hex>" },
+  "project": { "key": "acme-api-1a2b3c4d", "root": "/work/acme-api" } }
 ```
 
-`git` is present when the put was made with `bind_git` (§3.5).
+`git` is present when the put was made with `bind_git` (§3.5). `project`
+(0.5.0) is present on instruction and memory imports from inside a project;
+`get_system_state` leaves instruction retractions whose document recorded a
+different project key out of `retractions` (counted in
+`scope.hidden_retractions`) unless the caller asks for `all_projects`.
 
 `path` is project-relative, `~/`-relative or absolute, always
 `/`-separated. The `doc_sources` table projects the latest put's `source`
@@ -261,6 +286,24 @@ the object exists, else the stored revision's markdown — and the working
 file. A vanished repository or missing `git` is `unavailable`, not drift.
 Re-putting with `bind_git` rebinds; a put without `source` clears the
 binding.
+
+### 3.6 Projection integrity (0.5.0)
+
+The tables are a projection; their rows carry the seq of the event that
+made them (`blocks.chain_seq` → `block.created`, `document_revisions.chain_seq`
+→ `document.put` / `document.revised`). A row is intact when
+
+```
+BLAKE3(blocks.content) == blocks.content_hash
+events[chain_seq] is block.created with the same block_id, doc_id, content, content_hash
+recompute(events[chain_seq]) == events[chain_seq].this_hash        (§1.2)
+```
+
+(for revisions: `markdown` / `markdown_hash` against the document event).
+`recall`, `verify`, the document resource and orient check rows this way
+before serving them. The whole-projection check replays every event into an
+empty schema and compares `documents`, `document_revisions`, `blocks` and
+`doc_sources` column by column, then re-hashes every block and revision.
 
 ## 4. Receipts (v2)
 
@@ -309,10 +352,12 @@ Fail-closed, in order:
 | `key_id` known / not revoked | `UNVERIFIED / unknown_key` or `key_revoked` |
 | Ed25519 verifies over payload | `UNVERIFIED / signature_invalid` |
 | block row exists | `UNVERIFIED / unknown_block` |
+| the row is intact (§3.6; 0.5.0) | `UNVERIFIED / content_tampered` (+ `integrity_problem`) |
 | stored `content_hash` matches | `UNVERIFIED / content_hash_mismatch` |
 | `events[chain_seq].this_hash == chain_head_hash` (seq 0 ⇒ genesis) | `UNVERIFIED / chain_seq_unknown` or `chain_head_mismatch` |
 | lineage head tombstoned | `TOMBSTONED / tombstoned` |
 | lineage head is a different block | `SUPERSEDED / superseded_by_newer_head` (+ `current_block_id`, `current_content_hash`) |
+| the chain has a `block.superseded` / `block.tombstoned` event for a block the projection calls live (0.5.0) | `UNVERIFIED / projection_mismatch` |
 | document git-bound and its source blob moved (0.4.0, §3.5) | `STALE_SOURCE / stale_source` (+ `source_drift`) |
 | otherwise | `VERIFIED / verified` |
 

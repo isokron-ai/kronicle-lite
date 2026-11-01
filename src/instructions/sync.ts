@@ -19,6 +19,31 @@ export const MAX_INSTRUCTION_BYTES = 4 * 1024 * 1024;
 
 export type SyncAction = 'created' | 'updated' | 'unchanged' | 'removed' | 'missing' | 'too_large' | 'error';
 
+/**
+ * 0.5.0 migration: adopt the 0.4.0 un-keyed document (`instructions/claude-md`)
+ * for this project when it still holds exactly this file's text and was
+ * recorded from the same relative path. The document is renamed in place
+ * (`document.renamed`), so its blocks, receipts and supersession history
+ * carry over. Anything else leaves the legacy document alone: with one
+ * shared data dir it may hold another project's file.
+ */
+function adoptLegacy(store: KronicleLite, entry: InstructionEntry, normalizedHash: string | null, actor_id: string): string | null {
+  if (!entry.legacySlug || entry.legacySlug === entry.slug || normalizedHash === null) return null;
+  if (store.docs.getDocument(entry.slug)) return null;
+  const legacy = store.docs.getDocument(entry.legacySlug);
+  if (!legacy) return null;
+  const src = store.docs.getSource(legacy.doc_id);
+  if (src?.source.path !== entry.recordPath || src.source.project !== undefined) return null;
+  if (store.docs.currentMarkdownHash(entry.legacySlug) !== normalizedHash) return null;
+  store.docs.renameDocument({
+    doc_id: legacy.doc_id,
+    slug: entry.slug,
+    actor_id,
+    reason: `0.5.0 project key: ${entry.project?.root ?? 'unknown project'}`,
+  });
+  return entry.legacySlug;
+}
+
 export interface SyncResult {
   slug: string;
   path: string;
@@ -30,6 +55,8 @@ export interface SyncResult {
   tombstoned: number;
   head: ChainHead;
   error?: string;
+  /** 0.5.0: the legacy slug this document was renamed from in this sync. */
+  migrated_from?: string;
 }
 
 function readText(path: string): { text: string } | { missing: true } | { tooLarge: number } {
@@ -51,9 +78,18 @@ function readText(path: string): { text: string } | { missing: true } | { tooLar
 
 export function syncInstructionFile(store: KronicleLite, entry: InstructionEntry, opts: { actor_id?: string } = {}): SyncResult {
   const actor_id = opts.actor_id ?? 'instructions';
-  const base = { slug: entry.slug, path: entry.recordPath, kind: entry.kind, created: 0, superseded: 0, tombstoned: 0 };
+  const base: Pick<SyncResult, 'slug' | 'path' | 'kind' | 'created' | 'superseded' | 'tombstoned' | 'migrated_from'> = {
+    slug: entry.slug,
+    path: entry.recordPath,
+    kind: entry.kind,
+    created: 0,
+    superseded: 0,
+    tombstoned: 0,
+  };
   try {
     const read = readText(entry.path);
+    const migrated = adoptLegacy(store, entry, 'text' in read ? blake3Hex(normalizeMarkdown(read.text)) : null, actor_id);
+    if (migrated) base.migrated_from = migrated;
     const existing = store.docs.getDocument(entry.slug);
     if ('tooLarge' in read) {
       return { ...base, action: 'too_large', revision: existing?.current_revision ?? null, head: store.chain.head(), error: `${read.tooLarge} bytes > 4 MiB` };
@@ -71,7 +107,12 @@ export function syncInstructionFile(store: KronicleLite, entry: InstructionEntry
       markdown = read.text;
       const hash = blake3Hex(normalizeMarkdown(markdown));
       const src = existing ? store.docs.getSource(existing.doc_id) : null;
-      if (existing && store.docs.currentMarkdownHash(entry.slug) === hash && src?.source.path === entry.recordPath) {
+      if (
+        existing &&
+        store.docs.currentMarkdownHash(entry.slug) === hash &&
+        src?.source.path === entry.recordPath &&
+        src.source.project?.key === entry.project?.key
+      ) {
         return { ...base, action: 'unchanged', revision: existing.current_revision, head: store.chain.head() };
       }
     }
@@ -80,7 +121,7 @@ export function syncInstructionFile(store: KronicleLite, entry: InstructionEntry
       title: entry.title,
       markdown,
       actor_id,
-      source: { kind: entry.kind, path: entry.recordPath },
+      source: { kind: entry.kind, path: entry.recordPath, ...(entry.project ? { project: entry.project } : {}) },
     });
     let created = 0;
     let superseded = 0;
@@ -111,7 +152,7 @@ export function describeSync(r: SyncResult): string {
     case 'created':
       return `${r.slug} ← ${r.path}: imported as rev ${r.revision} (${r.created} block(s))`;
     case 'updated':
-      return `${r.slug} ← ${r.path}: rev ${r.revision} (${counts})`;
+      return `${r.slug} ← ${r.path}: rev ${r.revision} (${counts})${r.migrated_from ? `; renamed from ${r.migrated_from}` : ''}`;
     case 'removed':
       return `${r.slug} ← ${r.path}: file removed; rev ${r.revision} retires ${r.tombstoned} block(s)`;
     case 'unchanged':

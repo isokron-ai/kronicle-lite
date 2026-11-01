@@ -21,8 +21,11 @@ import { ChainConflictError } from './chain/index.js';
 import { bindGit } from './git/binding.js';
 import type { DocumentSource } from './docs/documents.js';
 import { DocumentError } from './docs/documents.js';
-import { FOCUSES, type SystemState } from './orient/orient.js';
+import { checkRevisionRow } from './docs/integrity.js';
+import { FOCUSES, type ProjectScope, type SystemState } from './orient/orient.js';
 import {
+  lean,
+  fullJsonSchema,
   AnchorStatusResultSchema,
   AuditSummarySchema,
   CheckpointSchema,
@@ -41,6 +44,12 @@ export interface ServerOptions {
   /** Actor id used when a tool call does not pass one. */
   defaultActorId?: string;
   version?: string;
+  /**
+   * 0.5.0: project scope for get_system_state (instruction retractions from
+   * other projects are hidden). The CLI passes the scope of its working
+   * directory; embedders pass their own or leave it unscoped.
+   */
+  project?: ProjectScope | null;
 }
 
 /**
@@ -65,17 +74,9 @@ export const CACHE_HINTS = {
   'resources/read': { ttlMs: 0, cacheScope: 'private' },
 } as const;
 
-const ACTOR = z
-  .string()
-  .min(1)
-  .max(200)
-  .optional()
-  .describe('Stable identity of the calling agent. Defaults to the server --actor setting. Cursors are bound to it.');
+const ACTOR = z.string().min(1).max(200).optional().describe('Your agent id (default: server --actor). Cursors are bound to it.');
 
-const CURSOR = z
-  .string()
-  .optional()
-  .describe('Your most recent cursor from get_system_state (full or compact). Used only to compute the stale-write advisory.');
+const CURSOR = z.string().optional().describe('Your latest cursor (for the stale-write advisory).');
 
 type ToolResult = {
   content: { type: 'text'; text: string }[];
@@ -140,24 +141,22 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     {
       title: 'Orient against the chain',
       description:
-        'Orient call — INSTRUCTS the agent. Call at session start AND before any write-class work. Present your previous ' +
-        '`cursor` (or `cursor_compact`) as `since_cursor` to get a true delta: cold start receives the digest plus everything; ' +
-        'warm wake receives only what changed since your cursor. Honor the drift banner: when it is surfaced, your memory of ' +
-        'this store is stale and the delta is the catch-up. When retractions are reported, reconcile BEFORE acting — affirm ' +
-        'the current truth (cite seq), name the old claim once, stop using it as a premise. An invalid or missing cursor never ' +
-        'fails: position is recovered from the flight recorder or genesis, and the response says which. Focuses: ' +
-        'orientation (default: digest + delta + retractions) | recent_changes (delta + retractions) | retractions (only ' +
-        'retractions) | pulse (head + drift banner, ~50 tokens; call this before every write and only pay for a full delta ' +
-        'when the banner surfaces). response_format markdown (default) or json controls the text block; structuredContent ' +
-        'always carries the JSON state. Always carry the returned cursor forward.',
-      inputSchema: z.object({
-        budget_tokens: z.number().int().min(200).max(64_000).default(3000).describe('Approximate token budget for the delta.'),
-        since_cursor: z.string().optional().describe('Cursor from your previous call (sxt1. or sxt1c. form).'),
-        focus: z.enum(FOCUSES).default('orientation'),
-        response_format: z.enum(['markdown', 'json']).default('markdown'),
-        actor_id: ACTOR,
-      }),
-      outputSchema: SystemStateSchema,
+        'Orient. Call at session start and before writes with your last cursor as since_cursor. Returns what changed since ' +
+        '(delta), a drift banner, and retractions: things you relied on that changed, with old → new text. Reconcile ' +
+        'retractions before acting. A bad or missing cursor never fails. focus: orientation (default) | recent_changes | ' +
+        'retractions | pulse (head + banner only). Carry the returned cursor forward.',
+      inputSchema: lean(
+        z.object({
+          budget_tokens: z.number().int().min(200).max(64_000).default(3000),
+          since_cursor: z.string().optional().describe('cursor or cursor_compact from your last call'),
+          focus: z.enum(FOCUSES).default('orientation'),
+          response_format: z.enum(['markdown', 'json']).default('markdown'),
+          all_projects: z.boolean().default(false).describe('Include instruction retractions from other projects.'),
+          actor_id: ACTOR,
+        }),
+        'input',
+      ),
+      outputSchema: lean(SystemStateSchema, 'output'),
       annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: false },
     },
     (args) => {
@@ -167,6 +166,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
           budget_tokens: args.budget_tokens,
           since_cursor: args.since_cursor,
           focus: args.focus,
+          project: args.all_projects ? null : (opts.project ?? null),
         });
         if (args.response_format === 'json') return json(state);
         return {
@@ -184,18 +184,19 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     {
       title: 'Grade beliefs against the chain',
       description:
-        'The reconciliation surface. Pass the facts you are about to act on as claims {symbol, value}: symbol is a block ' +
-        'id (value = its content or content_hash), a document slug (value = revision number, markdown hash, or markdown), ' +
-        'or "head" (value = chain seq or hash). Each claim is graded current | stale (a newer version exists) | ' +
-        'contradicted (the live value differs) | retracted (tombstoned) | unknown, with the current truth and a reconcile ' +
-        'line. Use it after a drift banner or retraction list, before writing.',
-      inputSchema: z.object({
-        claims: z
-          .array(z.strictObject({ symbol: z.string().min(1).max(300), value: z.union([z.string().max(200_000), z.number()]) }))
-          .min(1)
-          .max(100),
-      }),
-      outputSchema: AuditSummarySchema,
+        'Grade facts before acting on them. claims: [{symbol, value}]; symbol is a block id (value: content or ' +
+        'content_hash), a document slug (value: revision, markdown hash or markdown) or "head" (value: seq or hash). ' +
+        'Verdict per claim: current | stale | contradicted | retracted | unknown | stale_source, with the current truth.',
+      inputSchema: lean(
+        z.object({
+          claims: z
+            .array(z.strictObject({ symbol: z.string().min(1).max(300), value: z.union([z.string().max(200_000), z.number()]) }))
+            .min(1)
+            .max(100),
+        }),
+        'input',
+      ),
+      outputSchema: lean(AuditSummarySchema, 'output'),
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
     (args) => json(store.auditor.audit(args.claims)),
@@ -208,18 +209,18 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     {
       title: 'Search blocks with signed receipts',
       description:
-        'Full-text search (bm25) over live document blocks. Each hit carries a signed receipt v2 binding (block_id, ' +
-        'content_hash, doc_slug, revision) to the chain head at issue time. Keep the receipt with any claim you derive from ' +
-        'the block; pass it to verify() later to learn whether the block is still current (VERIFIED), was replaced ' +
-        '(SUPERSEDED, with the current head), was retired (TOMBSTONED), or cannot be trusted (UNVERIFIED). Superseded ' +
-        'blocks are never returned; tombstoned only with include_tombstoned. Set include_receipts:false for a lean result.',
-      inputSchema: z.object({
-        query: z.string().min(1).max(2000),
-        top_k: z.number().int().min(1).max(50).default(12),
-        include_tombstoned: z.boolean().default(false),
-        include_receipts: z.boolean().default(true),
-      }),
-      outputSchema: RecallResultSchema,
+        'Full-text search over live blocks. Each hit carries a signed receipt: keep it with what you derive and pass it to ' +
+        'verify() before relying on it later. Blocks whose stored text fails its integrity check are withheld, never served.',
+      inputSchema: lean(
+        z.object({
+          query: z.string().min(1).max(2000),
+          top_k: z.number().int().min(1).max(50).default(12),
+          include_tombstoned: z.boolean().default(false),
+          include_receipts: z.boolean().default(true),
+        }),
+        'input',
+      ),
+      outputSchema: lean(RecallResultSchema, 'output'),
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     (args) => {
@@ -236,14 +237,10 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     {
       title: 'Verify a retrieval receipt',
       description:
-        'Re-derive a receipt against the live store. Fail-closed. Checks the Ed25519 signature (local key registry), block ' +
-        'existence, content hash, that the receipt\'s chain position is still on the chain, and walks supersession to the ' +
-        'current head. Returns VERIFIED | SUPERSEDED (with current_block_id/current_content_hash) | TOMBSTONED | UNVERIFIED ' +
-        'with a closed-enum reason. Malformed input yields UNVERIFIED/malformed_receipt, never a tool error.',
-      inputSchema: z.object({
-        receipt: z.record(z.string(), z.unknown()).describe('The full receipt object from recall(), including signature.'),
-      }),
-      outputSchema: VerifyResultSchema,
+        'Re-check a recall() receipt against the store (signature, re-hashed block text, chain position, supersession): ' +
+        'VERIFIED | SUPERSEDED (see current_block_id) | TOMBSTONED | STALE_SOURCE | UNVERIFIED, with a reason. Fail-closed.',
+      inputSchema: lean(z.object({ receipt: z.record(z.string(), z.unknown()).describe('The receipt object from recall().') }), 'input'),
+      outputSchema: lean(VerifyResultSchema, 'output'),
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
     (args) => json(store.verifier.verify(args.receipt)),
@@ -254,17 +251,14 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     {
       title: 'Verify chain integrity',
       description:
-        'Recompute every event hash and link in [from_seq, to_seq] (default: whole chain), report the first mismatch if ' +
-        'any, and validate every stored signed checkpoint in range. ok:false means the database was altered outside the ' +
-        'append path or is corrupt; the first_mismatch seq tells you where.',
-      inputSchema: z.object({
-        from_seq: z.number().int().min(1).default(1),
-        to_seq: z.number().int().min(1).optional(),
-      }),
-      outputSchema: VerifyChainResultSchema,
+        'Recompute every event hash and link in [from_seq, to_seq] and check stored checkpoints. Over the whole chain ' +
+        '(the default) it also re-derives and re-hashes every stored document and block (projection). ok:false means the ' +
+        'database was edited outside kronicle-lite or is corrupt.',
+      inputSchema: lean(z.object({ from_seq: z.number().int().min(1).default(1), to_seq: z.number().int().min(1).optional() }), 'input'),
+      outputSchema: lean(VerifyChainResultSchema, 'output'),
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
-    (args) => json(store.chain.verify(args.from_seq, args.to_seq)),
+    (args) => json(store.verifyAll(args.from_seq, args.to_seq)),
   );
 
   server.registerTool(
@@ -272,16 +266,17 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     {
       title: 'Sign a Merkle checkpoint',
       description:
-        'Compute a Merkle root over event hashes in [from_seq, to_seq] (default: 1..head), sign it with the server key, and ' +
-        'store it. verify_chain checks checkpoints. push:true also sends the signed root (never the events) to the hosted ' +
-        'anchor service configured in the data dir and stores its countersigned receipt; the result\'s anchor object says ' +
-        'whether that worked. The local checkpoint is stored even when the service is unreachable.',
-      inputSchema: z.object({
-        from_seq: z.number().int().min(1).default(1),
-        to_seq: z.number().int().min(1).optional(),
-        push: z.boolean().default(false).describe('Also anchor the checkpoint off-box (leaves the machine: root, range, signature, public key).'),
-      }),
-      outputSchema: CheckpointSchema,
+        'Sign and store a Merkle root over event hashes in [from_seq, to_seq] (default: all). push:true also anchors it ' +
+        'off-box (root, range, signature and public key leave the machine; the local checkpoint is kept either way).',
+      inputSchema: lean(
+        z.object({
+          from_seq: z.number().int().min(1).default(1),
+          to_seq: z.number().int().min(1).optional(),
+          push: z.boolean().default(false),
+        }),
+        'input',
+      ),
+      outputSchema: lean(CheckpointSchema, 'output'),
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
     async (args) => {
@@ -301,15 +296,10 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     {
       title: 'Hosted anchor status',
       description:
-        'When was this chain last anchored off-box, and does the local chain still match it? Returns the latest anchor ' +
-        '(range, status, events since), and a verification of that range: the local Merkle root recomputed and compared ' +
-        'with the anchored root (match | diverged | beyond_head | gap), plus the service countersignature checked with ' +
-        'cached keys. remote:true also asks the service (conflict flag, fresh keys); an unreachable service is reported, ' +
-        'never an error. diverged means the local chain was rewritten after it was anchored.',
-      inputSchema: z.object({
-        remote: z.boolean().default(false).describe('Also query the anchor service (network).'),
-      }),
-      outputSchema: AnchorStatusResultSchema,
+        'Last off-box anchor and whether the local chain still matches it: match | diverged (rewritten after anchoring) | ' +
+        'beyond_head | gap. remote:true also asks the anchor service.',
+      inputSchema: lean(z.object({ remote: z.boolean().default(false) }), 'input'),
+      outputSchema: lean(AnchorStatusResultSchema, 'output'),
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
     },
     async (args) => {
@@ -330,23 +320,23 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     {
       title: 'Create or replace a document',
       description:
-        'Store a Markdown document under a slug. A new slug creates revision 1; an existing slug creates the next revision: ' +
-        'unchanged blocks keep their ids, changed blocks are superseded (old → new), removed blocks are tombstoned. Emits ' +
-        'document.put + block.* events and returns every block id with its BLAKE3 content hash and the new chain head. ' +
-        'Pass your cursor so the response can tell you if you are writing on stale assumptions (advisory only). ' +
-        'bind_git:true with source_path (the file the markdown came from) records {repo_root, commit, path, blob_sha}; ' +
-        'verify and audit_assumptions then report stale_source when that file changes. Outside git the put still succeeds, with a warning.',
-      inputSchema: z.object({
-        slug: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,127}$/).describe('lowercase letters, digits, . _ -'),
-        title: z.string().min(1).max(300),
-        markdown: z.string().max(2_000_000),
-        idempotency_key: z.string().min(1).max(200).optional().describe('Replay-safe key; repeating it returns the first result.'),
-        source_path: z.string().min(1).max(4096).optional().describe('File the markdown came from (absolute, or relative to the server working directory).'),
-        bind_git: z.boolean().default(false).describe('Bind the document to source_path in its git repository (git rev-parse / hash-object).'),
-        cursor: CURSOR,
-        actor_id: ACTOR,
-      }),
-      outputSchema: PutDocumentResultSchema,
+        'Create or re-put a Markdown document by slug. Unchanged blocks keep their ids; changed blocks are superseded and ' +
+        'removed ones tombstoned, which other agents see as retractions. bind_git with source_path ties the document to ' +
+        'that file\'s git blob (verify reports STALE_SOURCE when the file changes).',
+      inputSchema: lean(
+        z.object({
+          slug: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,127}$/),
+          title: z.string().min(1).max(300),
+          markdown: z.string().max(2_000_000),
+          idempotency_key: z.string().min(1).max(200).optional(),
+          source_path: z.string().min(1).max(4096).optional().describe('File the markdown came from.'),
+          bind_git: z.boolean().default(false),
+          cursor: CURSOR,
+          actor_id: ACTOR,
+        }),
+        'input',
+      ),
+      outputSchema: lean(PutDocumentResultSchema, 'output'),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     (args) => {
@@ -390,18 +380,18 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     'supersede_block',
     {
       title: 'Replace one block',
-      description:
-        'Replace a live block\'s content with a new block (old → new supersession, with a reason). Receipts issued for the old ' +
-        'block will verify as SUPERSEDED pointing at the new one. The document gets a new revision. Refused if the block is ' +
-        'already superseded or tombstoned (operate on the current head instead).',
-      inputSchema: z.object({
-        block_id: z.uuid(),
-        new_content: z.string().min(1).max(200_000),
-        reason: z.string().min(1).max(1000),
-        cursor: CURSOR,
-        actor_id: ACTOR,
-      }),
-      outputSchema: SupersedeBlockResultSchema,
+      description: 'Replace one live block\'s content, with a reason. Receipts for the old block then verify as SUPERSEDED.',
+      inputSchema: lean(
+        z.object({
+          block_id: z.uuid(),
+          new_content: z.string().min(1).max(200_000),
+          reason: z.string().min(1).max(1000),
+          cursor: CURSOR,
+          actor_id: ACTOR,
+        }),
+        'input',
+      ),
+      outputSchema: lean(SupersedeBlockResultSchema, 'output'),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     (args) => {
@@ -425,16 +415,9 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     'tombstone_block',
     {
       title: 'Retire one block',
-      description:
-        'Mark a live block as no longer valid, with a reason, and no successor. It leaves recall() results (unless ' +
-        'include_tombstoned) and receipts for it verify as TOMBSTONED. The document gets a new revision.',
-      inputSchema: z.object({
-        block_id: z.uuid(),
-        reason: z.string().min(1).max(1000),
-        cursor: CURSOR,
-        actor_id: ACTOR,
-      }),
-      outputSchema: TombstoneBlockResultSchema,
+      description: 'Retire one live block with a reason (no successor). Receipts for it then verify as TOMBSTONED.',
+      inputSchema: lean(z.object({ block_id: z.uuid(), reason: z.string().min(1).max(1000), cursor: CURSOR, actor_id: ACTOR }), 'input'),
+      outputSchema: lean(TombstoneBlockResultSchema, 'output'),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
     (args) => {
@@ -482,12 +465,48 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
       }
       const doc = store.docs.getDocument(slug);
       if (!doc) throw new Error(`no document ${slug}`);
-      const markdown = store.docs.getRevisionMarkdown(doc.doc_id, doc.current_revision) ?? '';
+      const rev = store.docs.getRevision(doc.doc_id, doc.current_revision);
+      if (!rev) throw new Error(`no revision ${doc.current_revision} of ${slug}`);
+      // 0.5.0: never serve text that does not hash to the chain.
+      const problem = checkRevisionRow(store.chain, rev);
+      if (problem) throw new Error(`integrity failure (${problem}) in ${slug}@${rev.revision}: the stored text does not match the chain; run kronicle-lite verify-chain`);
+      const markdown = rev.markdown;
       return { contents: [{ uri: uri.href, mimeType: 'text/markdown', text: markdown }] };
     },
   );
 
+  // 0.5.0: tools/list advertises compact output schemas; the full ones live here.
+  server.registerResource(
+    'tool-schemas',
+    'kronicle://schemas/tools',
+    {
+      title: 'Tool output schemas',
+      description: 'Full JSON Schema of every tool result (tools/list carries a compact form).',
+      mimeType: 'application/json',
+      cacheHint: CACHE_HINTS['resources/templates/list'],
+    },
+    (uri) => ({ contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(fullOutputSchemas(), null, 2) }] }),
+  );
+
   return server;
+}
+
+const OUTPUT_SCHEMAS = {
+  get_system_state: SystemStateSchema,
+  audit_assumptions: AuditSummarySchema,
+  recall: RecallResultSchema,
+  verify: VerifyResultSchema,
+  verify_chain: VerifyChainResultSchema,
+  checkpoint_chain: CheckpointSchema,
+  anchor_status: AnchorStatusResultSchema,
+  put_document: PutDocumentResultSchema,
+  supersede_block: SupersedeBlockResultSchema,
+  tombstone_block: TombstoneBlockResultSchema,
+} as const;
+
+/** Every tool's full output JSON Schema, by tool name. */
+export function fullOutputSchemas(): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(OUTPUT_SCHEMAS).map(([k, v]) => [k, fullJsonSchema(v, 'output')]));
 }
 
 // ───────────────────────────── markdown rendering ─────────────────────────────
@@ -497,9 +516,14 @@ export function renderSystemStateMarkdown(s: SystemState): string {
   const shortHash = s.head.hash.slice(0, 12);
   lines.push(`# kronicle-lite orient — head seq ${s.head.seq} (${shortHash}…)`);
   lines.push('');
+  if (s.integrity && !s.integrity.ok) {
+    lines.push(`> **INTEGRITY FAILURE: ${s.integrity.problem}. The store was edited outside kronicle-lite; run \`kronicle-lite verify-chain\`.**`);
+  }
   if (s.drift_banner.surfaced) lines.push(`> **${s.drift_banner.line}**`);
   else lines.push(`> ${s.drift_banner.line}`);
-  lines.push(`> ${anchorLine(s)}`);
+  // 0.5.0: no "never anchored" line until there is an anchor to talk about.
+  const anchored = anchorLine(s);
+  if (anchored) lines.push(`> ${anchored}`);
   lines.push('');
   lines.push(`**cursor_compact:** \`${s.cursor_compact}\`  `);
   lines.push(`**recovery:** ${s.recovery.method} — ${s.recovery.reason}`);
@@ -516,10 +540,15 @@ export function renderSystemStateMarkdown(s: SystemState): string {
     lines.push(`## Retractions (${s.retractions.length}) — reconcile before acting`);
     for (const r of s.retractions) {
       lines.push(`- **[${r.severity}]** seq ${r.seq} \`${r.event_type}\` ${r.doc_slug ? `(${r.doc_slug}) ` : ''}${r.reason_line}`);
+      if (r.diff) lines.push(`  - changed: ${r.diff}`);
+      else if (r.old_text && !r.new_text) lines.push(`  - removed: ${r.old_text}`);
     }
   } else if (s.retractions) {
     lines.push('');
     lines.push('## Retractions: none');
+  }
+  if (s.scope && s.scope.hidden_retractions > 0) {
+    lines.push(`_${s.scope.hidden_retractions} instruction retraction(s) from other projects hidden (all_projects: true shows them)._`);
   }
 
   if (s.source_drift && s.source_drift.length > 0) {
@@ -573,9 +602,9 @@ export function renderSystemStateMarkdown(s: SystemState): string {
 }
 
 /** One banner line for the latest hosted anchor (local record, no network). */
-export function anchorLine(s: Pick<SystemState, 'anchor'>): string {
+export function anchorLine(s: Pick<SystemState, 'anchor'>): string | null {
   const a = s.anchor;
-  if (!a) return 'never anchored';
+  if (!a) return null;
   return `anchored ${a.events_since} ${a.events_since === 1 ? 'event' : 'events'} ago (${a.status}, [${a.from_seq}, ${a.to_seq}] at ${a.received_at})`;
 }
 

@@ -30,9 +30,19 @@ export {
   type SupersedeBlockResult,
   type TombstoneBlockResult,
 } from './docs/documents.js';
+export {
+  checkBlockRow,
+  checkRevisionRow,
+  verifyProjection,
+  rebuildProjection,
+  describeProjection,
+  type ProjectionResult,
+  type ProjectionMismatch,
+  type RowProblem,
+} from './docs/integrity.js';
 export { parseMarkdown, renderBlocks, normalizeMarkdown, type ParsedBlock, type BlockKind } from './docs/parser.js';
 export * from './recall/receipt.js';
-export { Recall, toMatchExpression, type RecallInput, type RecallResult, type RecallHit } from './recall/recall.js';
+export { Recall, toMatchExpression, type RecallInput, type RecallResult, type RecallHit, type WithheldHit } from './recall/recall.js';
 export { ReceiptVerifier, VERIFY_REASONS, VERIFY_STATUSES, type VerifyResult, type VerifyStatus, type VerifyReason } from './recall/verify-receipt.js';
 export * from './orient/index.js';
 export * as anchor from './anchor/index.js';

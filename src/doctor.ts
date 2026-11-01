@@ -17,6 +17,7 @@ import { CONFIG_KEYS, DEFAULT_ANCHOR_URL, KEYS_CACHE_FILE, readKeysCache } from 
 import { CATALOG_FINGERPRINT, CATALOG_VERSION, liveCatalogFingerprint } from './catalog.js';
 import { Chain, type AnchorRecord, type Checkpoint } from './chain/chain.js';
 import type { Signer } from './crypto/keys.js';
+import { describeProjection, verifyProjection } from './docs/integrity.js';
 import { VERSION } from './version.js';
 
 export type CheckStatus = 'ok' | 'warn' | 'fail' | 'skip';
@@ -187,6 +188,24 @@ function checkChain(db: Database.Database, full: boolean): DoctorCheck {
     };
   } catch (e) {
     return { id: 'chain', status: 'fail', detail: `chain verification failed: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
+/** 0.5.0: the documents / revisions / blocks tables re-derived from the chain and re-hashed (BLAKE3). */
+function checkProjection(db: Database.Database): DoctorCheck {
+  try {
+    if (!tableExists(db, 'blocks')) return { id: 'projection', status: 'skip', detail: 'no blocks table' };
+    const r = verifyProjection(db, new Chain(db, noSigner));
+    return r.ok
+      ? { id: 'projection', status: 'ok', detail: describeProjection(r), data: { ...r } }
+      : {
+          id: 'projection',
+          status: 'fail',
+          detail: `${describeProjection(r)} — recall withholds these blocks; run kronicle-lite rebuild once verify-chain passes`,
+          data: { ...r },
+        };
+  } catch (e) {
+    return { id: 'projection', status: 'fail', detail: `projection check failed: ${e instanceof Error ? e.message : String(e)}` };
   }
 }
 
@@ -479,6 +498,7 @@ export async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
       db.pragma('busy_timeout = 2000');
       checks.push(checkIntegrity(db));
       checks.push(checkChain(db, opts.full === true));
+      checks.push(checkProjection(db));
       checks.push(checkFts(db));
       checks.push(cfg!.check);
       checks.push(await checkAnchorLocal(db, dataDir, cfg!.anchorUrl));
@@ -488,12 +508,20 @@ export async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
       db?.close();
     }
   } else {
-    for (const id of ['db-integrity', 'chain', 'fts']) checks.push({ id, status: 'skip', detail: 'no database yet' });
+    for (const id of ['db-integrity', 'chain', 'projection', 'fts']) checks.push({ id, status: 'skip', detail: 'no database yet' });
     if (cfg) checks.push(cfg.check);
   }
 
   checks.push(await checkCatalog(cwd));
-  checks.push(await checkAnchorReachable(cfg?.anchorUrl ?? env['KRONICLE_ANCHOR_URL'] ?? DEFAULT_ANCHOR_URL, opts));
+  // 0.5.0: only probe the anchor service when anchoring is configured (a
+  // license key, or a non-default URL); the default service is optional.
+  const anchorUrl = cfg?.anchorUrl ?? env['KRONICLE_ANCHOR_URL'] ?? DEFAULT_ANCHOR_URL;
+  const anchoring = Boolean(cfg?.licenseInConfig || env['KRONICLE_ANCHOR_KEY'] || env['KRONICLE_ANCHOR_URL'] || anchorUrl !== DEFAULT_ANCHOR_URL);
+  checks.push(
+    anchoring
+      ? await checkAnchorReachable(anchorUrl, opts)
+      : { id: 'anchor-reachable', status: 'skip', detail: 'anchoring not configured (optional; see README → Anchor off-box)' },
+  );
   checks.push(checkClients(cwd, home, dataDir));
   if (platform === 'win32') {
     checks.push({

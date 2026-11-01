@@ -7,10 +7,11 @@
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 
-import { Chain, ChainEventSchema, type ChainEvent } from './chain/index.js';
+import { Chain, ChainEventSchema, type ChainEvent, type VerifyChainResult } from './chain/index.js';
 import type { ServerIdentity } from './crypto/keys.js';
 import { openDatabase, type Db, type OpenOptions } from './db/open.js';
 import { DocumentStore } from './docs/documents.js';
+import { rebuildProjection, verifyProjection, type ProjectionResult } from './docs/integrity.js';
 import { AssumptionAuditor } from './orient/audit.js';
 import { Orient, type OrientOptions } from './orient/orient.js';
 import { Recall } from './recall/recall.js';
@@ -47,6 +48,35 @@ export class KronicleLite {
 
   close(): void {
     this.db.close();
+  }
+
+  /**
+   * 0.5.0: the chain check plus, when the range is the whole chain (or
+   * `projection: true`), the projection check: every stored document,
+   * revision and block re-derived from the events and re-hashed. `ok` is
+   * false when either fails.
+   */
+  verifyAll(from_seq = 1, to_seq?: number, opts: { projection?: boolean } = {}): VerifyChainResult & { projection: ProjectionResult | null } {
+    const chain = this.chain.verify(from_seq, to_seq);
+    const whole = from_seq === 1 && (to_seq === undefined || to_seq >= chain.head.seq);
+    const projection = (opts.projection ?? whole) ? verifyProjection(this.db, this.chain) : null;
+    return { ...chain, ok: chain.ok && (projection?.ok ?? true), projection };
+  }
+
+  /**
+   * 0.5.0: rebuild documents / revisions / blocks / sources from the chain.
+   * Refuses when the chain itself does not verify (the events are the only
+   * source of truth; rebuilding from a broken chain would launder it).
+   */
+  rebuild(): { events: number; before: ProjectionResult; after: ProjectionResult } {
+    const chain = this.chain.verify();
+    if (!chain.ok) {
+      const m = chain.first_mismatch!;
+      throw new Error(`chain does not verify (${m.kind} at seq ${m.seq}); restore the events table from an export or backup first`);
+    }
+    const before = verifyProjection(this.db, this.chain);
+    const { events } = rebuildProjection(this.db, this.chain);
+    return { events, before, after: verifyProjection(this.db, this.chain) };
   }
 
   /** Write every event as one JSON line, ascending seq. First line is a header. */

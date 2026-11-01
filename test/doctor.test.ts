@@ -59,6 +59,7 @@ describe('doctor', () => {
       'permissions',
       'db-integrity',
       'chain',
+      'projection',
       'fts',
       'config',
       'anchor-local',

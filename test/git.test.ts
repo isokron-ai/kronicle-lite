@@ -153,7 +153,7 @@ describe('bind_git', () => {
   it('CLI put --bind-git and MCP put_document {bind_git, source_path}', async () => {
     const { root, file } = repo();
     const dataDir = join(tempDir('kl-data-'), 'd');
-    const r = await runCli(['put', 'deploy', file, '--bind-git', '--data-dir', dataDir], { env: cleanEnv() });
+    const r = await runCli(['put', 'deploy', file, '--bind-git', '--json', '--data-dir', dataDir], { env: cleanEnv() });
     expect(r.status, r.stderr).toBe(0);
     const out = JSON.parse(r.stdout) as { source: { git: { path: string; blob_sha: string } } };
     expect(out.source.git).toMatchObject({ path: 'docs/deploy.md', blob_sha: gitRun(root, ['hash-object', 'docs/deploy.md']) });

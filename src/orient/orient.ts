@@ -13,7 +13,8 @@ import type { Chain, ChainHead } from '../chain/index.js';
 import { GENESIS_HASH } from '../chain/genesis.js';
 import { canonicalize } from '../crypto/canonical.js';
 import { sha256Hex } from '../crypto/hash.js';
-import type { DocumentStore, SourceDrift } from '../docs/documents.js';
+import { splitHeadingPath, type DocumentStore, type SourceDrift } from '../docs/documents.js';
+import { checkBlockRow } from '../docs/integrity.js';
 import { CursorTokenError, parseAnyCursor, serializeCompactCursor, serializeCursor } from './cursor.js';
 import { foldDelta, type PolicyOptions, type TypedDelta } from './delta.js';
 import {
@@ -55,6 +56,30 @@ export interface OrientInput {
   budget_tokens?: number;
   since_cursor?: string | undefined;
   focus?: Focus | undefined;
+  /**
+   * 0.5.0: the project the caller works in. Instruction retractions from
+   * documents that recorded a different project (`source.project.key`) are
+   * left out of `retractions` and counted in `scope.hidden_retractions`.
+   * null/undefined: no scoping (every retraction is listed).
+   */
+  project?: ProjectScope | null | undefined;
+}
+
+/** The project keys (instructions + auto memory) of the working directory; see instructions/paths.ts. */
+export interface ProjectScope {
+  keys: string[];
+  root?: string;
+}
+
+/** 0.5.0: a quick integrity pass over what this briefing is built from. */
+export interface IntegritySummary {
+  ok: boolean;
+  /** Chain events re-hashed and re-linked (the delta window, at least the last 1000). */
+  events_checked: number;
+  /** Live blocks re-hashed against their block.created events (newest first, at most 2000). */
+  blocks_checked: number;
+  /** First problem found, in words; null when ok. */
+  problem: string | null;
 }
 
 export interface Digest {
@@ -92,6 +117,10 @@ export interface SystemState {
   anchor: AnchorSummary | null;
   /** 0.4.0: git-bound documents whose source file changed or vanished; null for focus=pulse. */
   source_drift: SourceDrift[] | null;
+  /** 0.5.0: chain + live-block integrity over what this briefing read; null for focus=pulse. */
+  integrity: IntegritySummary | null;
+  /** 0.5.0: project scoping applied to instruction retractions; null when unscoped. */
+  scope: { project_keys: string[]; hidden_retractions: number } | null;
   delta: TypedDelta | null;
   retractions: Retraction[] | null;
   digest: Digest | null;
@@ -242,6 +271,40 @@ export class Orient {
     };
   }
 
+  /** Block text for retractions; withheld (null) when the row fails its integrity check. */
+  private blockText(block_id: string): { content: string; heading_path: string[] } | null {
+    const b = this.docs.getBlock(block_id);
+    if (!b || checkBlockRow(this.chain, b) !== null) return null;
+    return { content: b.content, heading_path: splitHeadingPath(b.heading_path) };
+  }
+
+  /**
+   * Re-hash the events this briefing covers (at least the last 1000) and the
+   * newest live blocks against their chained block.created events. Cheap
+   * enough for every orient; `verify-chain` / `doctor` do the full pass.
+   */
+  quickIntegrity(from_seq: number, head: ChainHead): IntegritySummary {
+    let problem: string | null = null;
+    let events_checked = 0;
+    if (head.seq > 0) {
+      const from = Math.max(1, Math.min(from_seq + 1, head.seq - 999));
+      const r = this.chain.verify(from);
+      events_checked = r.events_checked;
+      if (!r.ok && r.first_mismatch) problem = `chain ${r.first_mismatch.kind} at seq ${r.first_mismatch.seq}`;
+    }
+    const blocks = this.docs.liveBlockRows(2000);
+    if (!problem) {
+      for (const b of blocks) {
+        const p = checkBlockRow(this.chain, b);
+        if (p) {
+          problem = `block ${b.block_id} (${p}): its stored text does not match the chain`;
+          break;
+        }
+      }
+    }
+    return { ok: problem === null, events_checked, blocks_checked: blocks.length, problem };
+  }
+
   getSystemState(input: OrientInput, now = new Date()): SystemState {
     const focus: Focus = input.focus ?? 'orientation';
     const budget = input.budget_tokens ?? 3000;
@@ -268,6 +331,8 @@ export class Orient {
     let retractions: Retraction[] | null = null;
     let digest: Digest | null = null;
     let source_drift: SourceDrift[] | null = null;
+    let integrity: IntegritySummary | null = null;
+    let scope: SystemState['scope'] = null;
 
     if (focus !== 'pulse') {
       const events = this.chain.since(recovery.from_seq);
@@ -281,12 +346,26 @@ export class Orient {
         // retractions focus: counts only, no entries
         delta = { ...foldDelta(events, recovery.from_seq, head.seq, { ...this.policy, budget_tokens: 0 }), entries: [] };
       }
-      retractions = computeRetractions(events);
+      const all = computeRetractions(events, (id) => this.blockText(id));
+      if (input.project && input.project.keys.length > 0) {
+        const docOf = new Map(events.map((e) => [e.seq, typeof e.payload['doc_id'] === 'string' ? (e.payload['doc_id'] as string) : null]));
+        const keys = new Set(input.project.keys);
+        retractions = all.filter((r) => {
+          if (r.kind !== 'instruction') return true;
+          const doc_id = docOf.get(r.seq);
+          const key = doc_id ? this.docs.getSource(doc_id)?.source.project?.key : undefined;
+          return key === undefined || keys.has(key);
+        });
+        scope = { project_keys: input.project.keys, hidden_retractions: all.length - retractions.length };
+      } else {
+        retractions = all;
+      }
       if (focus === 'orientation' || recovery.method === 'genesis') digest = this.digest();
       source_drift = this.docs.listSourceDrift();
+      integrity = this.quickIntegrity(recovery.from_seq, head);
     }
 
-    const next_steps = nextSteps({ focus, recovery, drift_banner, retractions, source_drift });
+    const next_steps = nextSteps({ focus, recovery, drift_banner, retractions, source_drift, integrity });
     const lastAnchor = this.chain.lastAnchor();
     const anchor: AnchorSummary | null = lastAnchor
       ? {
@@ -313,6 +392,8 @@ export class Orient {
       stale_write_advisory,
       anchor,
       source_drift,
+      integrity,
+      scope,
       delta,
       retractions,
       digest,
@@ -348,8 +429,14 @@ function nextSteps(args: {
   drift_banner: DriftBanner;
   retractions: Retraction[] | null;
   source_drift: SourceDrift[] | null;
+  integrity: IntegritySummary | null;
 }): string[] {
   const steps: string[] = [];
+  if (args.integrity && !args.integrity.ok) {
+    steps.push(
+      `INTEGRITY FAILURE (${args.integrity.problem}): the store was edited outside kronicle-lite. Do not rely on recalled text; tell the operator to run kronicle-lite verify-chain.`,
+    );
+  }
   if (args.recovery.cursor_error) {
     steps.push('Your since_cursor was rejected; position was recovered server-side. Replace it with the new cursor below.');
   }

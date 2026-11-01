@@ -5,10 +5,14 @@
  *   1. SHAPE       zod parse; malformed ⇒ UNVERIFIED/malformed_receipt
  *   2. SIGNATURE   key known + not revoked, Ed25519 over the signing payload
  *   3. EXISTENCE   block row present
- *   4. CONTENT     stored content_hash == receipt.content_hash
+ *   4. CONTENT     (0.5.0) the stored text re-hashes (BLAKE3) to its content_hash and
+ *                  matches the chained block.created event, else content_tampered;
+ *                  then stored content_hash == receipt.content_hash
  *   5. CHAIN       events[chain_seq].this_hash == chain_head_hash (seq 0 ⇒ genesis)
  *   6. CURRENCY    recursive superseded_by walk: head is this block and live ⇒
  *                  VERIFIED; head tombstoned ⇒ TOMBSTONED; other head ⇒ SUPERSEDED
+ *                  (0.5.0) VERIFIED also needs the chain to agree that the block
+ *                  was never superseded or tombstoned, else projection_mismatch
  *   7. SOURCE      (0.4.0) git-bound document whose working-tree file no longer
  *                  has the bound blob ⇒ STALE_SOURCE (+ source_drift), else VERIFIED
  */
@@ -17,6 +21,7 @@ import type { Chain } from '../chain/index.js';
 import { GENESIS_HASH } from '../chain/genesis.js';
 import type { Db } from '../db/open.js';
 import type { DocumentStore, SourceDrift } from '../docs/documents.js';
+import { checkBlockRow, type RowProblem } from '../docs/integrity.js';
 import { ReceiptSchema, verifyReceiptSignature, type Receipt } from './receipt.js';
 
 /**
@@ -40,6 +45,8 @@ export const VERIFY_REASONS = [
   'superseded_by_newer_head',
   'tombstoned',
   'stale_source',
+  'content_tampered',
+  'projection_mismatch',
 ] as const;
 export type VerifyReason = (typeof VERIFY_REASONS)[number];
 
@@ -56,6 +63,8 @@ export interface VerifyResult {
   supersession_depth?: number;
   /** Present with STALE_SOURCE: what changed in the bound source file. */
   source_drift?: SourceDrift;
+  /** 0.5.0, with content_tampered: what the integrity check found. */
+  integrity_problem?: RowProblem;
   checked_at: string;
   chain_head: { seq: number; hash: string };
 }
@@ -98,7 +107,9 @@ export class ReceiptVerifier {
     const block = this.docs.getBlock(receipt.block_id);
     if (!block) return fail('unknown_block', 'UNVERIFIED', {}, ids);
 
-    // 4. CONTENT
+    // 4. CONTENT — re-hash what is stored, against the row and the chain.
+    const problem = checkBlockRow(this.chain, block);
+    if (problem) return fail('content_tampered', 'UNVERIFIED', { integrity_problem: problem }, ids);
     if (block.content_hash !== receipt.content_hash) {
       return fail('content_hash_mismatch', 'UNVERIFIED', { current_content_hash: block.content_hash }, ids);
     }
@@ -138,6 +149,8 @@ export class ReceiptVerifier {
         ids,
       );
     }
+    // The projection says live; the chain must agree.
+    if (this.docs.chainRetired(block.block_id)) return fail('projection_mismatch', 'UNVERIFIED', {}, ids);
     // 7. SOURCE (0.4.0): a git-bound document whose file moved on.
     const drift = this.docs.sourceDrift(block.doc_id);
     if (drift && (drift.state === 'changed' || drift.state === 'missing')) {
