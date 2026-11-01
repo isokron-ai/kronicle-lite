@@ -28,7 +28,7 @@ import {
 } from './drift.js';
 import { scrubDeep } from '../secrets/guard.js';
 import { FlightRecorder } from './flight-recorder.js';
-import type { CosmeticRule } from './cosmetic.js';
+import { __mutants, type FormatRule } from './cosmetic.js';
 import { computeRetractions, type Retraction } from './retraction.js';
 import { snippet } from './textdiff.js';
 
@@ -67,22 +67,26 @@ export interface OrientInput {
    */
   project?: ProjectScope | null | undefined;
   /**
-   * Unreleased (next): also list cosmetic edits (whitespace, quotes,
-   * punctuation, typo-level, review dates) in `retractions`. Default false:
-   * they are recorded and listed under `cosmetic_edits` only.
+   * Unreleased: also list format-only edits (same Markdown tree, identical
+   * text) in `retractions`. Default false: they are recorded and listed under
+   * `format_only_edits` only. `include_cosmetic` is the earlier name.
    */
+  include_format_only?: boolean | undefined;
+  /** @deprecated earlier name of include_format_only. */
   include_cosmetic?: boolean | undefined;
 }
 
-/** Unreleased (next): a supersession that changed formatting, not meaning (orient/cosmetic.ts). */
-export interface CosmeticEdit {
+/** Unreleased: a supersession whose Markdown tree and text are unchanged (orient/cosmetic.ts). */
+export interface FormatOnlyEdit {
   seq: number;
   doc_slug: string | null;
   block_id: string | null;
   successor_block_id: string | null;
-  rules: CosmeticRule[];
+  rules: FormatRule[];
   diff: string | null;
 }
+/** @deprecated earlier name. */
+export type CosmeticEdit = FormatOnlyEdit;
 
 /**
  * Unreleased (next): a note this actor wrote since its cursor, carried back
@@ -120,6 +124,8 @@ export interface IntegritySummary {
   blocks_checked: number;
   /** First problem found, in words; null when ok. */
   problem: string | null;
+  /** Unreleased, additive: chain seq of the first bad event, when the problem is an event. */
+  seq?: number | null;
 }
 
 export interface Digest {
@@ -173,8 +179,10 @@ export interface SystemState {
   } | null;
   delta: TypedDelta | null;
   retractions: Retraction[] | null;
-  /** Unreleased (next): cosmetic supersessions since the cursor (not in `retractions` by default); null for focus=pulse. */
-  cosmetic_edits?: CosmeticEdit[] | null;
+  /** Unreleased: format-only supersessions since the cursor (not in `retractions` by default); null for focus=pulse. */
+  format_only_edits?: FormatOnlyEdit[] | null;
+  /** @deprecated alias of format_only_edits (same array). */
+  cosmetic_edits?: FormatOnlyEdit[] | null;
   /** Unreleased (next): this actor's own notes written since the cursor, bounded; null unless focus is orientation / recent_changes. */
   carried_notes?: CarriedNote[] | null;
   digest: Digest | null;
@@ -367,7 +375,7 @@ export class Orient {
       latest.delete(doc_id);
       latest.set(doc_id, e);
     }
-    const changed = retractions.filter((r) => !r.cosmetic && r.old_text);
+    const changed = retractions.filter((r) => !r.format_only && r.old_text);
     const out: CarriedNote[] = [];
     let budget = CARRIED_NOTES_TOTAL_CHARS;
     for (const [doc_id, e] of [...latest].reverse()) {
@@ -398,8 +406,9 @@ export class Orient {
    * newest live blocks against their chained block.created events. Cheap
    * enough for every orient; `verify-chain` / `doctor` do the full pass.
    */
-  quickIntegrity(from_seq: number, head: ChainHead, opts: { windowOnly?: boolean } = {}): IntegritySummary {
+  quickIntegrity(from_seq: number, head: ChainHead, opts: { windowOnly?: boolean; eventsOnly?: boolean } = {}): IntegritySummary {
     let problem: string | null = null;
+    let seq: number | null = null;
     let events_checked = 0;
     // windowOnly (focus=retractions, the per-tool-call push path): re-hash just
     // the events since the cursor instead of the last 1000. Full briefings keep
@@ -408,10 +417,13 @@ export class Orient {
       const from = opts.windowOnly ? Math.max(1, from_seq + 1) : Math.max(1, Math.min(from_seq + 1, head.seq - 999));
       const r = this.chain.verify(from);
       events_checked = r.events_checked;
-      if (!r.ok && r.first_mismatch) problem = `chain ${r.first_mismatch.kind} at seq ${r.first_mismatch.seq}`;
+      if (!r.ok && r.first_mismatch) {
+        problem = `chain ${r.first_mismatch.kind} at seq ${r.first_mismatch.seq}`;
+        seq = r.first_mismatch.seq;
+      }
     }
     // Live blocks are always re-hashed (a tampered row must surface on every path, the push hook's too).
-    const blocks = this.docs.liveBlockRows(2000);
+    const blocks = opts.eventsOnly ? [] : this.docs.liveBlockRows(2000);
     if (!problem) {
       for (const b of blocks) {
         const p = checkBlockRow(this.chain, b);
@@ -421,7 +433,7 @@ export class Orient {
         }
       }
     }
-    return { ok: problem === null, events_checked, blocks_checked: blocks.length, problem };
+    return { ok: problem === null, events_checked, blocks_checked: blocks.length, problem, seq };
   }
 
   getSystemState(input: OrientInput, now = new Date()): SystemState {
@@ -453,7 +465,7 @@ export class Orient {
     let integrity: IntegritySummary | null = null;
     let scope: SystemState['scope'] = null;
 
-    let cosmetic_edits: CosmeticEdit[] | null = null;
+    let format_only_edits: FormatOnlyEdit[] | null = null;
     let carried_notes: CarriedNote[] | null = null;
 
     if (focus !== 'pulse') {
@@ -489,16 +501,20 @@ export class Orient {
       const computed = computeRetractions(events, lookup);
       if (keys && input.project) {
         const hiddenEvents = allEvents.length - events.length;
-        const hidden = hiddenEvents > 0 ? computeRetractions(allEvents.filter((e) => !inScope(e)), lookup).filter((r) => !r.cosmetic).length : 0;
+        const hidden = hiddenEvents > 0 ? computeRetractions(allEvents.filter((e) => !inScope(e)), lookup).filter((r) => !r.format_only).length : 0;
         scope = { project_keys: input.project.keys, hidden_retractions: hidden, verdict: hidden > 0 ? 'partial' : 'complete', hidden_events: hiddenEvents };
       }
-      retractions = input.include_cosmetic ? computed : computed.filter((r) => !r.cosmetic);
-      cosmetic_edits = computed
-        .filter((r) => r.cosmetic)
-        .map((r) => ({ seq: r.seq, doc_slug: r.doc_slug, block_id: r.block_id, successor_block_id: r.successor_block_id, rules: r.cosmetic!, diff: r.diff }));
+      // The ONLY suppression: format-only edits move to their own list. A hint
+      // (likely_typo) is a label and never moves anything.
+      const suppressible = (r: Retraction) => r.format_only || (__mutants.has('gate_trusts_label') && r.hint === 'likely_typo');
+      const includeFormat = input.include_format_only === true || input.include_cosmetic === true;
+      retractions = includeFormat ? computed : computed.filter((r) => !suppressible(r));
+      format_only_edits = computed
+        .filter(suppressible)
+        .map((r) => ({ seq: r.seq, doc_slug: r.doc_slug, block_id: r.block_id, successor_block_id: r.successor_block_id, rules: r.format_rules ?? ['markup'], diff: r.diff }));
       // 0.6.0: read-time secret scrub on the text this briefing serves.
       retractions = scrubDeep(retractions).value;
-      cosmetic_edits = scrubDeep(cosmetic_edits).value;
+      format_only_edits = scrubDeep(format_only_edits).value;
       if (delta.entries.length > 0) delta = { ...delta, entries: scrubDeep(delta.entries).value };
       if (focus === 'orientation' || focus === 'recent_changes') carried_notes = scrubDeep(this.carriedNotes(events, input.actor_id, computed)).value;
       if (focus === 'orientation' || recovery.method === 'genesis') digest = scrubDeep(this.digest(keys ? [...keys] : null)).value;
@@ -507,6 +523,12 @@ export class Orient {
       integrity = this.quickIntegrity(recovery.from_seq, head, { windowOnly: focus === 'retractions' });
     }
 
+    // Unreleased: pulse re-hashes the events since the cursor too (cheap), so a
+    // corrupt or edited event is never answered with "within threshold".
+    if (focus === 'pulse' && recovery.from_seq < head.seq) {
+      const pi = this.quickIntegrity(recovery.from_seq, head, { windowOnly: true, eventsOnly: true });
+      if (!pi.ok) integrity = pi;
+    }
     const next_steps = nextSteps({ focus, recovery, drift_banner, retractions, source_drift, integrity, scope });
     const lastAnchor = this.chain.lastAnchor();
     const anchor: AnchorSummary | null = lastAnchor
@@ -538,7 +560,8 @@ export class Orient {
       scope,
       delta,
       retractions,
-      cosmetic_edits,
+      format_only_edits,
+      cosmetic_edits: format_only_edits,
       carried_notes,
       digest,
       next_steps,
@@ -558,7 +581,7 @@ export class Orient {
           recovery,
           by_type: delta?.by_type ?? {},
           retraction_count: retractions?.length ?? 0,
-          cosmetic_count: cosmetic_edits?.length ?? 0,
+          format_only_count: format_only_edits?.length ?? 0,
           drift_surfaced: drift_banner.surfaced,
           budget_tokens: budget,
         },
@@ -595,15 +618,10 @@ function nextSteps(args: {
     return steps;
   }
   const safety = args.retractions?.filter((r) => r.severity === 'safety').length ?? 0;
-  const typos = args.retractions?.filter((r) => r.likely_typo).length ?? 0;
-  const real = (args.retractions?.length ?? 0) - typos;
-  if (real > 0) {
+  if (args.retractions && args.retractions.length > 0) {
     steps.push(
-      `Reconcile ${real} retraction(s)${safety ? ` (${safety} safety)` : ''} BEFORE acting: for each, affirm the current truth (cite seq), name the old claim once, and drop it as a decision premise.`,
+      `Reconcile ${args.retractions.length} retraction(s)${safety ? ` (${safety} safety)` : ''} BEFORE acting: for each, affirm the current truth (cite seq), name the old claim once, and drop it as a decision premise.`,
     );
-  }
-  if (typos > 0) {
-    steps.push(`${typos} edit(s) look like typo fixes (informational): use the new wording; check it is not a different name or value before relying on the old one.`);
   }
   if (args.scope && args.scope.verdict === 'partial') {
     steps.push(

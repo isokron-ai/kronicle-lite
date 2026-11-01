@@ -13,7 +13,7 @@
 
 import type { ChainEvent } from '../chain/index.js';
 import { isInstructionSlug } from '../docs/documents.js';
-import { classifyEdit, type CosmeticRule } from './cosmetic.js';
+import { classifyEdit, type FormatRule } from './cosmetic.js';
 import { snippet, wordDiff } from './textdiff.js';
 
 export type RetractionSeverity = 'safety' | 'behavioral' | 'informational';
@@ -48,19 +48,27 @@ export interface Retraction {
   new_text: string | null;
   diff: string | null;
   /**
-   * Unreleased (next), additive: the rules that make this supersession
-   * cosmetic (whitespace, quotes, punctuation, typo, review_stamp, ...;
-   * orient/cosmetic.ts), or null when it is semantic or not a supersession.
-   * Orient lists cosmetic edits under `cosmetic_edits`, not `retractions`,
-   * unless asked (`include_cosmetic`).
+   * Unreleased, additive: true when this supersession is FORMAT-ONLY: old
+   * and new text parse to the same Markdown tree with byte-identical text
+   * leaves (whitespace runs collapsed). Orient lists those under
+   * `format_only_edits` instead of `retractions` unless asked
+   * (`include_format_only`). Presentation only: nothing else changes.
    */
-  cosmetic: CosmeticRule[] | null;
+  format_only: boolean;
+  /** With format_only: what differed (`whitespace` or `markup`). */
+  format_rules?: FormatRule[];
   /**
-   * Unreleased, additive: a supersession shaped like a one-letter typo fix of
-   * an ordinary word. Still a retraction (it may be a different name or
-   * value: http→https, Mark→Mary), with informational severity.
+   * Unreleased, additive: presentation hint. `likely_typo` = one ordinary
+   * word one letter off. A label on a normal retraction: it never changes
+   * severity, delivery or the reconcile instruction.
    */
-  likely_typo?: boolean;
+  hint?: 'likely_typo';
+  /**
+   * Unreleased, additive: set when the block now sits under a different
+   * heading path (moved section, renamed or re-levelled ancestor heading).
+   * `heading_path` is the old path.
+   */
+  new_heading_path?: string[];
 }
 
 /** Block text for a retraction, from the projection (orient passes one in). */
@@ -110,23 +118,39 @@ export function classifyRetraction(ev: ChainEvent, lookup?: BlockTextLookup): Re
   const reason = str(p['reason']);
   const oldB = block_id && lookup ? lookup(block_id) : null;
   const newB = successor_block_id && lookup ? lookup(successor_block_id) : null;
+  // A block that changed section is a change even when its words did not.
+  const moved = oldB && newB && oldB.heading_path.join('\u0000') !== newB.heading_path.join('\u0000') ? newB.heading_path : null;
+  const contentDiff = oldB && newB ? wordDiff(oldB.content, newB.content) : null;
+  const sectionDiff = moved ? `section: ${wordDiff(oldB!.heading_path.join(' › '), moved.join(' › '))}` : null;
   const text = {
     heading_path: oldB?.heading_path ?? newB?.heading_path ?? null,
     old_text: oldB ? snippet(oldB.content) : null,
     new_text: oldB && newB ? snippet(newB.content) : null,
-    diff: oldB && newB ? wordDiff(oldB.content, newB.content) : null,
+    diff: sectionDiff && oldB!.content === newB!.content ? sectionDiff : sectionDiff ? `${sectionDiff}; ${contentDiff}` : contentDiff,
   };
-  const edit = rule.kind === 'supersession' && oldB && newB ? classifyEdit(oldB.content, newB.content, oldB.kind ?? newB.kind) : null;
-  const cosmetic = edit?.cosmetic ? (edit.rules.length > 0 ? edit.rules : (['whitespace'] as CosmeticRule[])) : null;
-  const likely_typo = edit !== null && !edit.cosmetic && edit.likely_typo;
-  const base = { seq: ev.seq, event_type: ev.event_type, block_id, doc_slug, successor_block_id, reason, ...text, cosmetic, ...(likely_typo ? { likely_typo } : {}) };
+  const edit = rule.kind === 'supersession' && oldB && newB && !moved ? classifyEdit(oldB.content, newB.content, oldB.kind ?? newB.kind) : null;
+  const format_only = edit?.format_only === true;
+  const hint = !format_only && edit?.hint ? edit.hint : null;
+  const base = {
+    seq: ev.seq,
+    event_type: ev.event_type,
+    block_id,
+    doc_slug,
+    successor_block_id,
+    reason,
+    ...text,
+    format_only,
+    ...(format_only ? { format_rules: edit!.rules } : {}),
+    ...(hint ? { hint } : {}),
+    ...(moved ? { new_heading_path: moved } : {}),
+  };
   const instruction = isInstructionSlug(doc_slug) && rule.kind !== 'retraction';
-  if (cosmetic) {
+  if (format_only) {
     return {
       ...base,
       kind: instruction ? 'instruction' : rule.kind,
       severity: 'informational',
-      reason_line: `Cosmetic edit (${cosmetic.join(', ')}) of "${text.old_text}"${where(doc_slug, text.heading_path)} at seq ${ev.seq}: the meaning is unchanged; no action needed.`,
+      reason_line: `Format-only edit (${edit!.rules.join(', ')}) of "${text.old_text}"${where(doc_slug, text.heading_path)} at seq ${ev.seq}: same Markdown structure and identical text; nothing to reconcile.`,
     };
   }
   // With the words in hand, say them: "you relied on <old>; it is now <new>".
@@ -136,26 +160,21 @@ export function classifyRetraction(ev: ChainEvent, lookup?: BlockTextLookup): Re
     const why = reason && !/^(replaced|removed) in revision \d+$/.test(reason) ? reason : null;
     const asserted = `${instruction ? 'instruction ' : ''}"${text.old_text}"${loc}`;
     let truth: string;
-    if (rule.kind === 'supersession') {
+    if (rule.kind === 'supersession' && moved) {
+      const now = oldB.content === newB!.content ? 'the same text' : `"${text.new_text}"`;
+      truth = `${now} MOVED to ${doc_slug ?? 'the document'} › ${moved.join(' › ') || '(top)'} (seq ${ev.seq}): re-read it in its new section`;
+    } else if (rule.kind === 'supersession') {
       truth = `"${text.new_text}" (seq ${ev.seq}${why ? `, ${why}` : ''})${instruction ? '; follow the new text' : ''}`;
     } else {
       truth = instruction
         ? `REMOVED from ${doc_slug} at seq ${ev.seq}${why ? ` (${why})` : ''}; stop following it`
         : `TOMBSTONED at seq ${ev.seq}${why ? ` (${why})` : ''}; do not read or build on it`;
     }
-    if (likely_typo) {
-      return {
-        ...base,
-        kind: instruction ? 'instruction' : rule.kind,
-        severity: 'informational',
-        reason_line: `Likely a typo fix: ${asserted} now reads ${truth}. Check that it is not a different name or value before relying on the old wording.`,
-      };
-    }
     return {
       ...base,
       kind: instruction ? 'instruction' : rule.kind,
       severity: rule.severity,
-      reason_line: `You previously relied on ${asserted}; current truth is ${truth}. Reconcile before proceeding.`,
+      reason_line: `You previously relied on ${asserted}; current truth is ${truth}. Reconcile before proceeding.${hint ? ' (Hint: likely a typo fix.)' : ''}`,
     };
   }
   return { ...base, ...classifyBare(ev, rule, block_id, doc_slug, successor_block_id, reason) };

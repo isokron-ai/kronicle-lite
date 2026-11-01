@@ -56,8 +56,11 @@ function repo() {
   return { root, home, rc, store: new KronicleLite({ memory: true }) };
 }
 
-describe('S7: cosmetic edits are recorded, not retractions', () => {
-  it('each benign edit alone: quiet orient (a typo fix is delivered as likely_typo); a cluster change still alarms with its diff', () => {
+// Bench benign-edit Notes lines (index → format-only under Markdown-AST equivalence?)
+const FORMAT_ONLY_NOTES = new Set([1, 4, 5]); // double space, 1) → 1., *x* → _x_
+
+describe('S7: format-only edits are recorded, everything else is a retraction', () => {
+  it('each benign edit alone: format-only ones quiet, the rest delivered; a cluster change alarms with its diff', () => {
     for (let i = 0; i < NOTES_PRE.length; i++) {
       const { root, rc, store } = repo();
       const file = join(root, 'docs', 'deploy.md');
@@ -67,22 +70,22 @@ describe('S7: cosmetic edits are recorded, not retractions', () => {
       write(file, runbook('stg-west-3', NOTES_PRE.map((n, j) => (j === i ? NOTES_POST[j]! : n))));
       expect(syncInstructionFile(store, entryFor(file, rc), { context: rc }).action).toBe('updated');
       const s = store.orient.getSystemState({ actor_id: 'a', since_cursor: c0 });
-      if (i === 0) {
-        // recieve → receive: typo-shaped, so delivered (informational), never hidden.
-        expect(s.retractions).toEqual([expect.objectContaining({ likely_typo: true, severity: 'informational' })]);
-        expect(s.cosmetic_edits).toEqual([]);
-        expect(renderSystemStateMarkdown(s)).toMatch(/likely typo fixes: check the new wording/);
+      const md = renderSystemStateMarkdown(s);
+      if (!FORMAT_ONLY_NOTES.has(i)) {
+        expect(s.retractions, NOTES_POST[i]).toHaveLength(1);
+        expect(s.format_only_edits).toEqual([]);
+        expect(md).toMatch(/Retractions \(1\) — reconcile before acting/);
         continue;
       }
       expect(s.retractions).toEqual([]);
-      expect(s.cosmetic_edits).toHaveLength(1);
-      const md = renderSystemStateMarkdown(s);
+      expect(s.format_only_edits).toHaveLength(1);
+      expect(s.cosmetic_edits).toEqual(s.format_only_edits); // deprecated alias
       expect(alarm(md), md).toBe(false);
-      expect(md).toMatch(/1 cosmetic edit\(s\) recorded/);
-      // Still queryable: include_cosmetic lists it as an informational retraction.
-      const all = store.orient.getSystemState({ actor_id: 'b', since_cursor: undefined, include_cosmetic: true });
-      expect(all.retractions!.filter((r) => r.cosmetic)).toHaveLength(1);
-      expect(all.retractions!.find((r) => r.cosmetic)!.severity).toBe('informational');
+      expect(md).toMatch(/1 format-only edit\(s\) recorded/);
+      // Still queryable: include_format_only lists it as an informational retraction.
+      const all = store.orient.getSystemState({ actor_id: 'b', since_cursor: undefined, include_format_only: true });
+      expect(all.retractions!.filter((r) => r.format_only)).toHaveLength(1);
+      expect(all.retractions!.find((r) => r.format_only)!.severity).toBe('informational');
     }
     const { root, rc, store } = repo();
     const file = join(root, 'docs', 'deploy.md');
@@ -92,10 +95,10 @@ describe('S7: cosmetic edits are recorded, not retractions', () => {
     write(file, runbook('qa-east-7', NOTES_POST));
     syncInstructionFile(store, entryFor(file, rc), { context: rc });
     const s = store.orient.getSystemState({ actor_id: 'a', since_cursor: c0 });
-    expect(s.retractions).toHaveLength(2);
-    expect(s.retractions!.find((r) => !r.likely_typo)!.diff).toContain('[-`stg-west-3`-]{+`qa-east-7`+}');
-    expect(s.cosmetic_edits).toHaveLength(NOTES_PRE.length - 1);
-    expect(renderSystemStateMarkdown(s)).toMatch(/Retractions \(2\) — reconcile before acting/);
+    expect(s.retractions).toHaveLength(1 + NOTES_PRE.length - FORMAT_ONLY_NOTES.size);
+    expect(s.retractions!.some((r) => r.diff?.includes('[-`stg-west-3`-]{+`qa-east-7`+}'))).toBe(true);
+    expect(s.retractions!.find((r) => r.old_text?.includes('recieve'))!.hint).toBe('likely_typo');
+    expect(s.format_only_edits).toHaveLength(FORMAT_ONLY_NOTES.size);
   });
 });
 
@@ -108,7 +111,7 @@ describe('0.7.0 blocker: a one-letter value change is a retraction, not a typo',
     const s = store.orient.getSystemState({ actor_id: 'hook', since_cursor: c0, focus: 'retractions' });
     expect(s.retractions).toHaveLength(1);
     expect(s.retractions![0]!.diff).toContain('staging-b');
-    expect(s.cosmetic_edits).toEqual([]);
+    expect(s.format_only_edits).toEqual([]);
   });
 });
 
@@ -251,7 +254,7 @@ describe('CLI start-up', () => {
 });
 
 describe('push contract: orient --cursor C --focus retractions --json', () => {
-  it('stable shape: cursor, head.seq, retractions[{seq,kind,diff,old_text,new_text}]; cosmetic edits not pushed', async () => {
+  it('stable shape: cursor, head.seq, retractions[{seq,kind,diff,old_text,new_text}]; format-only edits not pushed', async () => {
     const root = tempDir('kl-push-');
     const data = tempDir('kl-push-data-');
     gitInit(root);
@@ -269,7 +272,7 @@ describe('push contract: orient --cursor C --focus retractions --json', () => {
         cursor: string;
         head: { seq: number };
         retractions: { seq: number; kind: string; diff: string | null; old_text: string | null; new_text: string | null }[];
-        cosmetic_edits: unknown[];
+        format_only_edits: unknown[];
         source_drift: unknown;
       };
     };
@@ -278,8 +281,8 @@ describe('push contract: orient --cursor C --focus retractions --json', () => {
     writeFileSync(file, runbook('stg-west-3', NOTES_POST));
     await put();
     const o1 = await orient(['--cursor', o0.cursor, '--focus', 'retractions']);
-    expect(o1.retractions).toEqual([expect.objectContaining({ likely_typo: true })]); // recieve → receive is delivered
-    expect(o1.cosmetic_edits.length).toBe(NOTES_PRE.length - 1);
+    expect(o1.retractions.length).toBe(NOTES_PRE.length - 3); // only the 3 format-only notes stay quiet
+    expect(o1.format_only_edits.length).toBe(3);
     expect(o1.source_drift).toBeNull();
     writeFileSync(file, runbook('qa-east-7', NOTES_POST));
     await put();
@@ -287,7 +290,7 @@ describe('push contract: orient --cursor C --focus retractions --json', () => {
     expect(o2.head.seq).toBeGreaterThan(o1.head.seq);
     expect(o2.retractions).toEqual([expect.objectContaining({ kind: 'instruction', diff: expect.stringContaining('qa-east-7'), old_text: expect.any(String), new_text: expect.any(String) })]);
     expect(typeof o2.retractions[0]!.seq).toBe('number');
-    const o3 = await orient(['--cursor', o2.cursor, '--focus', 'retractions', '--include-cosmetic']);
+    const o3 = await orient(['--cursor', o2.cursor, '--focus', 'retractions', '--include-format-only']);
     expect(o3.retractions).toEqual([]);
     // project scope comes from --cwd
     expect(projectScopeFor({ cwd: root }).keys.length).toBeGreaterThan(0);

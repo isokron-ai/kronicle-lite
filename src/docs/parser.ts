@@ -11,8 +11,9 @@
  *     blocks trimmed. Empty input yields zero blocks.
  *
  * content_hash = BLAKE3-256 of the block's UTF-8 content (after the
- * normalization above). The heading path is NOT part of the hash: the same
- * paragraph under a renamed heading keeps its address.
+ * normalization above). The heading path is not part of the hash, but a
+ * block whose heading path changes is superseded on re-put (planRevision):
+ * the same words under another section are a change of meaning.
  */
 
 import { blake3Hex } from '../crypto/hash.js';

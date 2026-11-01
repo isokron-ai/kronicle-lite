@@ -26,7 +26,7 @@ import { VERIFY_REASONS, VERIFY_STATUSES } from './recall/verify-receipt.js';
 import { AUDIT_VERDICTS } from './orient/audit.js';
 import { ReceiptSchema } from './recall/receipt.js';
 import { FOCUSES, RECOVERY_METHODS } from './orient/orient.js';
-import { COSMETIC_RULES } from './orient/cosmetic.js';
+import { FORMAT_RULES } from './orient/cosmetic.js';
 import { RETRACTION_KINDS } from './orient/retraction.js';
 import { ROW_PROBLEMS } from './docs/integrity.js';
 import { ABSENCE_VERDICTS, RECALL_SCOPES } from './recall/absence.js';
@@ -175,8 +175,10 @@ export const RetractionSchema = z.object({
   old_text: z.string().nullable(),
   new_text: z.string().nullable(),
   diff: z.string().nullable().describe('Word diff: [-removed-]{+added+}.'),
-  cosmetic: z.array(z.enum(COSMETIC_RULES)).nullable().optional().describe('Rules that make this edit cosmetic (meaning unchanged), else null.'),
-  likely_typo: z.boolean().optional().describe('Shaped like a one-letter typo fix; still delivered (informational).'),
+  format_only: z.boolean().optional().describe('Same Markdown tree, identical text (whitespace/markup only). Listed under format_only_edits unless include_format_only.'),
+  format_rules: z.array(z.enum(FORMAT_RULES)).optional(),
+  hint: z.enum(['likely_typo']).optional().describe('Presentation label only; never changes delivery or severity.'),
+  new_heading_path: z.array(z.string()).optional().describe('Set when the block moved to another section; heading_path is the old one.'),
 });
 
 export const CosmeticEditSchema = z.object({
@@ -184,7 +186,7 @@ export const CosmeticEditSchema = z.object({
   doc_slug: z.string().nullable(),
   block_id: z.string().nullable(),
   successor_block_id: z.string().nullable(),
-  rules: z.array(z.enum(COSMETIC_RULES)),
+  rules: z.array(z.enum(FORMAT_RULES)),
   diff: z.string().nullable(),
 });
 
@@ -301,8 +303,9 @@ export const SystemStateSchema = z.object({
     })
     .nullable(),
   delta: TypedDeltaSchema.nullable().describe('null for focus=retractions and focus=pulse.'),
-  retractions: z.array(RetractionSchema).nullable().describe('null for focus=pulse. Cosmetic edits only with include_cosmetic.'),
-  cosmetic_edits: z.array(CosmeticEditSchema).nullable().optional().describe('Formatting-only edits since the cursor (not retractions); null for focus=pulse.'),
+  retractions: z.array(RetractionSchema).nullable().describe('null for focus=pulse. Format-only edits only with include_format_only.'),
+  format_only_edits: z.array(CosmeticEditSchema).nullable().optional().describe('Edits with the same Markdown tree and identical text since the cursor (not retractions); null for focus=pulse.'),
+  cosmetic_edits: z.array(CosmeticEditSchema).nullable().optional().describe('Deprecated alias of format_only_edits.'),
   carried_notes: z.array(CarriedNoteSchema).nullable().optional().describe('Your own notes written since the cursor, bounded text.'),
   digest: DigestSchema.nullable().describe('Present on cold start and focus=orientation.'),
   next_steps: z.array(z.string()),
@@ -434,7 +437,7 @@ export const VerifyChainResultSchema = z.object({
   first_mismatch: z
     .object({
       seq: z.number().int(),
-      kind: z.enum(['hash_mismatch', 'link_broken', 'seq_gap', 'head_mismatch']),
+      kind: z.enum(['hash_mismatch', 'link_broken', 'seq_gap', 'head_mismatch', 'payload_unparseable']),
       expected: z.string(),
       actual: z.string(),
     })

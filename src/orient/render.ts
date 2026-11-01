@@ -21,7 +21,7 @@ export function isQuietBriefing(s: SystemState): boolean {
     (s.integrity?.ok ?? true) &&
     (s.delta?.events_since ?? 0) === 0 &&
     (s.retractions?.length ?? 0) === 0 &&
-    (s.cosmetic_edits?.length ?? 0) === 0 &&
+    (s.format_only_edits?.length ?? 0) === 0 &&
     (s.carried_notes?.length ?? 0) === 0 &&
     (s.source_drift?.length ?? 0) === 0 &&
     (s.scope?.hidden_retractions ?? 0) === 0
@@ -37,6 +37,7 @@ export function renderSystemStateMarkdown(s: SystemState): string {
   }
   if (s.focus === 'pulse') {
     const out = [`kronicle-lite pulse: head seq ${s.head.seq}. ${s.drift_banner.line}`];
+    if (integrityLine) out.unshift(integrityLine);
     if (s.recovery.cursor_error) out.push(`Your cursor was rejected (${s.recovery.cursor_error}); position recovered server-side (${s.recovery.method}).`);
     if (s.drift_banner.surfaced) out.push('Call get_system_state with focus=recent_changes before acting.');
     out.push(`Next cursor: \`${s.cursor_compact}\``);
@@ -59,8 +60,7 @@ export function renderSystemStateMarkdown(s: SystemState): string {
 
   if (s.retractions && s.retractions.length > 0) {
     lines.push('');
-    const allTypos = s.retractions.every((r) => r.likely_typo);
-    lines.push(`## Retractions (${s.retractions.length}) — ${allTypos ? 'likely typo fixes: check the new wording' : 'reconcile before acting'}`);
+    lines.push(`## Retractions (${s.retractions.length}) — reconcile before acting`);
     for (const r of s.retractions) {
       lines.push(`- **[${r.severity}]** seq ${r.seq} \`${r.event_type}\` ${r.doc_slug ? `(${r.doc_slug}) ` : ''}${r.reason_line}`);
       if (r.diff) lines.push(`  - changed: ${r.diff}`);
@@ -71,10 +71,10 @@ export function renderSystemStateMarkdown(s: SystemState): string {
     // 0.6.0: a hidden scope degrades "none" — it was not reviewed, not cleared.
     lines.push(s.scope?.verdict === 'partial' ? '## Retractions: none in this project (partial view)' : '## Retractions: none');
   }
-  const cosmetic = s.cosmetic_edits ?? [];
+  const cosmetic = s.format_only_edits ?? [];
   if (cosmetic.length > 0) {
     const rules = [...new Set(cosmetic.flatMap((c) => c.rules))].join(', ');
-    lines.push(`_${cosmetic.length} cosmetic edit(s) recorded (${rules}): meaning unchanged, no action needed (include_cosmetic: true lists them)._`);
+    lines.push(`_${cosmetic.length} format-only edit(s) recorded (${rules}; same Markdown structure, identical text): nothing to reconcile (include_format_only: true lists them)._`);
   }
   if (s.scope && s.scope.hidden_retractions > 0) {
     lines.push(`_${s.scope.hidden_retractions} retraction(s) from other projects hidden and not reviewed (all_projects: true shows them)._`);
@@ -125,7 +125,7 @@ export function renderSystemStateMarkdown(s: SystemState): string {
       const t = s.delta.entries.find((e) => e.kind === 'event' && e.seq === ce.seq)?.event_type ?? 'block.superseded';
       if ((byType[t] ?? 0) > 0) byType[t] = byType[t]! - 1;
       if (byType[t] === 0) delete byType[t];
-      byType['cosmetic_edit'] = (byType['cosmetic_edit'] ?? 0) + 1;
+      byType['format_only_edit'] = (byType['format_only_edit'] ?? 0) + 1;
     }
     const types = Object.entries(byType)
       .sort((a, b) => b[1] - a[1])
@@ -138,7 +138,7 @@ export function renderSystemStateMarkdown(s: SystemState): string {
     for (const e of s.delta.entries) {
       if (e.kind === 'event') {
         const ce = cosmeticSeqs.get(e.seq);
-        if (ce) lines.push(`- seq ${e.seq} cosmetic edit (${ce.rules.join(', ')}) in ${ce.doc_slug ?? 'a document'} by ${e.actor_id}`);
+        if (ce) lines.push(`- seq ${e.seq} format-only edit (${ce.rules.join(', ')}) in ${ce.doc_slug ?? 'a document'} by ${e.actor_id}`);
         else lines.push(`- seq ${e.seq} \`${e.event_type}\` by ${e.actor_id} @ ${e.occurred_at} — ${summarizePayload(e.payload)}`);
       } else {
         lines.push(`- seq ${e.first_seq}–${e.last_seq} \`${e.event_type}\` ×${e.count} (rolled up${e.rendered_via === 'budget' ? ' by budget' : ''}); last: ${summarizePayload(e.sample.payload)}`);

@@ -28,6 +28,7 @@ import { recomputeEventHash } from '../chain/event.js';
 import { blake3Hex } from '../crypto/hash.js';
 import type { Db } from '../db/open.js';
 import { SCHEMA_SQL } from '../db/schema.js';
+import { isPayloadUnparseable } from '../chain/index.js';
 import { DocumentStore } from './documents.js';
 
 /**
@@ -188,7 +189,18 @@ export function verifyProjection(db: Db, chain: Chain): ProjectionResult {
     const replay = new DocumentStore(mem, chain);
     const tx = mem.transaction(() => {
       for (const ev of chain.iterate()) {
-        replay.applyEvent(ev);
+        // An unparseable payload projects nothing (the rows it made are then
+        // reported as extra/mismatched); an event that cannot be applied after
+        // it is reported, not thrown.
+        if (isPayloadUnparseable(ev)) {
+          report({ table: 'documents', key: `seq ${ev.seq}`, field: 'payload', detail: `event ${ev.event_type} at seq ${ev.seq} has an unparseable payload` });
+        } else {
+          try {
+            replay.applyEvent(ev);
+          } catch (err) {
+            report({ table: 'documents', key: `seq ${ev.seq}`, field: 'replay', detail: `event ${ev.event_type} at seq ${ev.seq} cannot be applied: ${err instanceof Error ? err.message : String(err)}` });
+          }
+        }
         events++;
       }
     });

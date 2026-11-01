@@ -115,7 +115,8 @@ export type ChainMismatchKind =
   | 'hash_mismatch' // recomputed this_hash != stored this_hash
   | 'link_broken' // prev_hash != previous event's this_hash
   | 'seq_gap' // missing seq
-  | 'head_mismatch'; // chain_head row disagrees with last event
+  | 'head_mismatch' // chain_head row disagrees with last event
+  | 'payload_unparseable'; // unreleased: the stored payload is not a JSON object
 
 export interface CheckpointResult {
   checkpoint_id: string;
@@ -153,12 +154,33 @@ interface EventRow {
   idempotency_key: string | null;
 }
 
+/**
+ * Unreleased: events whose stored payload is not JSON (a hand edit, a torn
+ * page). They are returned with an empty payload, so readers never crash on
+ * one bad row; `verify()` reports them as `payload_unparseable`, and the
+ * empty payload can never hash to the stored this_hash.
+ */
+const UNPARSEABLE = new WeakSet<ChainEvent>();
+export function isPayloadUnparseable(ev: ChainEvent): boolean {
+  return UNPARSEABLE.has(ev);
+}
+
 function rowToEvent(r: EventRow): ChainEvent {
-  return {
+  let payload: Record<string, unknown>;
+  let bad = false;
+  try {
+    const v: unknown = JSON.parse(r.payload_canonical);
+    bad = typeof v !== 'object' || v === null || Array.isArray(v);
+    payload = bad ? {} : (v as Record<string, unknown>);
+  } catch {
+    payload = {};
+    bad = true;
+  }
+  const ev: ChainEvent = {
     seq: r.seq,
     event_id: r.event_id,
     event_type: r.event_type,
-    payload: JSON.parse(r.payload_canonical) as Record<string, unknown>,
+    payload,
     actor_id: r.actor_id,
     occurred_at: r.occurred_at,
     nonce: r.nonce,
@@ -166,6 +188,8 @@ function rowToEvent(r: EventRow): ChainEvent {
     this_hash: r.this_hash,
     idempotency_key: r.idempotency_key,
   };
+  if (bad) UNPARSEABLE.add(ev);
+  return ev;
 }
 
 export class Chain {
@@ -514,6 +538,11 @@ export class Chain {
           expected: expectedPrev,
           actual: ev.prev_hash,
         };
+        break;
+      }
+      if (UNPARSEABLE.has(ev)) {
+        result.ok = false;
+        result.first_mismatch = { seq: ev.seq, kind: 'payload_unparseable', expected: 'a JSON object', actual: 'unparseable payload' };
         break;
       }
       const recomputed = recomputeEventHash(ev);

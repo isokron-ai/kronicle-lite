@@ -9,30 +9,59 @@ uses semantic versioning once past 0.x.
 ### Fixed — 0.7.0's cosmetic classifier hid real changes (release blocker)
 
 - 0.7.0 filed `./bin/deploy --target staging-a` → `staging-b` as a
-  "cosmetic edit" (no retraction, nothing pushed): exactly the stale-runbook
-  case. An adversarial corpus found 27 of 38 real changes hidden the same
-  way: typo-shaped name/unit/format changes (http→https, mysql→mssql,
+  "cosmetic edit" (no retraction, nothing pushed): the stale-runbook case.
+  An adversarial corpus found 27 of its 38 real changes hidden the same way:
+  typo-shaped names, units and formats (http→https, mysql→mssql,
   megabytes→megabits, eight→eighty, Mark→Mary, payments→payment,
   stable→stale), hyphen-joined names (staging-east→west), every date on an
-  "As of / Updated / Revised …" line, and Unicode folding (`2³` → `23`).
-- New rule: nothing that changes a word, number, date or identifier is
-  cosmetic. Cosmetic means the word/number token sequence is byte-identical
-  after whitespace, reflow, line endings, list markers, paired emphasis,
-  quote and standalone-dash style, plus at most one of trailing sentence
-  punctuation, case, or a soft hyphen in a plain word. Review stamps only
-  when the whole line is a stamp phrase and one date. No NFKC.
-- Typo-shaped edits are retractions with `likely_typo: true` and
-  `informational` severity (Markdown: "likely typo fixes: check the new
-  wording"; next steps do not say "reconcile before acting" for them), so
-  a push hook still delivers them.
-- The corpus (agent-memory-bench `stress/kl/classifier-corpus.mjs`) is a
-  test (`test/stress-corpus.test.ts`): false-cosmetic 0/38 (was 27/38 on
-  0.7.0). Plus must-alarm unit tests: staging-a→b, us-east-1→2, v1→v2,
-  port 8080→8081, prod1→prod2, --target a→b, do→don't, must→must not,
-  removing --dry-run, enable→disable, one character inside backticks, a
-  one-letter change on a command line.
-- Bench S7 (benign-edit noise): 100% → 90% quiet; the 2 typo_fix seeds are
-  now delivered as `likely_typo` (intended). S1, S5 stay 100%.
+  "As of / Updated / Revised" line, and Unicode folding (`2³` → `23`).
+- Redesign: **format-only** = Markdown AST equivalence with exact text
+  leaves (docs/FORMAT.md §3.8). Same tree under a narrow pinned parser,
+  every text leaf byte-identical except collapsed whitespace runs in prose;
+  code, inline code, link targets, raw HTML and unknown syntax opaque; no
+  typo, case, hyphen, quote, punctuation, date/review-stamp or Unicode
+  normalization anywhere. Covers reflow, whitespace runs, `*`↔`_`, bullet
+  and list-delimiter style. Everything else is a normal retraction with its
+  diff; `hint: "likely_typo"` is a label only.
+- Renames: `cosmetic` → `format_only` (retraction field),
+  `format_only_edits` (alias `cosmetic_edits`), `include_format_only` /
+  `--include-format-only` (aliases `include_cosmetic` /
+  `--include-cosmetic`). The format-only list is the only thing orient may
+  leave out of `retractions`.
+- Tests in CI: the 38-case stress corpus (false format-only 0/38;
+  `test/stress-corpus.test.ts`), 33 must-alarm cases, a seeded property
+  test (400 single-character mutations — hyphen, digit, case flip,
+  compatibility/combining characters — across prose, identifiers, URLs,
+  numbers, dates and code of real runbooks: never format-only, always
+  visible), and mutation tests that re-introduce each removed heuristic
+  (hyphen strip, lowercase, typo rule, date mask, NFKC, gate trusts the
+  label) behind a test-only switch and require the suite to fail (6/6
+  killed).
+- Bench S7 (benign-edit noise) drops by design: only reflow/whitespace,
+  list-delimiter and emphasis-marker templates stay quiet; typo, comma,
+  quote, period, hyphen and review-date edits are delivered.
+
+### Fixed — a paragraph moved to another section was invisible
+
+- `planRevision` carried a block by content hash even when its heading path
+  changed, so "Force-push" moved from "## Allowed" to "## Forbidden" made no
+  retraction and old receipts kept verifying. Now a block whose heading
+  path changes (moved section, renamed or re-levelled ancestor heading) is
+  superseded by an identical-text block under the new path: a retraction
+  with `new_heading_path`, a `section: [-Allowed-]{+Forbidden+}` diff and
+  "MOVED to …", and the old receipt verifies `SUPERSEDED`. Reordering whole
+  sections still carries.
+
+### Fixed — one corrupt event payload crashed orient
+
+- A non-JSON `events.payload_canonical` made `orient` / `get_system_state`
+  throw (exit 1), which a push hook reads as "nothing to push". Events are
+  now read with an empty payload; `verify()` reports `payload_unparseable`
+  at the seq (verify-chain exits 1 with it, the projection check reports
+  instead of throwing); every orient focus, `pulse` included, answers with
+  `integrity: {ok: false, problem, seq}` and an INTEGRITY FAILURE line
+  first. docs/PUSH.md: "kronicle unavailable" (non-zero exit: fail open)
+  vs "integrity failure" (push it; a pulse blocks).
 
 ## [0.7.0] — 2026-11-01
 

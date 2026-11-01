@@ -366,7 +366,7 @@ export class DocumentStore {
       this.db
         .prepare(
           `SELECT 1 FROM events WHERE event_type IN ('block.superseded', 'block.tombstoned')
-             AND json_extract(payload_canonical, '$.block_id') = ? LIMIT 1`,
+             AND CASE WHEN json_valid(payload_canonical) THEN json_extract(payload_canonical, '$.block_id') END = ? LIMIT 1`,
         )
         .get(block_id) !== undefined
     );
@@ -870,19 +870,37 @@ interface RevisionPlan {
 
 /**
  * Deterministic diff between the live blocks and a freshly parsed revision.
- *   1. Same content_hash → carried (block id preserved, position updated).
+ *   1. Same content_hash, kind AND heading_path → carried (block id
+ *      preserved, position updated). A reorder of whole sections keeps
+ *      every heading path, so it carries.
+ *   1b. Unreleased: same content_hash and kind under a DIFFERENT heading
+ *      path (the paragraph moved to another section, or an ancestor heading
+ *      was renamed or re-levelled) → superseded by a block with the same
+ *      text: "Allowed › X" → "Forbidden › X" is a change of meaning, so
+ *      receipts for the old block verify as SUPERSEDED and orient lists it.
  *   2. Remaining old/new paired in order within the same (kind, heading_path).
  *   3. Leftover old → tombstoned; leftover new → created.
  */
 export function planRevision(oldLive: readonly BlockRow[], next: readonly ParsedBlock[]): RevisionPlan {
   const plan: RevisionPlan = { carried: [], replaced: [], created: [], tombstoned: [] };
   const oldUnmatched = [...oldLive];
-  const newUnmatched: ParsedBlock[] = [];
+  const pending: ParsedBlock[] = [];
 
   for (const n of next) {
-    const i = oldUnmatched.findIndex((o) => o.content_hash === n.content_hash && o.kind === n.kind);
+    const path = joinHeadingPath(n.heading_path);
+    const i = oldUnmatched.findIndex((o) => o.content_hash === n.content_hash && o.kind === n.kind && o.heading_path === path);
     if (i >= 0) {
       plan.carried.push({ old: oldUnmatched[i]!, next: n });
+      oldUnmatched.splice(i, 1);
+    } else {
+      pending.push(n);
+    }
+  }
+  const newUnmatched: ParsedBlock[] = [];
+  for (const n of pending) {
+    const i = oldUnmatched.findIndex((o) => o.content_hash === n.content_hash && o.kind === n.kind);
+    if (i >= 0) {
+      plan.replaced.push({ old: oldUnmatched[i]!, next: n });
       oldUnmatched.splice(i, 1);
     } else {
       newUnmatched.push(n);

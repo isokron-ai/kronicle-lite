@@ -28,9 +28,18 @@ kronicle-lite orient --data-dir DIR --actor push-hook --json --cwd PROJECT --foc
 kronicle-lite orient --data-dir DIR --actor push-hook --json --cwd PROJECT --cursor C --focus retractions
 ```
 
-- **stdout** is one JSON object (the `get_system_state` result), exit 0. A
-  usage or I/O error exits non-zero with a message on stderr; a hook must
-  treat that as "nothing to push" and never fail the tool call.
+- **stdout** is one JSON object (the `get_system_state` result), exit 0.
+- **Two different failures — treat them differently:**
+  - *kronicle unavailable* — non-zero exit, no JSON on stdout (binary
+    missing, usage or I/O error, data dir unreadable): fail open, push
+    nothing, never fail the tool call;
+  - *integrity failure* — exit 0 with `integrity.ok === false` (an event or
+    block no longer matches the chain, e.g. a corrupt payload; `integrity.seq`
+    names the event): PUSH it as the first line ("store edited outside
+    kronicle-lite: do not rely on recalled text") and make a pre-command
+    pulse BLOCK world-changing commands until the operator runs
+    `kronicle-lite verify-chain`. Orient never throws on a bad row; every
+    focus, `pulse` included, reports it.
 - **A bad, foreign or missing cursor never fails.** Check
   `recovery.method`: `presented` / `presented_compact` means the delta is
   since your cursor. `flight_recorder` means it is since this actor's last
@@ -53,10 +62,11 @@ Fields a hook reads:
 | `retractions[].seq`, `.kind`, `.severity` | `kind`: `instruction` \| `supersession` \| `tombstone` \| `retraction`; `severity`: `safety` \| `behavioral` \| `informational` |
 | `retractions[].doc_slug`, `.heading_path` | where |
 | `retractions[].old_text`, `.new_text`, `.diff` | bounded snippets (≤ 160 chars) and a word diff `[-old-]{+new+}` (≤ 400 chars); `new_text` and `diff` are `null` for a removal |
-| `retractions[].likely_typo` | `true` on an edit shaped like a one-letter typo fix (informational severity); still pushed, since such edits include http→https or Mark→Mary |
+| `retractions[].hint` | `"likely_typo"` on an edit shaped like a one-letter typo fix: a label only (severity and delivery unchanged; such edits include Karen→Karin) |
+| `retractions[].new_heading_path` | set when the block moved to another section (`heading_path` is the old one; `diff` starts `section: [-old-]{+new+}`) |
 | `retractions[].reason_line` | one sentence: "You previously relied on X; current truth is Y. Reconcile before proceeding." |
-| `cosmetic_edits[]` | formatting-only edits (whitespace, reflow, quotes, punctuation, emphasis, list markers, case, an exact "Last reviewed: <date>" line): recorded, **not** in `retractions`, so a hook does not push them. `--include-cosmetic` folds them back into `retractions` with `cosmetic: [rules]` |
-| `integrity.ok`, `integrity.problem` | `false`: the store was edited outside kronicle-lite; tell the agent to stop relying on recalled text |
+| `format_only_edits[]` (alias `cosmetic_edits`) | edits with the same Markdown tree and byte-identical text (reflow, whitespace, emphasis or list-marker style): recorded, **not** in `retractions`, so a hook does not push them. `--include-format-only` folds them back into `retractions` with `format_only: true`. Nothing else is ever left out |
+| `integrity.ok`, `integrity.problem`, `integrity.seq` | `false`: the store was edited outside kronicle-lite (see "integrity failure" above) |
 | `drift_banner.surfaced` | the actor has not oriented for a while |
 
 `focus=retractions` is the cheap path: no delta entries, no digest, no git
@@ -89,12 +99,17 @@ try {
   }
   const o = orient('--cursor', cursor, '--focus', 'retractions');
   fs.writeFileSync(state, o.cursor);
+  if (o.integrity && !o.integrity.ok) {
+    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolUse',
+      additionalContext: `kronicle-lite INTEGRITY FAILURE (${o.integrity.problem}): the store was edited outside kronicle-lite. Do not rely on recalled text; ask the operator to run kronicle-lite verify-chain.` } }));
+    process.exit(0);
+  }
   if (o.recovery.method === 'genesis' || o.retractions.length === 0) process.exit(0);
   const lines = o.retractions.slice(0, 8).map((r) =>
     `- seq ${r.seq} (${r.kind}): ${r.diff ? `changed: ${r.diff}` : `"${r.old_text}" → ${r.new_text == null ? 'REMOVED' : `"${r.new_text}"`}`}`);
   process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolUse',
     additionalContext: `kronicle-lite: ${o.retractions.length} change(s) since your last tool call (head seq ${o.head.seq}):\n${lines.join('\n')}\nRe-read the affected document before acting on it.` } }));
-} catch { /* never fail the tool call */ }
+} catch { /* kronicle unavailable: fail open, never fail the tool call */ }
 ```
 
 The same call works as a `PreToolUse` gate for `Bash` commands matching

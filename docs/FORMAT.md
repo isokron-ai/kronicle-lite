@@ -165,8 +165,10 @@ content_hash = hex( BLAKE3-256( utf8(block_content) ) )
 Example: `BLAKE3("Use blue/green for the API.") =
 22dc95c8312b3e93aa2a15d4be929b7fbabb3a5e0a624a94196e6355557507f0`.
 
-The heading path is not part of the content hash: the same paragraph under a
-renamed heading keeps its address.
+The heading path is not part of the content hash. Unreleased: a block whose
+heading path changes (moved to another section, or an ancestor heading
+renamed or re-levelled) is superseded on re-put by a block with the same
+text, because "Allowed › X" and "Forbidden › X" mean different things.
 
 ### 3.1 Event vocabulary
 
@@ -188,7 +190,12 @@ document keeps its old slug there; nothing else changes.
 
 On a re-put, live blocks are compared to the freshly parsed set:
 
-1. same `(kind, content_hash)` → **carried** (block id kept, position updated);
+1. same `(kind, content_hash, heading_path)` → **carried** (block id kept,
+   position updated); a reorder of whole sections carries;
+1b. (unreleased) same `(kind, content_hash)` under a different
+   `heading_path` → old is **superseded** by an identical-text block under
+   the new path (orient: `new_heading_path`, a `section: [-old-]{+new+}`
+   diff, "MOVED to …");
 2. remaining old/new paired in order within the same `(kind, heading_path)` →
    old is **superseded** by new;
 3. leftover old → **tombstoned** (`removed in revision N`); leftover new →
@@ -325,29 +332,45 @@ counted in `scope.hidden_retractions`). Documents with no project (every
 put made before this field existed) stay visible from every project.
 `all_projects: true` / `--all-projects` turns scoping off.
 
-### 3.8 Cosmetic edits (unreleased)
+### 3.8 Format-only edits (unreleased)
 
 Orient classifies each supersession whose old and new block text it still
-has (`src/orient/cosmetic.ts`). Rule: nothing that changes a word, number,
-date or identifier is cosmetic. An edit is **cosmetic** only when the
-sequence of word and number tokens is byte-identical after setting aside
-line endings, whitespace and reflow, a space before sentence punctuation,
-list markers, paired emphasis markers, curly vs straight quotes and the
-style of a standalone dash, plus at most ONE of: sentence punctuation at a
-token's end, letter case, or a soft hyphen inside a plain word (`e-mail` →
-`email`, 3+ letters after the hyphen). A line that is exactly a stamp
-phrase and one date ("Last reviewed: 2026-10-01", "Reviewed on …") may
-change its date; any other date is content. Code spans and code blocks must
-be byte-identical (code blocks tolerate line endings and trailing
-whitespace). There is no Unicode compatibility folding (`2³` ≠ `23`).
-A typo-shaped edit (one ordinary word of 5+ letters, same first letter, one
-edit away) is NOT cosmetic: it is a retraction with `likely_typo: true` and
-severity `informational`, because such edits include http→https, Mark→Mary,
-payments→payment and stable→stale. Cosmetic supersessions are listed under
-`cosmetic_edits` (`seq, doc_slug, block_id, successor_block_id, rules[],
-diff`) instead of `retractions`; with `include_cosmetic` they are also
-retractions with `cosmetic: [rules]` and severity `informational`. Nothing
-on the chain differs: the classification is a read-time view.
+has (`src/orient/cosmetic.ts`). An edit is **format-only** when both texts
+parse to the same Markdown tree under one narrow, pinned parser (paragraphs,
+`*`/`_` emphasis and strong, `-`/`*`/`+` and `1.`/`1)` lists, headings,
+inline code, links, raw HTML) and every text leaf is byte-identical, except
+that runs of spaces, tabs and newlines inside prose text are collapsed. So
+reflow, whitespace runs, `*`↔`_` emphasis, bullet style, the ordered-list
+delimiter and renumbering after the first item are format-only.
+
+Nothing else is normalized: no typo tolerance, letter case, hyphens, quotes,
+punctuation, dates or review stamps, and no Unicode normalization (NFC or
+NFKC). Code blocks, inline code, link targets, raw HTML and anything outside
+the subset (tables, block quotes, front matter, indented code, reference
+links, an unclosed code span) are opaque: any byte change there is a change.
+A block that moved to another section is never format-only.
+
+Format-only supersessions are listed under `format_only_edits` (alias
+`cosmetic_edits`; entries `seq, doc_slug, block_id, successor_block_id,
+rules[] (whitespace | markup), diff`) instead of `retractions`; with
+`include_format_only` (alias `include_cosmetic`) they are also retractions
+with `format_only: true` and severity `informational`. This label is
+presentation only: it is the single thing orient may move out of
+`retractions`. Every other change is a normal retraction with its diff. A
+retraction may carry `hint: "likely_typo"` (one ordinary word of 5+ letters
+one edit away); the hint never changes severity, delivery or the reconcile
+instruction. Nothing on the chain differs: the classification is a
+read-time view.
+
+### 3.9 Unreadable events (unreleased)
+
+An event whose stored `payload_canonical` is not a JSON object (a hand edit,
+a torn page) is read with an empty payload instead of throwing. `verify()`
+reports it as `first_mismatch.kind: "payload_unparseable"` at its seq; the
+projection check reports it and the rows that depended on it; orient (every
+focus, `pulse` included, for the events since the cursor) answers normally
+with `integrity: {ok: false, problem, seq}` and an INTEGRITY FAILURE line
+first.
 
 ## 4. Receipts (v2)
 

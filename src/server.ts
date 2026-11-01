@@ -181,7 +181,8 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
           focus: z.enum(FOCUSES).default('orientation'),
           response_format: z.enum(['markdown', 'json']).default('markdown'),
           all_projects: z.boolean().default(false).describe('Include other projects\' documents and retractions.'),
-          include_cosmetic: z.boolean().default(false).describe('Also list formatting-only edits as retractions.'),
+          include_format_only: z.boolean().default(false).describe('Also list format-only edits (same Markdown, identical text) as retractions.'),
+          include_cosmetic: z.boolean().default(false).describe('Deprecated alias of include_format_only.'),
           actor_id: ACTOR,
         }),
         'input',
@@ -197,7 +198,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
           since_cursor: args.since_cursor,
           focus: args.focus,
           project: args.all_projects ? null : (opts.project ?? null),
-          include_cosmetic: args.include_cosmetic,
+          include_format_only: args.include_format_only || args.include_cosmetic,
         });
         if (args.response_format === 'json') return json(state);
         return {

@@ -15,7 +15,7 @@
  *   kronicle-lite put --from-instructions [PATHS…] [--cwd DIR] [--json] [--stdin-hook]
  *   kronicle-lite watch [PATHS…] [--interval MS] [--debounce MS] [--poll] [--cwd DIR] [--redact-secrets] [--list [--json]]
  *   kronicle-lite doctor [--json] [--no-network] [--full] [--cwd DIR]
- *   kronicle-lite orient [--data-dir DIR] [--actor ID] [--cursor C] [--focus F] [--json] [--all-projects] [--include-cosmetic]
+ *   kronicle-lite orient [--data-dir DIR] [--actor ID] [--cursor C] [--focus F] [--json] [--all-projects] [--include-format-only]
  *   kronicle-lite verify-chain [--full] | rebuild | demo [--dir D] [--keep]
  */
 
@@ -65,6 +65,7 @@ const BOOLEAN_FLAGS = new Set([
   'keep',
   'all-projects',
   'include-cosmetic',
+  'include-format-only',
   'modern-only',
   'core',
   'redact-secrets',
@@ -157,10 +158,10 @@ Usage:
   kronicle-lite doctor       [--data-dir DIR] [--json] [--no-network] [--full] [--cwd DIR]
                                                                  health checks (read-only); exit 1 when any check fails
   kronicle-lite orient       [--data-dir DIR] [--actor ID] [--cursor C] [--focus F] [--json] [--cwd DIR] [--all-projects]
-                 [--include-cosmetic]                            scoped to the project at --cwd (default: the working
+                 [--include-format-only]                         scoped to the project at --cwd (default: the working
                                                                  directory); "--cursor C --focus retractions --json" is the
-                                                                 hook contract (docs/PUSH.md); cosmetic edits are listed
-                                                                 under cosmetic_edits unless --include-cosmetic
+                                                                 hook contract (docs/PUSH.md); format-only edits are listed
+                                                                 under format_only_edits unless --include-format-only
 
 Data dir defaults to $KRONICLE_LITE_DATA_DIR or ~/.kronicle-lite. Instruction slugs carry a project key
 (<repo>-<hash8>); $KRONICLE_LITE_PROJECT overrides it.
@@ -464,7 +465,7 @@ async function main(argv: string[]): Promise<number> {
         focus: focusRaw as Focus | undefined,
         ...(num(flags['budget']) !== undefined ? { budget_tokens: num(flags['budget'])! } : {}),
         project: flags['all-projects'] === true ? null : projectScopeFor(instructionCtx(flags)),
-        include_cosmetic: flags['include-cosmetic'] === true,
+        include_format_only: flags['include-format-only'] === true || flags['include-cosmetic'] === true,
       });
       // --json is the push-hook contract (docs/PUSH.md): one JSON object, the SystemState.
       process.stdout.write(flags['json'] ? JSON.stringify(state, null, 2) + '\n' : renderSystemStateMarkdown(state) + '\n');

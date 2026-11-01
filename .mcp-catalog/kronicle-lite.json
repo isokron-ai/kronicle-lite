@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-01T15:42:48.875Z",
+  "capturedAt": "2026-11-01T16:16:33.529Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -254,7 +254,12 @@
             },
             "include_cosmetic": {
               "default": false,
-              "description": "Also list formatting-only edits as retractions.",
+              "description": "Deprecated alias of include_format_only.",
+              "type": "boolean"
+            },
+            "include_format_only": {
+              "default": false,
+              "description": "Also list format-only edits (same Markdown, identical text) as retractions.",
               "type": "boolean"
             },
             "response_format": {
@@ -332,6 +337,12 @@
             "format": {
               "const": "kronicle-lite/1",
               "type": "string"
+            },
+            "format_only_edits": {
+              "type": [
+                "array",
+                "null"
+              ]
             },
             "head": {
               "type": "object"
@@ -993,5 +1004,5 @@
     "title": "kronicle-lite",
     "version": "0.7.0"
   },
-  "sha256": "331aa38721c0b9873c90998983b2d4a68af14e534cb9b98ca4e91fdcb6a602b1"
+  "sha256": "f683f7d0e36344006385e336e59e3b046cf2055da930d81797c157e24d165c27"
 }

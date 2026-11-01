@@ -349,11 +349,12 @@ directories with a debounce (150 ms; `--debounce`) plus a polling pass
 A file moved inside the project with its content intact is a **rename**,
 not a removal: the document follows it (`document.renamed`, same blocks and
 receipts, no retraction), whichever of the two paths is synced first. Edits
-that only change formatting (whitespace, reflow, quotes, punctuation,
-emphasis, list markers, case, a "Last reviewed: <date>" line) are chained
-like any other but reported under `cosmetic_edits`, not as retractions.
-Anything that changes a word, number, date or identifier is a retraction;
-a typo-shaped edit is delivered too, labelled `likely_typo` (informational).
+that are **format-only** — the same Markdown tree with byte-identical text
+(reflow, whitespace runs, `*`↔`_` emphasis, bullet or list-delimiter style)
+— are chained like any other but reported under `format_only_edits`, not as
+retractions. Every other change is a retraction with its diff: a changed
+character, quote, date, case or hyphen, and a paragraph moved to another
+section. A typo-shaped one carries `hint: likely_typo`, a label only.
 
 **Inside Claude Code: hooks, not a watcher.** Claude Code already watches
 files: a `SessionStart` hook can return `watchPaths`, and a `FileChanged`
@@ -434,7 +435,7 @@ no-ops there, with an `icacls` line to lock the data dir down.
 
 | tool | what it does | writes chain |
 |---|---|---|
-| `get_system_state` | Orient. `since_cursor` → delta since then; drift banner; retractions with `old_text` / `new_text` / `diff`; your own notes written since (`carried_notes`); integrity pass; new cursor. Nothing new → a one-line answer. `focus`: `orientation` (default), `recent_changes`, `retractions`, `pulse`. `response_format`: `markdown` (default) or `json`. Scoped to this project (`all_projects` opts out); formatting-only edits under `cosmetic_edits` (`include_cosmetic` opts in). | no |
+| `get_system_state` | Orient. `since_cursor` → delta since then; drift banner; retractions with `old_text` / `new_text` / `diff`; your own notes written since (`carried_notes`); integrity pass; new cursor. Nothing new → a one-line answer. `focus`: `orientation` (default), `recent_changes`, `retractions`, `pulse`. `response_format`: `markdown` (default) or `json`. Scoped to this project (`all_projects` opts out); format-only edits under `format_only_edits` (`include_format_only` opts in). | no |
 | `audit_assumptions` | Grade claims `{symbol, value}` (block id, doc slug, or `head`) → `current \| stale \| contradicted \| retracted \| unknown \| stale_source` with the current truth and a reconcile line. | no |
 | `recall` | FTS5 bm25 search over live blocks; each hit carries a receipt v2 bound to the chain head and (0.6.0) `authority` / `authority_reason` / `authority_basis`; the result carries `authority_floor`, `absence` and, with `cursor`, an attention rerank (`already_read`). A block whose stored text no longer hashes to the chain is withheld (`withheld`), never served. Searches this project's documents and unscoped ones (`all_projects` opts out). Receipts come back as `receipt_id` (`receipts: "inline"` for the object). `top_k`, `include_tombstoned`, `include_receipts`, `receipts`, `max_chars` (default 4000), `all_projects`, `cursor`, `actor_id`. | no (stores receipts) |
 | `verify` | Re-derive a receipt (object or `receipt_id`) against the live store: signature, block existence, re-hashed block text vs the chain, chain binding, supersession walk, git-bound source → `VERIFIED \| SUPERSEDED \| TOMBSTONED \| UNVERIFIED \| STALE_SOURCE` + reason. | no |

@@ -1,132 +1,203 @@
 /**
- * Cosmetic vs semantic edits.
+ * Format-only edits: Markdown AST equivalence with exact text leaves.
  *
- * Rule: NOTHING that changes a word, number, date or identifier is
- * cosmetic. An edit is cosmetic only when the sequence of word and number
- * tokens is byte-identical after formatting is set aside:
+ * A supersession is `format_only` when old and new block parse to the same
+ * tree under the narrow parser below and every text leaf is byte-identical,
+ * except that runs of spaces, tabs and newlines inside prose text are
+ * collapsed (reflow). That covers: reflow and whitespace runs, `*` ↔ `_`
+ * emphasis markers, `-`/`*`/`+` bullets, `1.` ↔ `1)` list delimiters and
+ * item renumbering after the first (CommonMark keeps only the start).
  *
- *   always set aside   line endings, whitespace and reflow, a space before
- *                      sentence punctuation, list markers (`1)`/`1.`/`-`/`*`),
- *                      paired emphasis markers (`*x*`, `**x**`, `_x_`),
- *                      curly vs straight quotes, a standalone dash's style
- *                      (` - ` / ` — `);
- *   one at a time      sentence punctuation at a token's end (`.`, `,`, `;`,
- *                      `:`, `!`, `?`), letter case, or a soft hyphen
- *                      (`e-mail` → `email`: a hyphen between letters with 3+
- *                      letters after it) — each only when, with that one
- *                      difference set aside, the texts are otherwise equal;
- *   review stamp       a line that is exactly a stamp phrase and one date
- *                      ("Last reviewed: 2026-10-01", "Reviewed on …") and
- *                      nothing else; any other date is content.
+ * Nothing else is normalized: no typo tolerance, case folding, hyphen
+ * stripping, quote or punctuation folding, date masking, Unicode
+ * normalization (NFC/NFKC). Code blocks, inline code, link targets, raw
+ * HTML and anything the parser does not know (tables, block quotes, front
+ * matter, indented code, setext headings, reference links …) are opaque:
+ * any byte change there is not format-only. Parser doubt ⇒ not format-only.
  *
- * Code spans and code blocks must be byte-identical (code blocks tolerate
- * line endings and trailing whitespace). There is no Unicode compatibility
- * folding (`2³` is not `23`).
+ * This label is presentation only: it decides how an edit is SHOWN (one
+ * line under `format_only_edits` instead of a retraction). It never decides
+ * safety; a `likely_typo` hint on a retraction is a label and never moves
+ * it out of `retractions`.
  *
- * A probable typo fix (one ordinary word one letter off) is NOT cosmetic:
- * it is delivered as a retraction labelled `likely_typo` with informational
- * severity, because "typo-shaped" edits include http→https, Mark→Mary,
- * payments→payment and stable→stale.
- *
- * Checked against the agent-memory-bench benign-edit templates, the stress
- * corpus (track `stress/kl/classifier-corpus.mjs`) and must-alarm cases in
- * test/cosmetic.test.ts.
+ * Tests: test/cosmetic.test.ts (must-alarm cases), test/stress-corpus.test.ts
+ * (agent-memory-bench adversarial corpus), test/format-only-property.test.ts
+ * (single-character mutations never format-only) and
+ * test/format-only-mutants.test.ts (each removed heuristic, re-introduced
+ * via __mutants, makes the suite fail).
  */
 
-export const COSMETIC_RULES = [
-  'whitespace',
-  'line_endings',
-  'quotes',
-  'punctuation',
-  'emphasis',
-  'list_markers',
-  'hyphenation',
-  'case',
-  'review_stamp',
-] as const;
-export type CosmeticRule = (typeof COSMETIC_RULES)[number];
+/** What differed in a format-only edit: whitespace/reflow, or Markdown markup style. */
+export const FORMAT_RULES = ['whitespace', 'markup'] as const;
+export type FormatRule = (typeof FORMAT_RULES)[number];
+/** @deprecated alias of FORMAT_RULES (unreleased name). */
+export const COSMETIC_RULES = FORMAT_RULES;
+export type CosmeticRule = FormatRule;
 
 export interface EditClass {
-  cosmetic: boolean;
-  /** Rules that explain the difference (cosmetic), or empty. */
-  rules: CosmeticRule[];
-  /** Why it is semantic (null when cosmetic). */
-  semantic_reason: string | null;
-  /** Semantic, but shaped like a one-letter typo fix of an ordinary word (still a retraction). */
-  likely_typo: boolean;
+  format_only: boolean;
+  /** What differed when format-only, else empty. */
+  rules: FormatRule[];
+  /** Presentation hint for a retraction; never affects delivery. */
+  hint: 'likely_typo' | null;
 }
 
-const SEMANTIC = (why: string, likely_typo = false): EditClass => ({ cosmetic: false, rules: [], semantic_reason: why, likely_typo });
+/**
+ * TEST-ONLY. Re-introduces a removed heuristic so the mutation tests can
+ * prove the suite kills it. Production code never adds to this set.
+ */
+export const __mutants = new Set<'hyphen_strip' | 'lowercase' | 'typo' | 'date_mask' | 'nfkc' | 'gate_trusts_label'>();
 
-/** Meaning-bearing words: an edit touching one is never labelled a likely typo. */
-const MEANING_WORDS = new Set(
-  (
-    'not no nor never now always must should shall may might can cannot cant wont dont doesnt isnt arent wasnt ' +
-    'do does did will would only all any none every each some before after above below over under up down on off in out ' +
-    'into onto enable enabled enables disable disabled disables unable allow allowed allows deny denied denies block blocked ' +
-    'open opened close closed start started stop stopped true false yes min max minimum maximum more less most least first ' +
-    'last next previous prev old new prod production staging stage stale stable dev test primary secondary replica read write ' +
-    'add remove include exclude increase decrease higher lower high low east west north south left right inbound outbound ' +
-    'accept reject pass fail required optional public private internal external sync async lock unlock with without'
-  ).split(' '),
-);
+// ───────────────────────────── narrow Markdown parser ─────────────────────────────
 
-// ── review stamps: the whole line is a stamp phrase plus one date ──
-const MONTH = '(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)';
-const DATE = [
-  '\\d{4}-\\d{2}-\\d{2}',
-  '\\d{1,2}/\\d{1,2}/\\d{4}',
-  `${MONTH}\\.? \\d{1,2},? \\d{4}`,
-  `\\d{1,2} ${MONTH}\\.? \\d{4}`,
-].join('|');
-const STAMP_PHRASE = '(?:last (?:reviewed|updated|modified|edited|checked|verified|revised)(?: on)?|reviewed on|updated on|reviewed|updated)';
-const STAMP_LINE = new RegExp(`^(\\s*(?:[-*+>]\\s+)?[*_]{0,2}${STAMP_PHRASE}:?\\s+)(${DATE})(\\.?[*_]{0,2}\\.?\\s*)$`, 'i');
+type Inline = string | { t: 'em' | 'strong'; c: Inline[] } | { t: 'code'; v: string } | { t: 'link'; href: string; c: Inline[] } | { t: 'html'; v: string };
+type Block = { t: 'p'; c: Inline[] } | { t: 'li'; indent: number; ordered: boolean; start: number | null; c: Inline[] };
 
-function maskStamps(text: string): { text: string; dates: string[] } {
-  const dates: string[] = [];
-  const lines = text.split('\n').map((line) =>
-    line.replace(STAMP_LINE, (_m, pre: string, d: string, post: string) => {
-      dates.push(d);
-      return `${pre}⟨date⟩${post}`;
-    }),
-  );
-  return { text: lines.join('\n'), dates };
+const OPAQUE_LINE = /^(?: {4}|\t|>|\||<|\[[^\]]+\]:|---|\*\*\*|___|===|~~~|```|#{1,6}\s|\+\+\+)/;
+const LIST_ITEM = /^( *)([-*+]|(\d{1,9})[.)])( +)(.*)$/;
+
+function textLeaf(s: string): string {
+  let v = s.replace(/[ \t\n]+/g, ' ');
+  if (__mutants.has('nfkc')) v = v.normalize('NFKC');
+  if (__mutants.has('lowercase')) v = v.toLowerCase();
+  if (__mutants.has('hyphen_strip')) v = v.replace(/(?<=\p{L})-(?=\p{L})/gu, '');
+  if (__mutants.has('date_mask')) v = v.replace(/\d{4}-\d{2}-\d{2}|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.? \d{1,2},? \d{4}/gi, '⟨date⟩');
+  return v;
 }
 
-const CODE_SPAN = /(`+)([\s\S]*?)\1/g;
+/** Inline parse; null when a construct is ambiguous (⇒ not format-only). */
+function inline(src: string): Inline[] | null {
+  const out: Inline[] = [];
+  let buf = '';
+  const flush = () => {
+    if (buf) out.push(textLeaf(buf));
+    buf = '';
+  };
+  let i = 0;
+  while (i < src.length) {
+    const ch = src[i]!;
+    if (ch === '\\' && i + 1 < src.length) {
+      buf += src.slice(i, i + 2); // escapes stay literal bytes
+      i += 2;
+      continue;
+    }
+    if (ch === '`') {
+      const run = /^`+/.exec(src.slice(i))![0];
+      const close = src.indexOf(run, i + run.length);
+      if (close < 0) return null;
+      flush();
+      out.push({ t: 'code', v: src.slice(i, close + run.length) }); // opaque, exact bytes incl. fences
+      i = close + run.length;
+      continue;
+    }
+    if (ch === '<') {
+      const close = src.indexOf('>', i);
+      if (close < 0) return null;
+      flush();
+      out.push({ t: 'html', v: src.slice(i, close + 1) }); // autolink or raw HTML: opaque
+      i = close + 1;
+      continue;
+    }
+    if (ch === '[') {
+      const m = /^\[([^\]]*)\]\(([^)\s]*)(?:\s+"[^"]*")?\)/.exec(src.slice(i));
+      if (!m) {
+        if (/^\[[^\]]*\]/.test(src.slice(i))) return null; // reference links etc.: unknown
+        buf += ch;
+        i++;
+        continue;
+      }
+      const c = inline(m[1]!);
+      if (!c) return null;
+      flush();
+      out.push({ t: 'link', href: m[0].slice(m[1]!.length + 2), c }); // target + title: opaque bytes
+      i += m[0].length;
+      continue;
+    }
+    if (ch === '*' || ch === '_') {
+      const run = /^(\*+|_+)/.exec(src.slice(i))![0];
+      const prev = i > 0 ? src[i - 1]! : ' ';
+      if (ch === '_' && /[\p{L}\p{N}]/u.test(prev)) {
+        buf += run; // intraword underscore: literal
+        i += run.length;
+        continue;
+      }
+      if (run.length > 2 || !/\S/.test(src[i + run.length] ?? ' ')) {
+        buf += run;
+        i += run.length;
+        continue;
+      }
+      // Find the matching closer: same run, preceded by non-space, not intraword for _.
+      let j = i + run.length;
+      let found = -1;
+      while ((j = src.indexOf(run, j)) >= 0) {
+        const before = src[j - 1] ?? ' ';
+        const after = src[j + run.length] ?? ' ';
+        const sameRunContinues = after === ch || before === ch;
+        if (!sameRunContinues && /\S/.test(before) && !(ch === '_' && /[\p{L}\p{N}]/u.test(after))) {
+          found = j;
+          break;
+        }
+        j += 1;
+      }
+      if (found < 0) {
+        buf += run;
+        i += run.length;
+        continue;
+      }
+      const c = inline(src.slice(i + run.length, found));
+      if (!c) return null;
+      flush();
+      out.push({ t: run.length === 2 ? 'strong' : 'em', c });
+      i = found + run.length;
+      continue;
+    }
+    buf += ch;
+    i++;
+  }
+  flush();
+  return out;
+}
 
-type Step = { rule: CosmeticRule; apply: (s: string) => string };
+/** Parse one kronicle paragraph-kind block; null when it holds syntax outside the subset. */
+function parseBlock(content: string): Block[] | null {
+  const lines = content.split('\n');
+  const blocks: { t: 'p' | 'li'; indent: number; ordered: boolean; start: number | null; text: string[] }[] = [];
+  let prevOrdered: boolean | null = null;
+  for (const line of lines) {
+    if (OPAQUE_LINE.test(line)) return null;
+    const m = LIST_ITEM.exec(line);
+    if (m) {
+      const ordered = m[3] !== undefined;
+      const continuesList = blocks.length > 0 && blocks[blocks.length - 1]!.t === 'li' && prevOrdered === ordered;
+      blocks.push({ t: 'li', indent: m[1]!.length, ordered, start: ordered && !continuesList ? Number(m[3]) : null, text: [m[5]!] });
+      prevOrdered = ordered;
+      continue;
+    }
+    const last = blocks[blocks.length - 1];
+    if (last) last.text.push(line); // paragraph line or lazy continuation of a list item
+    else blocks.push({ t: 'p', indent: 0, ordered: false, start: null, text: [line] });
+  }
+  const out: Block[] = [];
+  for (const b of blocks) {
+    const c = inline(b.text.join('\n').trim());
+    if (!c) return null;
+    out.push(b.t === 'p' ? { t: 'p', c } : { t: 'li', indent: b.indent, ordered: b.ordered, start: b.start, c });
+  }
+  return out;
+}
 
-/** Formatting that can never change a token. */
-const BASE: Step[] = [
-  { rule: 'line_endings', apply: (s) => s.replace(/\r\n?/g, '\n') },
-  {
-    rule: 'quotes',
-    apply: (s) =>
-      s
-        .replace(/[“”„‟]/g, '"')
-        .replace(/[‘’‚‛]/g, "'")
-        .replace(/(?<=\s)[‐-―](?=\s)/g, '-'),
-  },
-  { rule: 'list_markers', apply: (s) => s.replace(/^[ \t]*(?:\d{1,4}[.)]|[-*+])[ \t]+/gm, '') },
-  {
-    rule: 'emphasis',
-    // Paired markers only: *x*, **x**, ***x***, _x_, __x__ (underscores not inside a word).
-    apply: (s) =>
-      s
-        .replace(/(\*{1,3})(?=\S)([^*\n]*?\S)\1(?!\*)/g, '$2')
-        .replace(/(?<![\p{L}\p{N}_])(_{1,2})(?=\S)([^_\n]*?\S)\1(?![\p{L}\p{N}_])/gu, '$2'),
-  },
-  { rule: 'whitespace', apply: (s) => s.replace(/\s+/g, ' ').replace(/ (?=[.,;:!?](?:\s|$))/g, '').trim() },
-];
+/** Canonical form of a block's content, or null when it cannot be parsed under the subset. */
+export function formatCanon(content: string, kind?: string): string | null {
+  if (kind === 'code') return null; // opaque: any byte change counts
+  if (kind === 'heading') {
+    const c = inline(content.trim());
+    return c ? JSON.stringify(['h', c]) : null;
+  }
+  const b = parseBlock(content);
+  return b ? JSON.stringify(b) : null;
+}
 
-/** Applied one at a time on top of BASE. */
-const SINGLE: Step[] = [
-  { rule: 'punctuation', apply: (s) => s.replace(/[.,;:!?]+(?=\s|$)/g, '') },
-  { rule: 'case', apply: (s) => s.toLowerCase() },
-  // Soft hyphens only inside plain words (`e-mail`, `non-blocking`); never in `--dry-run`, `us-east-1`, `a/b-c`.
-  { rule: 'hyphenation', apply: (s) => s.split(' ').map((t) => (/^[("']*\p{L}+(?:-\p{L}+)+[)"'.,;:!?]*$/u.test(t) ? t.replace(/(?<=\p{L})-(?=\p{L}{3})/gu, '') : t)).join(' ') },
-];
+// ───────────────────────────── hint (label only) ─────────────────────────────
 
 /** Damerau–Levenshtein (optimal string alignment) distance, capped early. */
 export function editDistance(a: string, b: string): number {
@@ -145,77 +216,33 @@ export function editDistance(a: string, b: string): number {
   return d[m]![n]!;
 }
 
-/** One ordinary alphabetic word (5+ letters, same first letter) one edit off, everything else equal. */
-function looksLikeTypo(a: string, b: string): boolean {
-  const strip = (s: string) => SINGLE[0]!.apply(s).split(' ');
-  const ta = strip(a);
-  const tb = strip(b);
+/** Exactly one alphabetic word of 5+ letters differs, by one edit, same first letter. A label, nothing more. */
+export function looksLikeTypo(a: string, b: string): boolean {
+  const ta = a.split(/\s+/).filter(Boolean);
+  const tb = b.split(/\s+/).filter(Boolean);
   if (ta.length !== tb.length) return false;
   const diffs: [string, string][] = [];
   for (let i = 0; i < ta.length; i++) if (ta[i] !== tb[i]) diffs.push([ta[i]!, tb[i]!]);
   if (diffs.length !== 1) return false;
-  const [x, y] = diffs[0]!;
-  if (!/^\p{L}{5,}$/u.test(x) || !/^\p{L}{5,}$/u.test(y)) return false;
-  const lx = x.toLowerCase();
-  const ly = y.toLowerCase();
-  if (MEANING_WORDS.has(lx) || MEANING_WORDS.has(ly) || lx[0] !== ly[0]) return false;
-  return editDistance(lx, ly) === 1;
+  const strip = (w: string) => w.replace(/^[^\p{L}]+|[^\p{L}]+$/gu, '');
+  const x = strip(diffs[0]![0]);
+  const y = strip(diffs[0]![1]);
+  if (!/^\p{L}{5,}$/u.test(x) || !/^\p{L}{5,}$/u.test(y) || x[0] !== y[0]) return false;
+  if (diffs[0]![0].replace(x, '') !== diffs[0]![1].replace(y, '')) return false;
+  return editDistance(x, y) === 1;
 }
 
-/**
- * Classify the edit from `oldText` to `newText` (one block's content).
- * `kind` is the block kind; code blocks only tolerate line endings and
- * trailing whitespace.
- */
+// ───────────────────────────── classify ─────────────────────────────
+
+/** Classify the edit from `oldText` to `newText` (one block's content and kind). */
 export function classifyEdit(oldText: string, newText: string, kind?: string): EditClass {
-  if (oldText === newText) return { cosmetic: true, rules: [], semantic_reason: null, likely_typo: false };
-  if (kind === 'code') {
-    const norm = (s: string) => s.replace(/\r\n?/g, '\n').replace(/[ \t]+$/gm, '').trimEnd();
-    return norm(oldText) === norm(newText) ? { cosmetic: true, rules: ['whitespace'], semantic_reason: null, likely_typo: false } : SEMANTIC('code block changed');
-  }
-  const rules = new Set<CosmeticRule>();
-  const sa = maskStamps(oldText.replace(/\r\n?/g, '\n'));
-  const sb = maskStamps(newText.replace(/\r\n?/g, '\n'));
-  if (sa.dates.join('\n') !== sb.dates.join('\n')) rules.add('review_stamp');
-  let a = sa.text;
-  let b = sb.text;
-
-  // Code spans: byte-identical and in the same order, then out of the comparison.
-  const spans = (t: string) => [...t.matchAll(CODE_SPAN)].map((m) => m[0]);
-  const spA = spans(a);
-  const spB = spans(b);
-  if (spA.length !== spB.length || spA.some((s, i) => s !== spB[i])) return SEMANTIC('code span changed');
-  a = a.replace(CODE_SPAN, '⟨code⟩');
-  b = b.replace(CODE_SPAN, '⟨code⟩');
-
-  for (const step of BASE) {
-    const na = step.apply(a);
-    const nb = step.apply(b);
-    if (a !== b && (na !== a || nb !== b) && stepMatters(a, b, na, nb)) rules.add(step.rule);
-    a = na;
-    b = nb;
-  }
-  if (oldText.includes('\r') !== newText.includes('\r')) rules.add('line_endings');
-  if (a === b) return { cosmetic: true, rules: [...rules], semantic_reason: null, likely_typo: false };
-
-  for (const step of SINGLE) {
-    if (step.apply(a) === step.apply(b)) return { cosmetic: true, rules: [...rules, step.rule], semantic_reason: null, likely_typo: false };
-  }
-  const typo = looksLikeTypo(a, b);
-  return SEMANTIC(typo ? 'one word changed by one letter (likely a typo fix, but it may be a different name or value)' : 'words, numbers, dates or identifiers changed', typo);
-}
-
-/** Did this normalization step remove a difference (rather than touch both sides identically)? */
-function stepMatters(a: string, b: string, na: string, nb: string): boolean {
-  if (a !== na !== (b !== nb)) return true;
-  return (a === b) !== (na === nb) || closeness(na, nb) < closeness(a, b);
-}
-
-/** Length of the differing middle after the common prefix and suffix. */
-function closeness(a: string, b: string): number {
-  let i = 0;
-  while (i < a.length && i < b.length && a[i] === b[i]) i++;
-  let j = 0;
-  while (j < a.length - i && j < b.length - i && a[a.length - 1 - j] === b[b.length - 1 - j]) j++;
-  return Math.max(a.length, b.length) - i - j;
+  const typo = looksLikeTypo(oldText, newText);
+  const hint = typo ? ('likely_typo' as const) : null;
+  if (oldText === newText) return { format_only: true, rules: [], hint: null };
+  if (__mutants.has('typo') && typo) return { format_only: true, rules: ['markup'], hint: null };
+  const a = formatCanon(oldText, kind);
+  const b = formatCanon(newText, kind);
+  if (a === null || b === null || a !== b) return { format_only: false, rules: [], hint };
+  const ws = (s: string) => s.replace(/[ \t\n]+/g, ' ').trim();
+  return { format_only: true, rules: [ws(oldText) === ws(newText) ? 'whitespace' : 'markup'], hint: null };
 }

@@ -56,12 +56,13 @@ your beliefs aligned with what the store actually says now.
       to learn the current truth. Reconcile EACH before acting on the
       touched documents (step 4). Retractions about other projects'
       documents are hidden (`scope.hidden_retractions`); pass
-      `all_projects: true` only when the operator asks. Formatting-only
-      edits (whitespace, quotes, punctuation, emphasis, case, a "Last
-      reviewed: <date>" line) are not retractions: they are listed under
-      `cosmetic_edits` and need no action. A retraction marked
-      `likely_typo` (informational) looks like a spelling fix: use the new
-      wording, and check it is not a different name or value. When
+      `all_projects: true` only when the operator asks. Format-only
+      edits (same Markdown, identical text: reflow, whitespace, emphasis or
+      list-marker style) are not retractions: they are listed under
+      `format_only_edits` and need no action. Everything else is a
+      retraction, including a typo fix (`hint: likely_typo` — still use the
+      new wording and check it is not a different name or value) and a
+      paragraph that moved to another section (`new_heading_path`). When
       `scope.verdict` is `partial`, "no retractions" covers this project
       only: the hidden ones were not reviewed, not cleared.
    4. `delta.entries` — what changed since your cursor, oldest first.
@@ -179,7 +180,7 @@ Orient before the next write and re-check anything the delta touched.
   `retractions` (only retractions) | `pulse` (head + drift banner; call it
   before every write and escalate when the banner surfaces). With a valid
   cursor and nothing new, any focus answers in one line.
-  `include_cosmetic: true` lists formatting-only edits as retractions too.
+  `include_format_only: true` lists format-only edits as retractions too.
   `budget_tokens` (200–64000, default 3000) bounds the delta; folded
   entries are rolled up, never dropped. `response_format` = `markdown`
   (default) or `json` for the text block; `structuredContent` always has
