@@ -338,7 +338,7 @@ describe('pending: version-bound reconciliation', () => {
     const md = renderSystemStateMarkdown(s);
     expect(md).toMatch(/## Pending \(1\)/);
     expect(md).toContain('green-2');
-    expect(s.next_steps.join('\n')).toMatch(/older version does not clear a newer change/);
+    expect(s.next_steps.join('\n')).toMatch(/1 pending: re-read the current version/);
     const pulse = renderSystemStateMarkdown(store.orient.getSystemState({ actor_id: 'agent', since_cursor: c, focus: 'pulse' }));
     expect(pulse).toMatch(/Pending \(1\)/);
     store.close();

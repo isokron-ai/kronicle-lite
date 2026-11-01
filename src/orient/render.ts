@@ -37,10 +37,9 @@ export function pendingLines(s: Pick<SystemState, 'pending' | 'pending_count'> &
   const shown = new Set((s.retractions ?? []).filter((r) => r.kind !== 'derived').map((r) => `${r.seq}|${r.doc_slug}`));
   const out = items.slice(0, max).map((p) => {
     const what = p.kind === 'derived' ? `note ${(p.derived_notes ?? []).join(', ')} derived from ${p.doc_slug ?? 'a block'}` : `${p.doc_slug ?? 'a document'}${p.heading_path.length > 0 ? ` › ${p.heading_path.join(' › ')}` : ''}`;
+    if (p.seq !== null && shown.has(`${p.seq}|${p.doc_slug}`)) return `- **[${p.severity}]** ${what} (seq ${p.seq}): in Retractions above; re-read it.`;
     const change =
-      p.seq !== null && shown.has(`${p.seq}|${p.doc_slug}`)
-        ? 'see Retractions above'
-        : p.current === null
+      p.current === null
           ? `you read "${p.old_text ?? p.read.block_id}"; REMOVED`
           : p.diff
             ? `changed: ${p.diff}`
@@ -65,7 +64,7 @@ export function renderSystemStateMarkdown(s: SystemState): string {
     if (integrityLine) out.unshift(integrityLine);
     if (s.recovery.cursor_error) out.push(`Your cursor was rejected (${s.recovery.cursor_error}); position recovered server-side (${s.recovery.method}).`);
     if (s.drift_banner.surfaced) out.push('Call get_system_state with focus=recent_changes before acting.');
-    if ((s.pending_count ?? 0) > 0) out.push(`Pending (${s.pending_count}): changes to what you read, not yet re-read at the current version — re-read before acting:`, ...pendingLines(s, 3));
+    if ((s.pending_count ?? 0) > 0) out.push(`Pending (${s.pending_count}): re-read at the current version before acting:`, ...pendingLines(s, 3));
     out.push(`Next cursor: \`${s.cursor_compact}\``);
     return out.join('\n');
   }
@@ -109,7 +108,7 @@ export function renderSystemStateMarkdown(s: SystemState): string {
 
   if ((s.pending_count ?? 0) > 0) {
     lines.push('');
-    lines.push(`## Pending (${s.pending_count}) — re-read the current version before acting (an older version does not clear a newer change)`);
+    lines.push(`## Pending (${s.pending_count}) — re-read at the current version before acting`);
     lines.push(...pendingLines(s));
   }
 

@@ -481,7 +481,7 @@ export class Lineage {
               derived_notes: [note.slug],
               resolve: `the source block ${s.source_block_id} is gone from the store; re-derive ${note.slug} from current sources`,
             };
-        item.resolve = `${note.slug} was derived from a version that changed (${item.change}): ${item.resolve}`;
+        item.resolve = `${note.slug} was derived from a version that changed (${item.change}); re-read the source: ${item.resolve}`;
         items.push(item);
         byHead.set(headId, item);
       }
@@ -512,9 +512,7 @@ export class Lineage {
       old_text: snippet(read.content),
       new_text: live ? snippet(w.head.content) : null,
       diff: live ? (read.heading_path !== w.head.heading_path ? `section: ${wordDiff(read.heading_path.replaceAll(' > ', ' › '), w.head.heading_path.replaceAll(' > ', ' › '))}${read.content === w.head.content ? '' : `; ${wordDiff(read.content, w.head.content)}`}` : wordDiff(read.content, w.head.content)) : null,
-      resolve: live
-        ? `re-read the current version (block ${w.head.block_id}): recall it, or read ${uri}`
-        : `the block was removed: read ${uri} (or recall with include_tombstoned) to acknowledge the removal`,
+      resolve: live ? `recall it again or read ${uri}` : `read ${uri} (or recall with include_tombstoned) to acknowledge the removal`,
     };
   }
 }

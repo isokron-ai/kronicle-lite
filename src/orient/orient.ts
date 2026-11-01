@@ -714,7 +714,7 @@ function nextSteps(args: {
   const steps: string[] = [];
   const pendingStep =
     (args.pending_count ?? 0) > 0
-      ? `${args.pending_count} change(s) to things you read are not reconciled (pending): re-read the CURRENT version of each (recall it, or read the document) before acting; acknowledging an older version does not clear a newer change.`
+      ? `${args.pending_count} pending: re-read the current version of each before acting (seeing a retraction or reading an older version never clears it).`
       : null;
   if (args.integrity && !args.integrity.ok) {
     steps.push(
