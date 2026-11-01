@@ -58,6 +58,22 @@ uses semantic versioning once past 0.x.
 - Contract: additive only. Every existing field keeps its meaning;
   `retractions[].kind` gains the value `derived`.
 
+### Bench (agent-memory-bench Track A, branch `kl-lineage`, 20 seeds)
+
+- **S1 next-session stale copy served unmarked: 20/20 → 0/20**
+  (`nextSessionPass` 0/20 → 20/20), with the bench's unchanged adapter: the
+  agent never declares lineage, so this is inference alone. S1, S5, S7, S8,
+  S11 grades identical on every seed. Touch views where something the agent
+  read changed grow by the `derived` retraction and the Pending section
+  (S1 2.45 → 3.24 KB, S5 3.10 → 3.60 KB, S7 alarm seeds ~+0.3 KB); quiet
+  cells are byte-identical. `results/track-a-kl-lineage-COMPARE.md`.
+- Hook path, 300-document store, 2.2k reads, 50 changed blocks read:
+  `pending` ≈ 87 ms in-process; `orient --focus retractions --json
+  --pending-actor` ≈ 0.39 s per CLI call vs ≈ 0.29 s without pending items
+  (Node start-up dominates). A partial expression index on the retiring
+  block id of `block.superseded` / `block.tombstoned` events (the same
+  expression `chainRetired` uses) keeps change lookups indexed.
+
 ### Changed
 
 - `tools/list` (full): 14,418 → 15,462 bytes (+1,044: `derived_from` on
