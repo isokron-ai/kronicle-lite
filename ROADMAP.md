@@ -30,30 +30,23 @@ to land. Open an issue if one matters to you.
   project-scoped recall; decision text through compaction; one-line
   "nothing changed"; atomic first start (Linux, macOS, Windows);
   docs/PUSH.md hook contract.
+- **0.8.0 — derived notes, version-bound reconciliation, exec-time
+  shims.** Notes record the block versions they rest on (`derived_from`,
+  inferred from the author's session reads) and go `never_act` /
+  `stale_derived` when a source changes (Track A S1 next-session stale
+  copy 20/20 → 0/20); `pending`: a change stays open for an actor until it
+  re-reads the current version; `kronicle-lite shim install` wrappers check
+  `git push` / `terraform apply` / `kubectl apply` / `npm publish` at exec
+  time in any client, cleared by that re-read (`shim ack` as override).
 
 ## Next
 
 *Top of the queue (2026-11-01), from the agent-memory-bench results and two
 external review rounds:*
 
-- **Derived-note lineage** — *built on branch `lineage` (unreleased; see
-  CHANGELOG).* `put` / `supersede` take `derived_from: [{block_id,
-  content_hash}]`, lineage is also inferred from the author's reads; when a
-  source block is superseded, moved or tombstoned, derived notes are
-  downgraded (never `can_act`, `stale_derived`) and surface as `derived`
-  retractions. Gate: Track A S1 next-session stale copy 20/20 → 0/20.
-- **Exec-time pulse shims** — `kronicle-lite shim install` writes thin
-  wrappers for configured commands (terraform, kubectl, `git push`,
-  `npm publish`) that check for unresolved retractions at the moment the real
-  binary runs, then exec it. Covers clients without hooks (Cursor, Codex,
-  Hermes), changes landing during long commands, and `bash -c` / make /
-  wrapper scripts.
-- **Version-bound reconciliation** — *built on branch `lineage`
-  (unreleased).* Supersedes "delivered vs acknowledged": no `ack` call; a
-  change stays `pending` for an actor until it re-reads the CURRENT version
-  (an older version never clears a newer change). `kronicle-lite pending
-  --actor A --json` and `pending` on every orient focus for hook gates.
-  Next: a Track B variant that gates `deploy` on `pending_count`.
+- **Track B gate on `pending_count`** — a live-agent variant that gates
+  `deploy` on `pending_count` (hook) and on the shims' version-bound check,
+  to measure retractions missed under compaction end to end.
 - **Typed assertions** — `assert(key, value, scope, source)` and
   `check_conflicts(keys)`: same key and scope, different value. The tractable
   start of contradiction detection (Track A S2: 0/140 for every tool).

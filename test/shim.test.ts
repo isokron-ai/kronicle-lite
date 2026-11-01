@@ -15,6 +15,13 @@ import { VERSION } from '../src/version.js';
 import { CLI, cleanEnv, gitInit, gitRun, tempDir, write } from './helpers/fs.js';
 
 const SYS_PATH = '/usr/local/bin:/usr/bin:/bin';
+/**
+ * The wrappers under test here are the POSIX sh ones, run through PATH with sh
+ * fake binaries: skipped on Windows (its .cmd/.ps1 wrappers delegate to
+ * `shim exec`; `kronicle-lite pulse` itself is covered there by the CLI
+ * contract tests, which run everywhere).
+ */
+const POSIX = process.platform !== 'win32';
 
 interface Rig {
   root: string;
@@ -86,7 +93,7 @@ function calls(r: Rig): string[][] {
     .map((l) => l.split('\0'));
 }
 
-describe('shim install / uninstall', () => {
+describe.skipIf(!POSIX)('shim install / uninstall', () => {
   it('writes one marked, executable sh wrapper per command and a config; uninstall removes only ours', () => {
     const r = rig({ tools: ['terraform'], extra: ['--world', 'docker push'] });
     const files = readdirSync(r.shims).sort();
@@ -147,7 +154,7 @@ describe('shim install / uninstall', () => {
   });
 });
 
-describe('shim wrapper: read-only path', () => {
+describe.skipIf(!POSIX)('shim wrapper: read-only path', () => {
   it('passes argv through byte-exact (spaces, quotes, globs, empty, newline) with exit code and stdin', () => {
     const r = rig({ tools: ['kubectl'] });
     const args = ['get', 'pods', '-l', 'app=a b', "it's", '"dq"', '*', '', 'line1\nline2', '$HOME', '-n', 'prod'];
@@ -179,7 +186,7 @@ describe('shim wrapper: read-only path', () => {
   });
 });
 
-describe('shim wrapper: PATH resolution and recursion guard', () => {
+describe.skipIf(!POSIX)('shim wrapper: PATH resolution and recursion guard', () => {
   it('skips its own dir however it is spelled on PATH (trailing slash, symlink alias, duplicate)', () => {
     const r = rig({ tools: ['kubectl'] });
     const alias = join(r.root, 'alias');
@@ -253,7 +260,7 @@ describe('shim wrapper: PATH resolution and recursion guard', () => {
   });
 });
 
-describe('shim wrapper: world-changing path (real CLI)', () => {
+describe.skipIf(!POSIX)('shim wrapper: world-changing path (real CLI)', () => {
   it('deny: a changed runbook refuses terraform apply with the diff (exit 77) until acknowledged', () => {
     const r = rig({ tools: ['terraform'] });
     expect(run(r, ['terraform', 'apply']).status).toBe(0); // nothing changed since install
@@ -443,7 +450,7 @@ describe('kronicle-lite pulse (CLI contract)', () => {
   });
 });
 
-describe('kronicle-lite shim exec (Windows wrappers / portable path)', () => {
+describe.skipIf(!POSIX)('kronicle-lite shim exec (Windows wrappers / portable path)', () => {
   it('decides with classify(), pulses in-process, refuses with 77, else runs the real binary', () => {
     const r = rig({ tools: ['terraform'] });
     const env = { PATH: `${r.shims}:${r.bin}:${SYS_PATH}` };
@@ -476,7 +483,7 @@ describe('version-bound reconciliation: the gate clears when the reader re-reads
     }
   };
 
-  it('re-reading clears it without shim ack; an older version does not; a newer change blocks again', () => {
+  it.skipIf(!POSIX)('re-reading clears it without shim ack; an older version does not; a newer change blocks again', () => {
     const r = rig({ tools: ['terraform'] });
     read(r, 'agent-a');
     putRunbook(r, 'prod-b');
@@ -498,7 +505,7 @@ describe('version-bound reconciliation: the gate clears when the reader re-reads
     expect(calls(r).map((c) => c.join(' '))).toEqual(['terraform apply', 'terraform apply']);
   });
 
-  it('every reader must re-read; a configured --pending-actor replaces the readers; shim ack still overrides', () => {
+  it.skipIf(!POSIX)('every reader must re-read; a configured --pending-actor replaces the readers; shim ack still overrides', () => {
     const r = rig({ tools: ['terraform'] });
     read(r, 'agent-a');
     read(r, 'agent-b');
@@ -528,7 +535,7 @@ describe('version-bound reconciliation: the gate clears when the reader re-reads
     expect(run(c, ['terraform', 'apply']).status).toBe(0);
   });
 
-  it('a removal clears on a read of the document after it; a derived note clears when its source is re-read; integrity still fails closed', () => {
+  it.skipIf(!POSIX)('a removal clears on a read of the document after it; a derived note clears when its source is re-read; integrity still fails closed', () => {
     const r = rig({ tools: ['terraform'] });
     read(r, 'agent-a');
     writeFileSync(join(r.root, 'note.md'), '# Deploy note\n\nWe deploy with terraform to prod-a.\n');
@@ -589,7 +596,7 @@ describe('version-bound reconciliation: the gate clears when the reader re-reads
   });
 });
 
-describe('shim status', () => {
+describe.skipIf(!POSIX)('shim status', () => {
   it('reports active shims, the real binaries and what is pending in this project', () => {
     const r = rig({ tools: ['terraform'] });
     putRunbook(r, 'prod-b');
@@ -606,7 +613,7 @@ describe('shim status', () => {
   });
 });
 
-describe('overhead of a read-only command through the shim', () => {
+describe.skipIf(!POSIX)('overhead of a read-only command through the shim', () => {
   it('git status: shim adds a few ms (no node start)', () => {
     const root = tempDir('kl-shim-bench-');
     const repo = join(root, 'repo');

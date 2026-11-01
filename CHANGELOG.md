@@ -4,7 +4,7 @@ All notable changes to kronicle-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
-## [Unreleased]
+## [0.8.0] — 2026-11-01
 
 ### Added — derived-note lineage (Track A S1 "next-session stale copy")
 
@@ -122,15 +122,25 @@ uses semantic versioning once past 0.x.
   newer change blocks again, every reader / the configured actor, removal,
   derived note, ack override, integrity still closed).
 
-### Bench (agent-memory-bench Track A, branch `kl-lineage`, 20 seeds)
+### Bench (agent-memory-bench Track A, branch `kl-next-release`, 20 seeds)
 
 - **S1 next-session stale copy served unmarked: 20/20 → 0/20**
   (`nextSessionPass` 0/20 → 20/20), with the bench's unchanged adapter: the
   agent never declares lineage, so this is inference alone. S1, S5, S7, S8,
-  S11 grades identical on every seed. Touch views where something the agent
-  read changed grow by the `derived` retraction and the Pending section
-  (S1 2.45 → 3.24 KB, S5 3.10 → 3.60 KB, S7 alarm seeds ~+0.3 KB); quiet
-  cells are byte-identical. `results/track-a-kl-lineage-COMPARE.md`.
+  S11 grades identical to 0.7.0 on every seed. Touch views where something
+  the agent read changed grow by the `derived` retraction and the Pending
+  section (S1 2.45 → 3.24 KB, S5 3.10 → 3.60 KB, S7 1.44 → 1.61 KB); quiet
+  cells are byte-identical. `results/track-a-kl-next-release/COMPARE.md`.
+- Derived-retraction noise: S7 0 on every seed (no note); diagnostic
+  S7 + note: 10, exactly the 10 real-edit seeds, 0 on format-only seeds
+  (within-session over-approximation; grades unchanged). An actor that
+  never oriented (2,000 reads over 7 days, 978 blocks): 978 → 200 inferred
+  edges, and 50 → 8 of 50 random source edits mark its note stale.
+- S16 exec-time gate: refused at exec with the diff as on `shims`; new
+  variant "re-read, no ack" 0/19/1 → 20/0/0. Open item, pre-existing on
+  `shims`: about 1 pulse in 80 bench cells took ≥ 10 s, hit the shim
+  timeout and failed open (documented behavior); not reproduced outside
+  the harness (220 runs).
 - Hook path, 300-document store, 2.2k reads, 50 changed blocks read:
   `pending` ≈ 87 ms in-process; `orient --focus retractions --json
   --pending-actor` ≈ 0.39 s per CLI call vs ≈ 0.29 s without pending items
@@ -143,10 +153,14 @@ uses semantic versioning once past 0.x.
 - `tools/list` (full): 14,418 → 15,462 bytes (+1,044: `derived_from` on
   `put_document` and `supersede_block`; `pending*` and `lineage` in output
   schemas). `--core`: 10,655 → 10,879 bytes (+224; `derived_from` is not
-  offered in `--core`, inference still runs there). Catalog re-pinned:
+  offered in `--core`, inference still runs there; shims are CLI-only).
+  Catalog re-pinned for 0.8.0:
   `2e47e0a7236e8640cea65a10228f1cf7b8e4602226635ad50cb35e6bbfca9d40` (full),
   `65245f5a33d781ba611716bc18cd42234088e874e95d67f6676ba8ec799a1611` (core).
-- Tests: `test/lineage.test.ts` (unit), `test/lineage-cli.test.ts` (CLI and
+- The POSIX shim wrapper tests are skipped on Windows (sh fake binaries);
+  the `pulse` CLI contract runs everywhere. 488 tests.
+- Tests: `test/lineage.test.ts` (unit, including the inference bounds:
+  24 h / 200 blocks, truncation flag, session bound, lineage dedupe), `test/lineage-cli.test.ts` (CLI and
   MCP contract), `test/lineage-property.test.ts` (seeded: 60 random
   supersede / format-only / tombstone / move / rename sequences never leave
   a derived note `can_act` after a real source change, and format-only edits
