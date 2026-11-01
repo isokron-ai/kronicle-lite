@@ -98,6 +98,8 @@ CREATE TABLE IF NOT EXISTS document_revisions (
   created_at   TEXT NOT NULL,
   PRIMARY KEY (doc_id, revision)
 );
+-- Unreleased (next): rename detection looks documents up by their markdown hash.
+CREATE INDEX IF NOT EXISTS revisions_hash_idx ON document_revisions (content_hash);
 
 CREATE TABLE IF NOT EXISTS blocks (
   block_id         TEXT PRIMARY KEY,

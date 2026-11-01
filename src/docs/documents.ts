@@ -269,6 +269,23 @@ export class DocumentStore {
     return r ? { ...r, source: JSON.parse(r.source_json) as DocumentSource } : null;
   }
 
+  /**
+   * Unreleased (next): live documents whose CURRENT revision has this markdown
+   * hash and whose latest put recorded a source of this kind in this project
+   * (indexed; used to recognise a moved file).
+   */
+  sourcesWithCurrentHash(hash: string, kind: string, project_key: string): (DocSourceRow & { source: DocumentSource })[] {
+    const rows = this.db
+      .prepare(
+        `SELECT s.* FROM document_revisions r
+           JOIN documents d ON d.doc_id = r.doc_id AND d.current_revision = r.revision
+           JOIN doc_sources s ON s.doc_id = d.doc_id
+          WHERE r.content_hash = ? AND s.kind = ? AND d.project_key = ? AND d.tombstoned_at IS NULL`,
+      )
+      .all(hash, kind, project_key) as DocSourceRow[];
+    return rows.map((r) => ({ ...r, source: JSON.parse(r.source_json) as DocumentSource }));
+  }
+
   /** Every document whose latest put recorded a source, optionally filtered by kind. */
   listSources(kind?: string): (DocSourceRow & { source: DocumentSource })[] {
     const rows = (

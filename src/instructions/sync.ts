@@ -296,9 +296,8 @@ function findMovedCopy(
 function findMovedOrigin(store: KronicleLite, arrived: InstructionEntry, hash: string, rc: ResolvedContext): { doc_id: string; entry: InstructionEntry } | null {
   if (arrived.kind !== 'instruction' || !arrived.project) return null;
   const hits: { doc_id: string; entry: InstructionEntry }[] = [];
-  for (const src of store.docs.listSources(arrived.kind)) {
+  for (const src of store.docs.sourcesWithCurrentHash(hash, arrived.kind, arrived.project.key)) {
     if (src.source.project?.key !== arrived.project.key || src.slug === arrived.slug) continue;
-    if (store.docs.currentMarkdownHash(src.slug) !== hash) continue;
     const oldPath = resolve(arrived.project.root, src.source.path);
     if (!('missing' in readText(oldPath))) continue; // still there: a copy, not a move
     if (store.docs.liveBlocks(src.doc_id).length === 0) continue;
