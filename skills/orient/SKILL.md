@@ -57,9 +57,11 @@ your beliefs aligned with what the store actually says now.
       touched documents (step 4). Retractions about other projects'
       documents are hidden (`scope.hidden_retractions`); pass
       `all_projects: true` only when the operator asks. Formatting-only
-      edits (whitespace, quotes, punctuation, a typo fix, a "Last reviewed"
-      date) are not retractions: they are listed under `cosmetic_edits`
-      and need no action. When
+      edits (whitespace, quotes, punctuation, emphasis, case, a "Last
+      reviewed: <date>" line) are not retractions: they are listed under
+      `cosmetic_edits` and need no action. A retraction marked
+      `likely_typo` (informational) looks like a spelling fix: use the new
+      wording, and check it is not a different name or value. When
       `scope.verdict` is `partial`, "no retractions" covers this project
       only: the hidden ones were not reviewed, not cleared.
    4. `delta.entries` — what changed since your cursor, oldest first.

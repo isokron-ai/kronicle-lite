@@ -328,21 +328,22 @@ put made before this field existed) stay visible from every project.
 ### 3.8 Cosmetic edits (unreleased)
 
 Orient classifies each supersession whose old and new block text it still
-has (`src/orient/cosmetic.ts`). The classifier is conservative: a false
-"cosmetic" hides a real change. An edit is **cosmetic** when the two texts
-are equal after normalizing line endings, whitespace and reflow, quote
-style, trailing punctuation, emphasis markers and list markers, and every
-remaining difference (at most two token pairs) is a case-only change, a
-soft hyphen (`e-mail` → `email`: a hyphen followed by 3+ letters, same
-letters otherwise) or a one-letter typo in a purely alphabetic word of 5+
-letters with the same first letter that is not a meaning-bearing word
-(not/never/must/enable/east/...), or when only the date on a "Last
-reviewed / updated …" line changed. It is never cosmetic when anything
-inside a code span or code block changes, when any token holding a digit,
-path or URL separator, `@`, `=`, `~`, an internal `.`/`:`/`_` or a leading
-`-`/`--` changes or moves, when any token on a command-like line (a flag, a
-path, `./x`, `a=b`, a `$ ` prompt or a code span) changes, or when words
-are added or removed. Cosmetic supersessions are listed under
+has (`src/orient/cosmetic.ts`). Rule: nothing that changes a word, number,
+date or identifier is cosmetic. An edit is **cosmetic** only when the
+sequence of word and number tokens is byte-identical after setting aside
+line endings, whitespace and reflow, a space before sentence punctuation,
+list markers, paired emphasis markers, curly vs straight quotes and the
+style of a standalone dash, plus at most ONE of: sentence punctuation at a
+token's end, letter case, or a soft hyphen inside a plain word (`e-mail` →
+`email`, 3+ letters after the hyphen). A line that is exactly a stamp
+phrase and one date ("Last reviewed: 2026-10-01", "Reviewed on …") may
+change its date; any other date is content. Code spans and code blocks must
+be byte-identical (code blocks tolerate line endings and trailing
+whitespace). There is no Unicode compatibility folding (`2³` ≠ `23`).
+A typo-shaped edit (one ordinary word of 5+ letters, same first letter, one
+edit away) is NOT cosmetic: it is a retraction with `likely_typo: true` and
+severity `informational`, because such edits include http→https, Mark→Mary,
+payments→payment and stable→stale. Cosmetic supersessions are listed under
 `cosmetic_edits` (`seq, doc_slug, block_id, successor_block_id, rules[],
 diff`) instead of `retractions`; with `include_cosmetic` they are also
 retractions with `cosmetic: [rules]` and severity `informational`. Nothing

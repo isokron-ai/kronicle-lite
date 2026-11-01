@@ -6,21 +6,33 @@ uses semantic versioning once past 0.x.
 
 ## [Unreleased]
 
-### Fixed — a one-letter value change was hidden as a typo (0.7.0 blocker)
+### Fixed — 0.7.0's cosmetic classifier hid real changes (release blocker)
 
-- 0.7.0's cosmetic classifier normalized hyphens away before its typo rule,
-  so `./bin/deploy --target staging-a` → `staging-b` was a "cosmetic edit"
-  (no retraction, nothing pushed): exactly the stale-runbook case. The
-  classifier is now conservative: hyphens and case are judged per token
-  pair (only `e-mail` → `email`-style soft hyphens, hyphen followed by 3+
-  letters); the one-letter-typo rule applies only to purely alphabetic
-  words of 5+ letters with the same first letter; every token on a
-  command-like line (a flag, a path, `./x`, `a=b`, a `$ ` prompt or a code
-  span) is compared exactly; dash style is no longer normalized. Must-alarm
-  tests: staging-a→b, us-east-1→2, v1→v2, port 8080→8081, prod1→prod2,
-  --target a→b, do→don't, must→must not, removing --dry-run,
-  enable→disable, one character inside backticks, a one-letter change on a
-  command line. Bench S7 stays 100% quiet; S1, S5 100%.
+- 0.7.0 filed `./bin/deploy --target staging-a` → `staging-b` as a
+  "cosmetic edit" (no retraction, nothing pushed): exactly the stale-runbook
+  case. An adversarial corpus found 27 of 38 real changes hidden the same
+  way: typo-shaped name/unit/format changes (http→https, mysql→mssql,
+  megabytes→megabits, eight→eighty, Mark→Mary, payments→payment,
+  stable→stale), hyphen-joined names (staging-east→west), every date on an
+  "As of / Updated / Revised …" line, and Unicode folding (`2³` → `23`).
+- New rule: nothing that changes a word, number, date or identifier is
+  cosmetic. Cosmetic means the word/number token sequence is byte-identical
+  after whitespace, reflow, line endings, list markers, paired emphasis,
+  quote and standalone-dash style, plus at most one of trailing sentence
+  punctuation, case, or a soft hyphen in a plain word. Review stamps only
+  when the whole line is a stamp phrase and one date. No NFKC.
+- Typo-shaped edits are retractions with `likely_typo: true` and
+  `informational` severity (Markdown: "likely typo fixes: check the new
+  wording"; next steps do not say "reconcile before acting" for them), so
+  a push hook still delivers them.
+- The corpus (agent-memory-bench `stress/kl/classifier-corpus.mjs`) is a
+  test (`test/stress-corpus.test.ts`): false-cosmetic 0/38 (was 27/38 on
+  0.7.0). Plus must-alarm unit tests: staging-a→b, us-east-1→2, v1→v2,
+  port 8080→8081, prod1→prod2, --target a→b, do→don't, must→must not,
+  removing --dry-run, enable→disable, one character inside backticks, a
+  one-letter change on a command line.
+- Bench S7 (benign-edit noise): 100% → 90% quiet; the 2 typo_fix seeds are
+  now delivered as `likely_typo` (intended). S1, S5 stay 100%.
 
 ## [0.7.0] — 2026-11-01
 

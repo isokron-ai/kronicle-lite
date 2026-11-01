@@ -1,10 +1,13 @@
 /**
  * Cosmetic vs semantic edit classifier (orient/cosmetic.ts).
  *
- * Cosmetic set: the ten agent-memory-bench benign-edit templates (ported
- * from IsoKron's benign-edits generator) plus reflow, case and review-stamp
- * edits. Semantic set: changes that must still alarm — numbers, hosts,
- * paths, flags, versions, code, negations and ordinary word swaps.
+ * Rule under test: nothing that changes a word, number, date or identifier
+ * is cosmetic. Cosmetic set: nine of the ten agent-memory-bench benign-edit
+ * templates plus reflow, case, emphasis, quote/dash style and exact review
+ * stamps. The bench's typo_fix template is a semantic `likely_typo`
+ * (delivered, informational). Semantic set: numbers, hosts, paths, flags,
+ * versions, code, negations, word swaps, typo-shaped name/unit changes.
+ * The end-to-end adversarial corpus is test/stress-corpus.test.ts.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -13,7 +16,6 @@ import { classifyEdit, editDistance } from '../src/orient/cosmetic.js';
 
 // [template, before, after] — the bench's Notes lines, verbatim.
 const BENCH_BENIGN: [string, string, string][] = [
-  ['typo_fix', 'Operators recieve alerts via the dispatcher.', 'Operators receive alerts via the dispatcher.'],
   ['whitespace_trim', 'Escalations follow the paging policy.   ', 'Escalations follow the paging policy.'],
   ['whitespace_double', 'Status updates go to the  incident channel.', 'Status updates go to the incident channel.'],
   ['line_ending_norm', 'Postmortems are blameless.\r\nOwners file follow-ups.', 'Postmortems are blameless.\nOwners file follow-ups.'],
@@ -30,16 +32,25 @@ const MORE_COSMETIC: [string, string, string][] = [
   ['case', 'NEVER skip the canary stage.', 'Never skip the canary stage.'],
   ['bold', 'Run the **full** suite before merging.', 'Run the full suite before merging.'],
   ['review stamp', 'Last reviewed: 2026-10-01', 'Last reviewed: 2026-11-01'],
-  ['review stamp, words', '_Last updated October 3, 2026 by the platform team._', '_Last updated November 1, 2026 by the platform team._'],
+  ['review stamp, month name', '_Last updated October 3, 2026_', '_Last updated November 1, 2026_'],
   ['review stamp in a block', 'Owners: platform team.\nLast reviewed 2026-09-30.', 'Owners: platform team.\nLast reviewed 2026-10-31.'],
-  ['typo, long word', 'Requests are authenticated by the gateway.', 'Requests are authentciated by the gateway.'],
-  ['two typos', 'The recieve queue is monitered by ops.', 'The receive queue is monitored by ops.'],
+  ['dash style', 'Stop \u2014 then restart.', 'Stop - then restart.'],
+  ['space before period', 'The runbook lives in the ops wiki.', 'The runbook lives in the ops wiki .'],
   ['bullet marker', '- Page the on-call.\n- Open a bridge.', '* Page the on-call.\n* Open a bridge.'],
   ['curly apostrophe', 'Don’t page twice.', "Don't page twice."],
   ['code span untouched', 'Run `migrate --online` after the deploy', 'Run `migrate --online` after the deploy.'],
 ];
 
+// Delivered as retractions with likely_typo (informational), never hidden.
+const LIKELY_TYPO: [string, string, string][] = [
+  ['bench typo_fix template', 'Operators recieve alerts via the dispatcher.', 'Operators receive alerts via the dispatcher.'],
+  ['typo, long word', 'Requests are authenticated by the gateway.', 'Requests are authentciated by the gateway.'],
+  ['transposition', 'Check the dashbaord before you merge.', 'Check the dashboard before you merge.'],
+];
+
 const SEMANTIC: [string, string, string][] = [
+  ['two typos', 'The recieve queue is monitered by ops.', 'The receive queue is monitored by ops.'],
+  ['stamp line with other words', '_Last updated October 3, 2026 by the platform team._', '_Last updated November 1, 2026 by the platform team._'],
   ['cluster in code span', 'Deploys go to the cluster `stg-west-3` first.', 'Deploys go to the cluster `qa-east-7` first.'],
   ['host, bare', 'Deploys go through legacy-amber-42.internal.', 'Deploys go through legacy-amber-43.internal.'],
   ['region, bare', 'Deploy to us-east first.', 'Deploy to us-west first.'],
@@ -89,7 +100,6 @@ const MUST_ALARM: [string, string, string][] = [
   ['quoted argument', 'Use the "blue" pool for deploys.', 'Use the "blur" pool for deploys.'],
   ['short word typo-like change', 'Deploy to the east pool.', 'Deploy to the eest pool.'],
   ['first letter changed', 'Restart the worker gracefully.', 'Restart the worker fracefully.'],
-  ['dash style', 'Stop \u2014 then restart.', 'Stop - then restart.'],
 ];
 
 describe('classifyEdit', () => {
@@ -109,13 +119,18 @@ describe('classifyEdit', () => {
     expect(c.semantic_reason).toEqual(expect.any(String));
   });
 
+  it.each(LIKELY_TYPO)('%s is semantic, labelled likely_typo', (_t, a, b) => {
+    expect(classifyEdit(a, b)).toMatchObject({ cosmetic: false, likely_typo: true });
+  });
+
   it.each(MUST_ALARM)('must alarm: %s', (_t, a, b) => {
     const c = classifyEdit(a, b);
     expect(c.cosmetic, JSON.stringify(c)).toBe(false);
   });
 
   it('names the rules that explain a cosmetic edit', () => {
-    expect(classifyEdit('Operators recieve alerts.', 'Operators receive alerts.').rules).toEqual(['typo']);
+    expect(classifyEdit('Use a non-blocking client.', 'Use a nonblocking client.').rules).toEqual(['hyphenation']);
+    expect(classifyEdit('Rotate keys quarterly.', 'Rotate keys quarterly!').rules).toEqual(['punctuation']);
     expect(classifyEdit('Use the “safe” profile.', 'Use the "safe" profile.').rules).toEqual(['quotes']);
     expect(classifyEdit('Last reviewed: 2026-10-01', 'Last reviewed: 2026-11-01').rules).toEqual(['review_stamp']);
     expect(classifyEdit('a  b', 'a b').rules).toEqual(['whitespace']);

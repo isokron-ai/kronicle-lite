@@ -53,8 +53,9 @@ Fields a hook reads:
 | `retractions[].seq`, `.kind`, `.severity` | `kind`: `instruction` \| `supersession` \| `tombstone` \| `retraction`; `severity`: `safety` \| `behavioral` \| `informational` |
 | `retractions[].doc_slug`, `.heading_path` | where |
 | `retractions[].old_text`, `.new_text`, `.diff` | bounded snippets (≤ 160 chars) and a word diff `[-old-]{+new+}` (≤ 400 chars); `new_text` and `diff` are `null` for a removal |
+| `retractions[].likely_typo` | `true` on an edit shaped like a one-letter typo fix (informational severity); still pushed, since such edits include http→https or Mark→Mary |
 | `retractions[].reason_line` | one sentence: "You previously relied on X; current truth is Y. Reconcile before proceeding." |
-| `cosmetic_edits[]` | formatting-only edits (whitespace, quotes, punctuation, typo-level, review dates): recorded, **not** in `retractions`, so a hook does not push them. `--include-cosmetic` folds them back into `retractions` with `cosmetic: [rules]` |
+| `cosmetic_edits[]` | formatting-only edits (whitespace, reflow, quotes, punctuation, emphasis, list markers, case, an exact "Last reviewed: <date>" line): recorded, **not** in `retractions`, so a hook does not push them. `--include-cosmetic` folds them back into `retractions` with `cosmetic: [rules]` |
 | `integrity.ok`, `integrity.problem` | `false`: the store was edited outside kronicle-lite; tell the agent to stop relying on recalled text |
 | `drift_banner.surfaced` | the actor has not oriented for a while |
 

@@ -349,10 +349,11 @@ directories with a debounce (150 ms; `--debounce`) plus a polling pass
 A file moved inside the project with its content intact is a **rename**,
 not a removal: the document follows it (`document.renamed`, same blocks and
 receipts, no retraction), whichever of the two paths is synced first. Edits
-that only change formatting (whitespace, quotes, punctuation, a one-letter
-typo, a "Last reviewed" date) are chained like any other but reported under
-`cosmetic_edits`, not as retractions; changes to numbers, hosts, paths,
-flags, code or ordinary words still are.
+that only change formatting (whitespace, reflow, quotes, punctuation,
+emphasis, list markers, case, a "Last reviewed: <date>" line) are chained
+like any other but reported under `cosmetic_edits`, not as retractions.
+Anything that changes a word, number, date or identifier is a retraction;
+a typo-shaped edit is delivered too, labelled `likely_typo` (informational).
 
 **Inside Claude Code: hooks, not a watcher.** Claude Code already watches
 files: a `SessionStart` hook can return `watchPaths`, and a `FileChanged`

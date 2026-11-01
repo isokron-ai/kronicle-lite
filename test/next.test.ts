@@ -57,7 +57,7 @@ function repo() {
 }
 
 describe('S7: cosmetic edits are recorded, not retractions', () => {
-  it('each benign edit alone: quiet orient; a cluster change still alarms with its diff', () => {
+  it('each benign edit alone: quiet orient (a typo fix is delivered as likely_typo); a cluster change still alarms with its diff', () => {
     for (let i = 0; i < NOTES_PRE.length; i++) {
       const { root, rc, store } = repo();
       const file = join(root, 'docs', 'deploy.md');
@@ -67,6 +67,13 @@ describe('S7: cosmetic edits are recorded, not retractions', () => {
       write(file, runbook('stg-west-3', NOTES_PRE.map((n, j) => (j === i ? NOTES_POST[j]! : n))));
       expect(syncInstructionFile(store, entryFor(file, rc), { context: rc }).action).toBe('updated');
       const s = store.orient.getSystemState({ actor_id: 'a', since_cursor: c0 });
+      if (i === 0) {
+        // recieve → receive: typo-shaped, so delivered (informational), never hidden.
+        expect(s.retractions).toEqual([expect.objectContaining({ likely_typo: true, severity: 'informational' })]);
+        expect(s.cosmetic_edits).toEqual([]);
+        expect(renderSystemStateMarkdown(s)).toMatch(/likely typo fixes: check the new wording/);
+        continue;
+      }
       expect(s.retractions).toEqual([]);
       expect(s.cosmetic_edits).toHaveLength(1);
       const md = renderSystemStateMarkdown(s);
@@ -85,10 +92,10 @@ describe('S7: cosmetic edits are recorded, not retractions', () => {
     write(file, runbook('qa-east-7', NOTES_POST));
     syncInstructionFile(store, entryFor(file, rc), { context: rc });
     const s = store.orient.getSystemState({ actor_id: 'a', since_cursor: c0 });
-    expect(s.retractions).toHaveLength(1);
-    expect(s.retractions![0]!.diff).toContain('[-`stg-west-3`-]{+`qa-east-7`+}');
-    expect(s.cosmetic_edits).toHaveLength(NOTES_PRE.length);
-    expect(renderSystemStateMarkdown(s)).toMatch(/Retractions \(1\) — reconcile before acting/);
+    expect(s.retractions).toHaveLength(2);
+    expect(s.retractions!.find((r) => !r.likely_typo)!.diff).toContain('[-`stg-west-3`-]{+`qa-east-7`+}');
+    expect(s.cosmetic_edits).toHaveLength(NOTES_PRE.length - 1);
+    expect(renderSystemStateMarkdown(s)).toMatch(/Retractions \(2\) — reconcile before acting/);
   });
 });
 
@@ -271,8 +278,8 @@ describe('push contract: orient --cursor C --focus retractions --json', () => {
     writeFileSync(file, runbook('stg-west-3', NOTES_POST));
     await put();
     const o1 = await orient(['--cursor', o0.cursor, '--focus', 'retractions']);
-    expect(o1.retractions).toEqual([]);
-    expect(o1.cosmetic_edits.length).toBe(NOTES_PRE.length);
+    expect(o1.retractions).toEqual([expect.objectContaining({ likely_typo: true })]); // recieve → receive is delivered
+    expect(o1.cosmetic_edits.length).toBe(NOTES_PRE.length - 1);
     expect(o1.source_drift).toBeNull();
     writeFileSync(file, runbook('qa-east-7', NOTES_POST));
     await put();

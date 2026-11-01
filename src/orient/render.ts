@@ -59,7 +59,8 @@ export function renderSystemStateMarkdown(s: SystemState): string {
 
   if (s.retractions && s.retractions.length > 0) {
     lines.push('');
-    lines.push(`## Retractions (${s.retractions.length}) — reconcile before acting`);
+    const allTypos = s.retractions.every((r) => r.likely_typo);
+    lines.push(`## Retractions (${s.retractions.length}) — ${allTypos ? 'likely typo fixes: check the new wording' : 'reconcile before acting'}`);
     for (const r of s.retractions) {
       lines.push(`- **[${r.severity}]** seq ${r.seq} \`${r.event_type}\` ${r.doc_slug ? `(${r.doc_slug}) ` : ''}${r.reason_line}`);
       if (r.diff) lines.push(`  - changed: ${r.diff}`);

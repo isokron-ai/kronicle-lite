@@ -55,6 +55,12 @@ export interface Retraction {
    * unless asked (`include_cosmetic`).
    */
   cosmetic: CosmeticRule[] | null;
+  /**
+   * Unreleased, additive: a supersession shaped like a one-letter typo fix of
+   * an ordinary word. Still a retraction (it may be a different name or
+   * value: http→https, Mark→Mary), with informational severity.
+   */
+  likely_typo?: boolean;
 }
 
 /** Block text for a retraction, from the projection (orient passes one in). */
@@ -112,7 +118,8 @@ export function classifyRetraction(ev: ChainEvent, lookup?: BlockTextLookup): Re
   };
   const edit = rule.kind === 'supersession' && oldB && newB ? classifyEdit(oldB.content, newB.content, oldB.kind ?? newB.kind) : null;
   const cosmetic = edit?.cosmetic ? (edit.rules.length > 0 ? edit.rules : (['whitespace'] as CosmeticRule[])) : null;
-  const base = { seq: ev.seq, event_type: ev.event_type, block_id, doc_slug, successor_block_id, reason, ...text, cosmetic };
+  const likely_typo = edit !== null && !edit.cosmetic && edit.likely_typo;
+  const base = { seq: ev.seq, event_type: ev.event_type, block_id, doc_slug, successor_block_id, reason, ...text, cosmetic, ...(likely_typo ? { likely_typo } : {}) };
   const instruction = isInstructionSlug(doc_slug) && rule.kind !== 'retraction';
   if (cosmetic) {
     return {
@@ -135,6 +142,14 @@ export function classifyRetraction(ev: ChainEvent, lookup?: BlockTextLookup): Re
       truth = instruction
         ? `REMOVED from ${doc_slug} at seq ${ev.seq}${why ? ` (${why})` : ''}; stop following it`
         : `TOMBSTONED at seq ${ev.seq}${why ? ` (${why})` : ''}; do not read or build on it`;
+    }
+    if (likely_typo) {
+      return {
+        ...base,
+        kind: instruction ? 'instruction' : rule.kind,
+        severity: 'informational',
+        reason_line: `Likely a typo fix: ${asserted} now reads ${truth}. Check that it is not a different name or value before relying on the old wording.`,
+      };
     }
     return {
       ...base,

@@ -176,6 +176,7 @@ export const RetractionSchema = z.object({
   new_text: z.string().nullable(),
   diff: z.string().nullable().describe('Word diff: [-removed-]{+added+}.'),
   cosmetic: z.array(z.enum(COSMETIC_RULES)).nullable().optional().describe('Rules that make this edit cosmetic (meaning unchanged), else null.'),
+  likely_typo: z.boolean().optional().describe('Shaped like a one-letter typo fix; still delivered (informational).'),
 });
 
 export const CosmeticEditSchema = z.object({

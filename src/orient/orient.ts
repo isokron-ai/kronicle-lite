@@ -595,10 +595,15 @@ function nextSteps(args: {
     return steps;
   }
   const safety = args.retractions?.filter((r) => r.severity === 'safety').length ?? 0;
-  if (args.retractions && args.retractions.length > 0) {
+  const typos = args.retractions?.filter((r) => r.likely_typo).length ?? 0;
+  const real = (args.retractions?.length ?? 0) - typos;
+  if (real > 0) {
     steps.push(
-      `Reconcile ${args.retractions.length} retraction(s)${safety ? ` (${safety} safety)` : ''} BEFORE acting: for each, affirm the current truth (cite seq), name the old claim once, and drop it as a decision premise.`,
+      `Reconcile ${real} retraction(s)${safety ? ` (${safety} safety)` : ''} BEFORE acting: for each, affirm the current truth (cite seq), name the old claim once, and drop it as a decision premise.`,
     );
+  }
+  if (typos > 0) {
+    steps.push(`${typos} edit(s) look like typo fixes (informational): use the new wording; check it is not a different name or value before relying on the old one.`);
   }
   if (args.scope && args.scope.verdict === 'partial') {
     steps.push(
