@@ -11,7 +11,7 @@ import { defaultDataDir } from '../db/open.js';
 import { VERSION } from '../version.js';
 import { DEFAULT_COMMANDS } from './rules.js';
 import { PULSE_UNAVAILABLE_EXIT, exitCodeFor, openForPulse, pulse, retractionLine, type PulseMode } from './pulse.js';
-import { ackShim, execShim, install, locateShimDir, status, uninstall } from './install.js';
+import { ackShim, execShim, install, locateShimDir, shimLog, status, uninstall } from './install.js';
 
 interface Parsed {
   positional: string[];
@@ -58,6 +58,13 @@ function modeOf(v: string | true | undefined): PulseMode | undefined {
   return m;
 }
 
+function onTimeoutOf(v: string | true | undefined): 'allow' | 'deny' | undefined {
+  const m = str(v);
+  if (m === undefined) return undefined;
+  if (m !== 'allow' && m !== 'deny') throw new Error('--on-timeout must be allow or deny');
+  return m;
+}
+
 function cliPath(): string {
   const a = process.argv[1] ?? '';
   try {
@@ -70,10 +77,13 @@ function cliPath(): string {
 export const SHIM_HELP = `kronicle-lite shim — exec-time pulse wrappers for world-changing commands (docs/PUSH.md)
 
   kronicle-lite shim install   [--dir D] [--commands ${DEFAULT_COMMANDS.join(',')}] [--world "make release,docker push"]
-                               [--data-dir DIR] [--mode deny|warn] [--pending-actor A[,B]] [--windows] [--json]
+                               [--data-dir DIR] [--mode deny|warn] [--pending-actor A[,B]] [--on-timeout allow|deny]
+                               [--windows] [--json]
         write tiny wrappers into D (default ~/.kronicle-lite/shims); put D FIRST on PATH.
         A change stops blocking once the pending actor(s) re-read its current version
-        (default: whoever read the changed block)
+        (default: whoever read the changed block). A check that times out
+        (KRONICLE_SHIM_TIMEOUT, default 10 s) is reported every time and runs the command
+        (--on-timeout allow, default) or refuses it with exit 77 (--on-timeout deny)
   kronicle-lite shim status    [--dir D] [--cwd DIR] [--json]   what is installed, active on PATH, pending here
   kronicle-lite shim ack       [--dir D] [--cwd DIR] [--through SEQ] [--json]
         manual override: clear this project's gate up to SEQ (the seq a denial printed)
@@ -108,12 +118,15 @@ export async function runShimCli(cmd: 'pulse' | 'shim', argv: string[]): Promise
       if (json) out({ error: msg });
       return PULSE_UNAVAILABLE_EXIT;
     };
+    // Timing for the shim log (--state): node start-up to here, opening the store, the check.
+    const tStart = performance.now();
     let store;
     try {
       store = openForPulse(dataDir);
     } catch (err) {
       return unavailable(err instanceof Error ? err.message : String(err));
     }
+    const tOpen = performance.now();
     try {
       const r = pulse(store, {
         dataDir,
@@ -126,6 +139,10 @@ export async function runShimCli(cmd: 'pulse' | 'shim', argv: string[]): Promise
         command: rest,
         allProjects: flags['all-projects'] === true,
       });
+      if (stateDir !== undefined) {
+        const t = performance.now();
+        shimLog(stateDir, rest[0] ?? 'pulse', `pulse(node) boot ${Math.round(tStart)}ms open ${Math.round(tOpen - tStart)}ms check ${Math.round(t - tOpen)}ms total ${Math.round(t)}ms decision=${r.decision} reason=${r.reason} head=${r.head.seq}`);
+      }
       if (json) out(r);
       if (r.message) process.stderr.write(r.message + '\n');
       return exitCodeFor(r);
@@ -147,6 +164,7 @@ export async function runShimCli(cmd: 'pulse' | 'shim', argv: string[]): Promise
         world: list(flags['world']),
         mode: modeOf(flags['mode']),
         ...(str(flags['pending-actor']) !== undefined ? { pendingActors: list(flags['pending-actor']) } : {}),
+        ...(onTimeoutOf(flags['on-timeout']) !== undefined ? { onTimeout: onTimeoutOf(flags['on-timeout']) } : {}),
         dataDir: dataDirFlag,
         effectiveDataDir: dataDir,
         node: process.execPath,
@@ -159,7 +177,7 @@ export async function runShimCli(cmd: 'pulse' | 'shim', argv: string[]): Promise
       else {
         process.stdout.write(
           `installed ${r.tools.length} shim(s) in ${r.dir}: ${r.tools.join(', ')}\n` +
-            `mode ${r.mode}; data dir ${r.data_dir || `${dataDir} (default)`}; ${r.baseline_seq !== null ? `checks start at seq ${r.baseline_seq}` : 'no store yet'}\n` +
+            `mode ${r.mode}; on timeout ${r.on_timeout}; data dir ${r.data_dir || `${dataDir} (default)`}; ${r.baseline_seq !== null ? `checks start at seq ${r.baseline_seq}` : 'no store yet'}\n` +
             (r.first_on_path ? 'the shim dir is first on PATH\n' : `put it FIRST on PATH (shell profile, and each agent's environment):\n  ${r.path_hint}\n`),
         );
       }
@@ -187,7 +205,7 @@ export async function runShimCli(cmd: 'pulse' | 'shim', argv: string[]): Promise
         return 1;
       }
       const c = r.config!;
-      const lines = [`shims in ${r.dir}: mode ${c.mode}; ${c.pending_actors && c.pending_actors.length > 0 ? `pending actor(s) ${c.pending_actors.join(', ')}` : 'pending actors: each change\'s readers'}; data dir ${r.store.data_dir}${r.store.exists ? ` (head seq ${r.store.head_seq ?? '?'})` : ' (no store: fail open)'}`];
+      const lines = [`shims in ${r.dir}: mode ${c.mode}; on timeout ${c.on_timeout ?? 'allow'}; ${c.pending_actors && c.pending_actors.length > 0 ? `pending actor(s) ${c.pending_actors.join(', ')}` : 'pending actors: each change\'s readers'}; data dir ${r.store.data_dir}${r.store.exists ? ` (head seq ${r.store.head_seq ?? '?'})` : ' (no store: fail open)'}`];
       for (const t of r.tools) {
         lines.push(
           `  ${t.tool.padEnd(10)} ${t.active ? 'active ' : 'INACTIVE'} real: ${t.real ?? 'NOT FOUND'}${t.active ? '' : `; PATH runs ${t.first_on_path ?? 'nothing'} first`}`,

@@ -84,9 +84,20 @@ uses semantic versioning once past 0.x.
   (~0.2 s) and are refused with exit 77 and the retraction diff on stderr
   while a blocking retraction is unreconciled. `kronicle-lite shim ack
   --through SEQ` clears the gate per project, never past SEQ.
-- Fail open (noted once, logged) when kronicle-lite is missing, broken or
-  times out (`KRONICLE_SHIM_TIMEOUT`, default 10 s); fail closed on a store
-  integrity failure, in warn mode too. Real binary resolved on PATH minus
+- Fail open (noted once, logged) when kronicle-lite is missing or broken;
+  fail closed on a store integrity failure, in warn mode too.
+- A check that times out (`KRONICLE_SHIM_TIMEOUT`, default 10 s) is a
+  safety check that did not happen, so it is never quiet: every occurrence
+  prints ``kronicle-lite check TIMED OUT after Ns — `<cmd>` was NOT
+  checked; see .kronicle-shim/shim.log``. `shim install --on-timeout
+  allow|deny` (stored in the config, baked into the wrappers): `allow`, the
+  default, runs the command; `deny` refuses it with exit 77. In the
+  agent-memory-bench S16 runs about 1 call in 80 hit the 10 s timeout and
+  ran unchecked; root cause still open.
+- `shim.log` records every world-changing call: the wrapper's `check <ms>
+  outcome=… rc=…` and the check's own `pulse(node) boot / open / check /
+  total` milliseconds, so slow checks can be split into node start-up,
+  store open (SQLite lock waits) and the check itself. Real binary resolved on PATH minus
   the shim dir; self-recursion guarded (same-process exec chain via
   `KRONICLE_SHIM_EXEC`, nesting depth 8 via `KRONICLE_SHIM_DEPTH`).
   Install refuses system directories, non-shim files and symlinks;
@@ -157,8 +168,13 @@ uses semantic versioning once past 0.x.
   Catalog re-pinned for 0.8.0:
   `2e47e0a7236e8640cea65a10228f1cf7b8e4602226635ad50cb35e6bbfca9d40` (full),
   `65245f5a33d781ba611716bc18cd42234088e874e95d67f6676ba8ec799a1611` (core).
-- The POSIX shim wrapper tests are skipped on Windows (sh fake binaries);
-  the `pulse` CLI contract runs everywhere. 488 tests.
+- The POSIX shim wrapper tests and the generated-sh decision run are
+  skipped on Windows (no POSIX shell; its wrappers are `.cmd`/`.ps1` →
+  `shim exec`); the `pulse` CLI contract and the TypeScript decision table
+  run everywhere. The "exits 127" test no longer assumes `kubectl` is
+  absent from the system PATH (CI images ship one).
+- Docs: stale "(unreleased)" labels for 0.6.0 / 0.7.0 features fixed
+  (FORMAT §§3.2, 3.7–3.9, §6, README).
 - Tests: `test/lineage.test.ts` (unit, including the inference bounds:
   24 h / 200 blocks, truncation flag, session bound, lineage dedupe), `test/lineage-cli.test.ts` (CLI and
   MCP contract), `test/lineage-property.test.ts` (seeded: 60 random

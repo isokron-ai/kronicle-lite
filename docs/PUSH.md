@@ -208,7 +208,8 @@ a CI script or a human.
 ```sh
 kronicle-lite shim install [--dir D] [--commands git,terraform,tofu,kubectl,helm,npm,pnpm,yarn]
                            [--world "make release,docker push,gh release create"]
-                           [--data-dir DIR] [--mode deny|warn] [--pending-actor A[,B]] [--windows]
+                           [--data-dir DIR] [--mode deny|warn] [--pending-actor A[,B]]
+                           [--on-timeout allow|deny] [--windows]
 export PATH="D:$PATH"          # D FIRST on PATH (default D: ~/.kronicle-lite/shims)
 kronicle-lite shim status      # per tool: active on PATH? real binary? anything blocking in this project?
 kronicle-lite shim ack --through SEQ   # manual override: clear a denial without re-reading (the denial prints SEQ)
@@ -238,7 +239,25 @@ and never writes through a symlink.
 |---|---|
 | exit 0 (allow, warn, first check) | runs the command |
 | exit 77 (unreconciled retractions, or an integrity failure) | refuses: exit 77, nothing runs |
-| anything else: no store (exit 3), CLI missing, crash, timeout (124/137/142) | **fail open**: runs the command; one line on stderr the first time (`D/.kronicle-shim/unavailable` marks it; cleared on the next good check), every occurrence logged in `D/.kronicle-shim/shim.log`, the reason in `last-error` |
+| timeout (124/137/142: no answer within `KRONICLE_SHIM_TIMEOUT` s) | **loud, every time**: ``kronicle-lite check TIMED OUT after Ns — `<cmd>` was NOT checked; see D/.kronicle-shim/shim.log`` on stderr. `--on-timeout allow` (the default, for compatibility): runs the command. `--on-timeout deny`: refuses it, exit 77 (``… was NOT checked and NOT run (--on-timeout deny)``) |
+| anything else: no store (exit 3), CLI missing, crash | **fail open**: runs the command; one line on stderr the first time (`D/.kronicle-shim/unavailable` marks it; cleared on the next good check), every occurrence logged in `D/.kronicle-shim/shim.log`, the reason in `last-error` |
+
+A timeout is a safety check that did not happen, so it is never quiet. Pick
+`--on-timeout deny` where an unchecked deploy is worse than a refused one
+(CI, production pipelines); `allow` keeps a slow or wedged store from
+stopping work. `--on-timeout` is baked into the wrappers and stored in the
+shim config; re-run `shim install` to change it. The Windows wrappers check
+in-process (`shim exec`) with no timeout.
+
+**`shim.log`** gets one line per world-changing call, for diagnosing slow
+checks: from the wrapper, `<time> <tool> check <ms>ms outcome=allow|deny|
+timeout-allow|timeout-deny|unavailable|failed rc=<exit>` (wall time of the
+whole check, node start-up included), and from the check itself, `<time>
+<tool> pulse(node) boot <ms>ms open <ms>ms check <ms>ms total <ms>ms
+decision=… reason=… head=<seq>` (boot = node start-up and module load, open =
+opening the store, including any SQLite lock wait). A timed-out call has a
+`check` line and no `pulse(node)` line; comparing the two tells start-up,
+lock waits and the check itself apart. Plus the `fail-open:` lines above.
 
 An **integrity failure** (an event or live block no longer matches the
 chain) refuses world-changing commands in `deny` **and** `warn` mode: fail

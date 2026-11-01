@@ -124,6 +124,8 @@ export interface ShimParams {
   /** '' = kronicle-lite's default ($KRONICLE_LITE_DATA_DIR or ~/.kronicle-lite) at run time. */
   dataDir: string;
   mode: 'deny' | 'warn';
+  /** What a check that times out does: run the command anyway (allow, the default) or refuse it (deny, exit 77). */
+  onTimeout?: 'allow' | 'deny';
   version: string;
 }
 
@@ -137,13 +139,16 @@ export function posixShim(p: ShimParams): string {
 # Read-only invocations exec the real ${p.tool} at once. World-changing ones run
 # \`kronicle-lite pulse\` first: exit 77 = refused (unreconciled retractions or a
 # store integrity failure; the reason is on stderr). kronicle-lite unavailable
-# (missing, broken, timed out) = fail open, noted once on stderr.
+# (missing, broken) = fail open, noted once on stderr. A check that TIMES OUT is
+# reported on stderr every time and, with --on-timeout deny, refused (exit 77).
+# Every world-changing call is logged with its check time in .kronicle-shim/shim.log.
 kl_t=${shq(p.tool)}
 kl_state=${shq(p.stateDir)}
 kl_node=${shq(p.node)}
 kl_cli=${shq(p.cli)}
 kl_data=${shq(p.dataDir)}
 kl_mode=${shq(p.mode)}
+kl_onto=${shq(p.onTimeout ?? 'allow')}
 case \${KRONICLE_SHIM_DEPTH-0} in ''|*[!0-9]*) kl_depth=0;; *) kl_depth=\${KRONICLE_SHIM_DEPTH-0};; esac
 if [ "$kl_depth" -ge ${MAX_DEPTH} ]; then
   printf '%s\\n' "kronicle-lite shim: $kl_t reached the shims ${MAX_DEPTH} times in nested calls; stopping (does a wrapper named $kl_t call $kl_t again?)" >&2
@@ -182,7 +187,19 @@ kl_unavailable() {
   fi
 }
 
+kl_now_ms() {
+  kl_ns=$(date +%s%N 2>/dev/null)
+  case $kl_ns in ''|*[!0-9]*) kl_ns=$(date +%s 2>/dev/null)000;; *) kl_ns=\${kl_ns%??????};; esac
+  printf '%s' "$kl_ns"
+}
+
+kl_log() {
+  kl_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
+  printf '%s %s %s\\n' "$kl_ts" "$kl_t" "$1" >> "$kl_state/shim.log" 2>/dev/null
+}
+
 kl_pulse() {
+  kl_cmd="$kl_t\${*:+ $*}"
   kl_p=
   set -f; IFS=:
   for kl_d in $PATH; do
@@ -209,14 +226,24 @@ kl_pulse() {
     kl_pl=$(command -v perl 2>/dev/null)
     [ -z "$kl_pl" ] || set -- "$kl_pl" -e 'alarm shift @ARGV; exec @ARGV or exit 127' "$kl_to" "$@"
   fi
+  kl_t0=$(kl_now_ms)
   PATH=$kl_p "$@"
   kl_rc=$?
+  kl_ms=$(( $(kl_now_ms) - kl_t0 ))
   case $kl_rc in
-    0) [ ! -e "$kl_state/unavailable" ] || rm -f "$kl_state/unavailable"; return 0;;
-    77) [ ! -e "$kl_state/unavailable" ] || rm -f "$kl_state/unavailable"; exit 77;;
-    3) kl_unavailable "kronicle-lite store unavailable (see $kl_state/last-error)"; return 0;;
-    124|137|142) kl_unavailable "kronicle-lite pulse timed out after \${kl_to}s"; return 0;;
-    *) kl_unavailable "kronicle-lite pulse failed (exit $kl_rc)"; return 0;;
+    0) kl_log "check \${kl_ms}ms outcome=allow rc=0"; [ ! -e "$kl_state/unavailable" ] || rm -f "$kl_state/unavailable"; return 0;;
+    77) kl_log "check \${kl_ms}ms outcome=deny rc=77"; [ ! -e "$kl_state/unavailable" ] || rm -f "$kl_state/unavailable"; exit 77;;
+    3) kl_log "check \${kl_ms}ms outcome=unavailable rc=3"; kl_unavailable "kronicle-lite store unavailable (see $kl_state/last-error)"; return 0;;
+    124|137|142)
+      if [ "$kl_onto" = deny ]; then
+        kl_log "check \${kl_ms}ms outcome=timeout-deny rc=$kl_rc timeout=\${kl_to}s"
+        printf '%s\\n' "kronicle-lite check TIMED OUT after \${kl_to}s — \\\`$kl_cmd\\\` was NOT checked and NOT run (--on-timeout deny); see $kl_state/shim.log" >&2
+        exit 77
+      fi
+      kl_log "check \${kl_ms}ms outcome=timeout-allow rc=$kl_rc timeout=\${kl_to}s"
+      printf '%s\\n' "kronicle-lite check TIMED OUT after \${kl_to}s — \\\`$kl_cmd\\\` was NOT checked; see $kl_state/shim.log" >&2
+      return 0;;
+    *) kl_log "check \${kl_ms}ms outcome=failed rc=$kl_rc"; kl_unavailable "kronicle-lite pulse failed (exit $kl_rc)"; return 0;;
   esac
 }
 

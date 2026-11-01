@@ -163,7 +163,8 @@ describe('shim decision table', () => {
     for (const sh of uniqueShells) expect(shDecision(sh, tool, args, patterns), sh).toBe(world);
   });
 
-  it('runs the sh side under at least one POSIX shell', () => {
+  // Windows has no POSIX shell to run the generated sh (its wrappers are .cmd/.ps1 → `shim exec`, the TypeScript side checked above).
+  it.skipIf(process.platform === 'win32')('runs the sh side under at least one POSIX shell', () => {
     expect(uniqueShells.length).toBeGreaterThan(0);
   });
 

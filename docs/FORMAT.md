@@ -165,7 +165,7 @@ content_hash = hex( BLAKE3-256( utf8(block_content) ) )
 Example: `BLAKE3("Use blue/green for the API.") =
 22dc95c8312b3e93aa2a15d4be929b7fbabb3a5e0a624a94196e6355557507f0`.
 
-The heading path is not part of the content hash. Unreleased: a block whose
+The heading path is not part of the content hash. Since 0.7.0, a block whose
 heading path changes (moved to another section, or an ancestor heading
 renamed or re-levelled) is superseded on re-put by a block with the same
 text, because "Allowed › X" and "Forbidden › X" mean different things.
@@ -174,12 +174,12 @@ text, because "Allowed › X" and "Forbidden › X" mean different things.
 
 | event_type | payload fields |
 |---|---|
-| `document.put` | `doc_id, slug, title, revision, markdown, markdown_hash (BLAKE3), block_ids[], carried[{block_id, ordinal, heading_path}]`, optional `source` (0.4.0, §3.4), optional `project` (unreleased, §3.7), optional `derived_from[]` / `derived_from_inferred[]` / `derived_from_inferred_truncated` (0.8.0, §3.10) |
+| `document.put` | `doc_id, slug, title, revision, markdown, markdown_hash (BLAKE3), block_ids[], carried[{block_id, ordinal, heading_path}]`, optional `source` (0.4.0, §3.4), optional `project` (0.7.0, §3.7), optional `derived_from[]` / `derived_from_inferred[]` / `derived_from_inferred_truncated` (0.8.0, §3.10) |
 | `document.revised` | `doc_id, slug, title, revision, markdown, markdown_hash, cause` |
 | `block.created` | `block_id, doc_id, doc_slug, revision, ordinal, kind, level, heading_path[], content, content_hash`; from `supersede_block`, optional `derived_from[]` / `derived_from_inferred[]` / `derived_from_inferred_truncated` (0.8.0, §3.10) |
 | `block.superseded` | `block_id, successor_block_id, doc_id, doc_slug, revision, reason` |
 | `block.tombstoned` | `block_id, doc_id, doc_slug, revision, reason` |
-| `document.renamed` (0.5.0) | `doc_id, from_slug, slug, revision, reason` — same document, new slug; revisions and blocks are keyed by `doc_id` and carry over. Unreleased: also written when an instruction file moves inside its project with its content intact (`reason: "moved: <old path> → <new path> (same content)"`), followed by a `document.put` recording the new `source.path` with every block carried |
+| `document.renamed` (0.5.0) | `doc_id, from_slug, slug, revision, reason` — same document, new slug; revisions and blocks are keyed by `doc_id` and carry over. Since 0.7.0, also written when an instruction file moves inside its project with its content intact (`reason: "moved: <old path> → <new path> (same content)"`), followed by a `document.put` recording the new `source.path` with every block carried |
 
 Block content and document markdown live in the chain, so the chain alone
 rebuilds the tables (`kronicle-lite import`, `kronicle-lite rebuild`).
@@ -192,7 +192,7 @@ On a re-put, live blocks are compared to the freshly parsed set:
 
 1. same `(kind, content_hash, heading_path)` → **carried** (block id kept,
    position updated); a reorder of whole sections carries;
-1b. (unreleased) same `(kind, content_hash)` under a different
+1b. (0.7.0) same `(kind, content_hash)` under a different
    `heading_path` → old is **superseded** by an identical-text block under
    the new path (orient: `new_heading_path`, a `section: [-old-]{+new+}`
    diff, "MOVED to …");
@@ -313,7 +313,7 @@ before serving them. The whole-projection check replays every event into an
 empty schema and compares `documents`, `document_revisions`, `blocks` and
 `doc_sources` column by column, then re-hashes every block and revision.
 
-### 3.7 Document projects (unreleased, additive)
+### 3.7 Document projects (0.7.0, additive)
 
 `document.put` may carry `project: {key, root}` (same recipe as the
 instruction project key, §3.4): the MCP `put_document` tool and the CLI
@@ -332,7 +332,7 @@ counted in `scope.hidden_retractions`). Documents with no project (every
 put made before this field existed) stay visible from every project.
 `all_projects: true` / `--all-projects` turns scoping off.
 
-### 3.8 Format-only edits (unreleased)
+### 3.8 Format-only edits (0.7.0)
 
 Orient classifies each supersession whose old and new block text it still
 has (`src/orient/cosmetic.ts`). An edit is **format-only** when both texts
@@ -362,7 +362,7 @@ one edit away); the hint never changes severity, delivery or the reconcile
 instruction. Nothing on the chain differs: the classification is a
 read-time view.
 
-### 3.9 Unreadable events (unreleased)
+### 3.9 Unreadable events (0.7.0)
 
 An event whose stored `payload_canonical` is not a JSON object (a hand edit,
 a torn page) is read with an empty payload instead of throwing. `verify()`
@@ -517,7 +517,7 @@ by holding one.
 <data-dir>/cursor-secret       64 hex chars, mode 0600
 ```
 
-Unreleased: the key, the secret and `http-bearer.token` are created with
+Since 0.7.0, the key, the secret and `http-bearer.token` are created with
 `link(tmp, path)` (create-if-absent with the full content), so processes
 starting together on a fresh data dir agree on one identity; a reader that
 finds a short or invalid file (an older writer mid-write) re-reads it for up

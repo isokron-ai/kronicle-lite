@@ -254,7 +254,11 @@ describe.skipIf(!POSIX)('shim wrapper: PATH resolution and recursion guard', () 
 
   it('exits 127 when the real binary is not on PATH', () => {
     const r = rig({ tools: ['kubectl'] });
-    const res = spawnSync(join(r.shims, 'kubectl'), ['get'], { cwd: r.proj, env: cleanEnv({ PATH: `${r.shims}:${SYS_PATH}` }), encoding: 'utf8' });
+    // PATH = the shim dir and an empty dir only: CI images ship a real kubectl in /usr/local/bin.
+    // The read-only path needs no external command (shell builtins only).
+    const empty = join(r.root, 'empty');
+    mkdirSync(empty);
+    const res = spawnSync(join(r.shims, 'kubectl'), ['get'], { cwd: r.proj, env: cleanEnv({ PATH: `${r.shims}:${empty}` }), encoding: 'utf8' });
     expect(res.status).toBe(127);
     expect(res.stderr).toMatch(/kubectl: command not found on PATH \(outside the shim dir\)/);
   });
@@ -346,7 +350,8 @@ describe.skipIf(!POSIX)('shim wrapper: world-changing path (real CLI)', () => {
     expect(b.status).toBe(0);
     expect(b.stderr).toBe('');
     const log = readFileSync(join(r.shims, '.kronicle-shim', 'shim.log'), 'utf8').trim().split('\n');
-    expect(log).toHaveLength(2);
+    expect(log.filter((l) => l.includes('fail-open:'))).toHaveLength(2);
+    expect(log.filter((l) => / terraform check \d+ms outcome=unavailable rc=3$/.test(l))).toHaveLength(2);
     expect(calls(r)).toHaveLength(2);
     // once a store exists the note is re-armed and the check works
     putRunbook(r, 'prod-a');
@@ -378,8 +383,67 @@ describe.skipIf(!POSIX)('shim wrapper: world-changing path (real CLI)', () => {
     const b = spawnSync('terraform', ['apply'], { cwd: root, env: { ...env, KRONICLE_SHIM_TIMEOUT: '1' }, encoding: 'utf8', timeout: 20_000 });
     expect(b.status).toBe(0);
     expect(Date.now() - t0).toBeLessThan(8_000);
-    expect(readFileSync(join(shims, '.kronicle-shim', 'shim.log'), 'utf8')).toMatch(/timed out after 1s/);
+    expect(readFileSync(join(shims, '.kronicle-shim', 'shim.log'), 'utf8')).toMatch(/ terraform check \d+ms outcome=timeout-allow rc=12[4-9] timeout=1s\n/);
     expect(readFileSync(log, 'utf8').split('\n').filter(Boolean)).toHaveLength(2);
+    // loud on EVERY timeout, not only the first (unlike the other fail-open notes)
+    const msg = /^kronicle-lite check TIMED OUT after 1s — `terraform apply -auto-approve` was NOT checked; see .*\.kronicle-shim\/shim\.log$/m;
+    for (let i = 0; i < 2; i++) {
+      const c = spawnSync('terraform', ['apply', '-auto-approve'], { cwd: root, env: { ...env, KRONICLE_SHIM_TIMEOUT: '1' }, encoding: 'utf8', timeout: 20_000 });
+      expect(c.status).toBe(0);
+      expect(c.stderr).toMatch(msg);
+    }
+    expect(readFileSync(log, 'utf8').split('\n').filter(Boolean)).toHaveLength(4);
+    expect(readFileSync(join(shims, '.kronicle-shim', 'shim.log'), 'utf8').match(/outcome=timeout-allow/g)).toHaveLength(3);
+  });
+
+  it('--on-timeout deny: a check that times out refuses the command (exit 77), loudly, every time', () => {
+    const root = tempDir('kl-shim-fake-');
+    const bin = join(root, 'bin');
+    const log = join(root, 'calls.log');
+    writeFileSync(log, '');
+    mkdirSync(bin);
+    fakeBin(bin, 'terraform', log);
+    const shims = join(root, 'shims');
+    const hang = join(root, 'hang.js');
+    writeFileSync(hang, 'setTimeout(() => {}, 60_000);\n');
+    const rep = install({ dir: shims, commands: ['terraform'], effectiveDataDir: join(root, 'nodata'), dataDir: join(root, 'nodata'), node: process.execPath, version: VERSION, path: bin, cli: hang, onTimeout: 'deny' });
+    expect(rep.on_timeout).toBe('deny');
+    expect(JSON.parse(readFileSync(join(shims, '.kronicle-shim', 'config.json'), 'utf8')).on_timeout).toBe('deny');
+    const env = cleanEnv({ PATH: `${shims}:${bin}:${SYS_PATH}`, KRONICLE_SHIM_TIMEOUT: '1' });
+    for (let i = 0; i < 2; i++) {
+      const a = spawnSync('terraform', ['apply'], { cwd: root, env, encoding: 'utf8', timeout: 20_000 });
+      expect(a.status).toBe(77);
+      expect(a.stdout).toBe('');
+      expect(a.stderr).toMatch(/^kronicle-lite check TIMED OUT after 1s — `terraform apply` was NOT checked and NOT run \(--on-timeout deny\); see .*shim\.log$/m);
+    }
+    expect(readFileSync(log, 'utf8')).toBe(''); // nothing ran
+    expect(spawnSync('terraform', ['plan'], { cwd: root, env, encoding: 'utf8' }).status).toBe(0); // read-only still runs
+    expect(readFileSync(join(shims, '.kronicle-shim', 'shim.log'), 'utf8').match(/ terraform check \d+ms outcome=timeout-deny rc=12[4-9] timeout=1s/g)).toHaveLength(2);
+    // the CLI flag, and its validation
+    const cli = kl(['shim', 'install', '--dir', join(root, 'shims2'), '--data-dir', join(root, 'nodata'), '--commands', 'terraform', '--on-timeout', 'deny', '--json']);
+    expect(cli.status, cli.stderr).toBe(0);
+    expect(JSON.parse(cli.stdout).on_timeout).toBe('deny');
+    expect(readFileSync(join(root, 'shims2', 'terraform'), 'utf8')).toContain("kl_onto='deny'");
+    expect(kl(['shim', 'install', '--dir', join(root, 'shims3'), '--on-timeout', 'maybe']).status).not.toBe(0);
+    // default stays allow (compatibility)
+    const d = kl(['shim', 'install', '--dir', join(root, 'shims4'), '--data-dir', join(root, 'nodata'), '--commands', 'terraform', '--json']);
+    expect(JSON.parse(d.stdout).on_timeout).toBe('allow');
+  });
+
+  it('shim.log records the check time and outcome of every world-changing call (shell side and node side)', () => {
+    const r = rig({ tools: ['terraform'] });
+    expect(run(r, ['terraform', 'apply']).status).toBe(0);
+    expect(run(r, ['terraform', 'plan']).status).toBe(0); // read-only: not logged
+    putRunbook(r, 'prod-b');
+    expect(run(r, ['terraform', 'destroy']).status).toBe(77);
+    const lines = readFileSync(join(r.shims, '.kronicle-shim', 'shim.log'), 'utf8').trim().split('\n');
+    const shell = lines.filter((l) => / terraform check /.test(l));
+    expect(shell).toHaveLength(2);
+    expect(shell[0]).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ terraform check \d+ms outcome=allow rc=0$/);
+    expect(shell[1]).toMatch(/ terraform check \d+ms outcome=deny rc=77$/);
+    const node = lines.filter((l) => /pulse\(node\)/.test(l));
+    expect(node).toHaveLength(2);
+    expect(node[1]).toMatch(/ terraform pulse\(node\) boot \d+ms open \d+ms check \d+ms total \d+ms decision=deny reason=retractions head=\d+$/);
   });
 
   it('a deny from the check is the only thing that stops the command (exit 77 from pulse only)', () => {

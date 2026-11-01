@@ -60,6 +60,8 @@ export interface ShimConfig {
   mode: PulseMode;
   /** Whose current-version reads reconcile a change (absent: each change's readers). */
   pending_actors?: string[];
+  /** A check that times out: run the command (allow, the default when absent) or refuse it (deny). */
+  on_timeout?: 'allow' | 'deny';
   /** '' = kronicle-lite's default data dir at run time. */
   data_dir: string;
   node: string;
@@ -207,6 +209,8 @@ export interface InstallOptions {
   mode?: PulseMode | undefined;
   /** Whose reads reconcile a change (stored in the config; pulse reads it). */
   pendingActors?: string[] | undefined;
+  /** A check that times out: allow (default) or deny. Baked into the wrappers and stored in the config. */
+  onTimeout?: 'allow' | 'deny' | undefined;
   /** Explicit data dir to embed (undefined: kronicle-lite's default at run time). */
   dataDir?: string | undefined;
   /** Data dir to seed the baseline from (the explicit one, or the default). */
@@ -227,6 +231,7 @@ export interface InstallReport {
   tools: string[];
   files: string[];
   mode: PulseMode;
+  on_timeout: 'allow' | 'deny';
   data_dir: string;
   baseline_seq: number | null;
   first_on_path: boolean;
@@ -274,6 +279,7 @@ export function install(o: InstallOptions): InstallReport {
       cli: o.cli,
       dataDir: o.dataDir ?? '',
       mode,
+      onTimeout: o.onTimeout ?? 'allow',
       version: o.version,
     };
     if (posix) planned.push({ file: join(dir, tool), text: posixShim(params), mode: 0o755 });
@@ -312,6 +318,7 @@ export function install(o: InstallOptions): InstallReport {
     world: o.world ?? [],
     mode,
     ...(o.pendingActors && o.pendingActors.length > 0 ? { pending_actors: o.pendingActors } : {}),
+    on_timeout: o.onTimeout ?? 'allow',
     data_dir: o.dataDir ?? '',
     node: o.node,
     cli: o.cli,
@@ -333,6 +340,7 @@ export function install(o: InstallOptions): InstallReport {
     tools,
     files: planned.map((p) => p.file),
     mode,
+    on_timeout: o.onTimeout ?? 'allow',
     data_dir: o.dataDir ?? '',
     baseline_seq: baseline,
     first_on_path: first,
@@ -485,6 +493,16 @@ export function decide(dir: string, tool: string, args: readonly string[]): Clas
   return classify(specFor(tool, patterns.get(tool) ?? []), args);
 }
 
+/** One line in <state>/shim.log (never throws). */
+export function shimLog(stateDir: string, tool: string, text: string): void {
+  try {
+    mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(stateDir, 'shim.log'), `${new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')} ${tool} ${text}\n`, { flag: 'a' });
+  } catch {
+    // logging must never block the command
+  }
+}
+
 function logOnce(stateDir: string, tool: string, reason: string): void {
   try {
     mkdirSync(stateDir, { recursive: true, mode: 0o700 });
@@ -518,6 +536,7 @@ export function execShim(dirIn: string, tool: string, args: string[], opts: { de
   const c = decide(dir, tool, args);
   if (c.world && config) {
     const dataDir = config.data_dir || opts.defaultDataDir;
+    const t0 = Date.now();
     try {
       const store = openForPulse(dataDir);
       let r: PulseResult;
@@ -526,6 +545,7 @@ export function execShim(dirIn: string, tool: string, args: string[], opts: { de
       } finally {
         store.close();
       }
+      shimLog(state, tool, `check ${Date.now() - t0}ms outcome=${r.decision === 'deny' ? 'deny' : 'allow'} rc=${r.decision === 'deny' ? PULSE_DENY_EXIT : 0} (in-process)`);
       if (r.message) process.stderr.write(r.message + '\n');
       try {
         rmSync(join(state, 'unavailable'), { force: true });
@@ -534,6 +554,7 @@ export function execShim(dirIn: string, tool: string, args: string[], opts: { de
       }
       if (r.decision === 'deny') return PULSE_DENY_EXIT;
     } catch (err) {
+      shimLog(state, tool, `check ${Date.now() - t0}ms outcome=failed (in-process)`);
       logOnce(state, tool, err instanceof Error ? err.message : String(err));
     }
   }

@@ -52,7 +52,7 @@ holding an API key is refused before anything is chained, an empty recall
 answers `absent_in_searched` with the scopes it did not search, and an edit
 to the chain itself is caught at its seq.
 
-> **0.6.0 — honest labels** (unreleased). Every `recall` hit carries
+> **0.6.0 — honest labels**. Every `recall` hit carries
 > `authority: can_act | inspect_only | never_act` with a reason; only
 > block-level evidence (the block's exact text found, now, in its recorded
 > source file) reaches `can_act`; superseded, tombstoned, withheld and drifted
@@ -477,8 +477,12 @@ re-read: `shim install --pending-actor <agent>`, else everyone who read the
 changed block. `kronicle-lite shim ack --through SEQ` stays as a manual
 override. `--mode warn` prints the same and runs the command. A store that fails its
 integrity check refuses world-changing commands in both modes (fail
-closed); a missing, broken or hung kronicle-lite lets them run (fail open,
-noted once on stderr, logged in `.kronicle-shim/shim.log`). Matching rules,
+closed); a missing or broken kronicle-lite lets them run (fail open, noted
+once on stderr, logged in `.kronicle-shim/shim.log`). A check that times out
+(`KRONICLE_SHIM_TIMEOUT`, default 10 s) prints `kronicle-lite check TIMED
+OUT … was NOT checked` on every occurrence and runs the command, or refuses
+it with exit 77 under `shim install --on-timeout deny`. Every world-changing
+call's check time and outcome go to `shim.log`. Matching rules,
 recursion guard, reconciliation, per-project acknowledgement and client snippets:
 [docs/PUSH.md § Shims](docs/PUSH.md#shims-exec-time-pulse-for-any-client).
 
