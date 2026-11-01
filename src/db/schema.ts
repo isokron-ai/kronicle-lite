@@ -237,4 +237,10 @@ CREATE INDEX IF NOT EXISTS reads_actor_idx ON reads (actor_id, read_at);
 CREATE INDEX IF NOT EXISTS reads_actor_block_idx ON reads (actor_id, block_id);
 -- Unreleased: walk a supersession lineage backwards (format-only predecessors).
 CREATE INDEX IF NOT EXISTS blocks_superseded_by_idx ON blocks (superseded_by) WHERE superseded_by IS NOT NULL;
+-- Unreleased: the event that retired a block (lineage change seqs; chainRetired). The
+-- expression tolerates an unparseable payload (FORMAT §3.9), so opening a damaged store
+-- never fails on it. An index, not chain data: no hash covers it.
+CREATE INDEX IF NOT EXISTS events_retired_block_idx
+  ON events ((CASE WHEN json_valid(payload_canonical) THEN json_extract(payload_canonical, '$.block_id') END))
+  WHERE event_type IN ('block.superseded', 'block.tombstoned');
 `;

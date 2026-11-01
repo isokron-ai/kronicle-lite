@@ -27,8 +27,11 @@
  * versions are the same (AST-equivalent, identical text leaves).
  */
 
+import type BetterSqlite3 from 'better-sqlite3';
+
 import type { Chain } from '../chain/index.js';
 import type { Db } from '../db/open.js';
+type Statement = BetterSqlite3.Statement<unknown[]>;
 import { isInstructionSlug, splitHeadingPath, type BlockRow, type DocumentStore } from '../docs/documents.js';
 import { classifyEdit } from '../orient/cosmetic.js';
 import { snippet, wordDiff } from '../orient/textdiff.js';
@@ -113,12 +116,23 @@ const MAX_DERIVED_DEPTH = 4;
 
 export class Lineage {
   private readonly hopMemo = new Map<string, boolean>();
+  private readonly stmts = new Map<string, Statement>();
 
   constructor(
     private readonly db: Db,
     private readonly chain: Chain,
     private readonly docs: DocumentStore,
   ) {}
+
+  /** Prepared statements are reused: preparing dominated pending() on a 300-document store. */
+  private q(sql: string): Statement {
+    let st = this.stmts.get(sql);
+    if (!st) {
+      st = this.db.prepare(sql);
+      this.stmts.set(sql, st);
+    }
+    return st;
+  }
 
   // ───────────────────────────── versions ─────────────────────────────
 
@@ -134,7 +148,15 @@ export class Lineage {
   }
 
   walk(block_id: string): Walk | null {
-    const blocks = this.docs.supersessionWalk(block_id);
+    const blocks = this.q(
+      `WITH RECURSIVE lineage(block_id, depth) AS (
+         SELECT ?, 0
+         UNION ALL
+         SELECT b.superseded_by, l.depth + 1 FROM blocks b JOIN lineage l ON b.block_id = l.block_id
+          WHERE b.superseded_by IS NOT NULL AND l.depth < 10000
+       )
+       SELECT b.* FROM lineage l JOIN blocks b ON b.block_id = l.block_id ORDER BY l.depth ASC`,
+    ).all(block_id) as BlockRow[];
     if (blocks.length === 0) return null;
     const head = blocks[blocks.length - 1]!;
     const live = head.valid_to === null && head.tombstoned_at === null;
@@ -148,8 +170,7 @@ export class Lineage {
 
   /** Seq of the event that retired a block (block.superseded / block.tombstoned), or null. */
   retireSeq(block_id: string): number | null {
-    const r = this.db
-      .prepare(
+    const r = this.q(
         `SELECT seq FROM events WHERE event_type IN ('block.superseded', 'block.tombstoned')
            AND CASE WHEN json_valid(payload_canonical) THEN json_extract(payload_canonical, '$.block_id') END = ?
          ORDER BY seq LIMIT 1`,
@@ -170,25 +191,24 @@ export class Lineage {
   }
 
   private slugOf(doc_id: string): string | null {
-    return this.docs.getDocumentById(doc_id)?.slug ?? null;
+    return (this.q(`SELECT slug FROM documents WHERE doc_id = ?`).get(doc_id) as { slug: string } | undefined)?.slug ?? null;
   }
 
   // ───────────────────────────── derived notes ─────────────────────────────
 
   /** Lineage edges recorded for a document (explicit and inferred). */
   edges(doc_id: string): { source_block_id: string; source_content_hash: string; inferred: number; chain_seq: number }[] {
-    return this.db
-      .prepare(`SELECT source_block_id, source_content_hash, inferred, chain_seq FROM doc_lineage WHERE doc_id = ? ORDER BY chain_seq, source_block_id, inferred`)
+    return this.q(`SELECT source_block_id, source_content_hash, inferred, chain_seq FROM doc_lineage WHERE doc_id = ? ORDER BY chain_seq, source_block_id, inferred`)
       .all(doc_id) as { source_block_id: string; source_content_hash: string; inferred: number; chain_seq: number }[];
   }
 
   /** Any lineage recorded at all (cheap; lets orient skip the derived pass on stores without notes). */
   anyLineage(): boolean {
-    return this.db.prepare(`SELECT 1 FROM doc_lineage LIMIT 1`).get() !== undefined;
+    return this.q(`SELECT 1 FROM doc_lineage LIMIT 1`).get() !== undefined;
   }
 
   hasLineage(doc_id: string): boolean {
-    return this.db.prepare(`SELECT 1 FROM doc_lineage WHERE doc_id = ? LIMIT 1`).get(doc_id) !== undefined;
+    return this.q(`SELECT 1 FROM doc_lineage WHERE doc_id = ? LIMIT 1`).get(doc_id) !== undefined;
   }
 
   /**
@@ -278,14 +298,13 @@ export class Lineage {
     const ids = [block_id];
     let cur = block_id;
     for (let i = 0; i < 10_000; i++) {
-      const prev = this.db.prepare(`SELECT * FROM blocks WHERE superseded_by = ?`).get(cur) as BlockRow | undefined;
+      const prev = this.q(`SELECT * FROM blocks WHERE superseded_by = ?`).get(cur) as BlockRow | undefined;
       const curRow = this.docs.getBlock(cur);
       if (!prev || !curRow || !this.hopFormatOnly(prev, curRow)) break;
       ids.push(prev.block_id);
       cur = prev.block_id;
     }
-    const rows = this.db
-      .prepare(`SELECT DISTINCT doc_id FROM doc_lineage WHERE source_block_id IN (${ids.map(() => '?').join(', ')}) ORDER BY doc_id`)
+    const rows = this.q(`SELECT DISTINCT doc_id FROM doc_lineage WHERE source_block_id IN (${ids.map(() => '?').join(', ')}) ORDER BY doc_id`)
       .all(...ids) as { doc_id: string }[];
     return rows.map((r) => r.doc_id);
   }
@@ -298,8 +317,7 @@ export class Lineage {
    */
   infer(actor_id: string, since: string | null, exclude_doc_id: string | null): LineageRef[] {
     const t = since ?? '';
-    const rows = this.db
-      .prepare(
+    const rows = this.q(
         `SELECT DISTINCT b.block_id, b.content_hash FROM (
            SELECT block_id FROM receipts WHERE actor_id = ? AND issued_at >= ?
            UNION SELECT block_id FROM reads WHERE actor_id = ? AND read_at >= ? AND block_id IS NOT NULL AND via != 'write'
@@ -318,8 +336,8 @@ export class Lineage {
     if (blocks.length === 0) return;
     const head = this.chain.head().seq;
     const now = new Date().toISOString();
-    const rev = this.db.prepare(`SELECT current_revision FROM documents WHERE doc_id = ?`);
-    const ins = this.db.prepare(`INSERT INTO reads (actor_id, doc_id, block_id, content_hash, doc_revision, head_seq, read_at, via) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+    const rev = this.q(`SELECT current_revision FROM documents WHERE doc_id = ?`);
+    const ins = this.q(`INSERT INTO reads (actor_id, doc_id, block_id, content_hash, doc_revision, head_seq, read_at, via) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
     for (const b of blocks) {
       const r = rev.get(b.doc_id) as { current_revision: number } | undefined;
       ins.run(actor_id, b.doc_id, b.block_id, b.content_hash, r?.current_revision ?? 0, head, now, via);
@@ -333,7 +351,7 @@ export class Lineage {
     const rev = this.docs.getRevision(doc_id, doc.current_revision);
     const head = this.chain.head().seq;
     const now = new Date().toISOString();
-    const ins = this.db.prepare(`INSERT INTO reads (actor_id, doc_id, block_id, content_hash, doc_revision, head_seq, read_at, via) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+    const ins = this.q(`INSERT INTO reads (actor_id, doc_id, block_id, content_hash, doc_revision, head_seq, read_at, via) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
     const tx = this.db.transaction(() => {
       ins.run(actor_id, doc_id, null, rev?.content_hash ?? '', doc.current_revision, head, now, via);
       for (const b of this.docs.liveBlocks(doc_id)) ins.run(actor_id, doc_id, b.block_id, b.content_hash, doc.current_revision, head, now, via);
@@ -359,8 +377,7 @@ export class Lineage {
 
     // Every block version this actor read (receipts + read log), with the latest head seq it was read at.
     const reads = new Map<string, number>();
-    for (const r of this.db
-      .prepare(
+    for (const r of this.q(
         `SELECT block_id, MAX(head_seq) AS hs FROM (
            SELECT block_id, chain_seq AS head_seq FROM receipts WHERE actor_id = ?
            UNION ALL SELECT block_id, head_seq FROM reads WHERE actor_id = ? AND block_id IS NOT NULL
@@ -370,8 +387,7 @@ export class Lineage {
       reads.set(r.block_id, r.hs);
     }
     const docReads = new Map<string, number>();
-    for (const r of this.db
-      .prepare(`SELECT doc_id, MAX(head_seq) AS hs FROM reads WHERE actor_id = ? AND block_id IS NULL GROUP BY doc_id`)
+    for (const r of this.q(`SELECT doc_id, MAX(head_seq) AS hs FROM reads WHERE actor_id = ? AND block_id IS NULL GROUP BY doc_id`)
       .all(actor_id) as { doc_id: string; hs: number }[]) {
       docReads.set(r.doc_id, r.hs);
     }
@@ -387,8 +403,7 @@ export class Lineage {
     };
 
     // Group retired read blocks by lineage head.
-    const retired = this.db
-      .prepare(
+    const retired = this.q(
         `SELECT b.* FROM blocks b WHERE b.valid_to IS NOT NULL AND b.block_id IN (
            SELECT block_id FROM receipts WHERE actor_id = ? UNION SELECT block_id FROM reads WHERE actor_id = ? AND block_id IS NOT NULL
          ) ORDER BY b.chain_seq ASC`,
@@ -425,8 +440,7 @@ export class Lineage {
     }
 
     // Derived notes this actor read or wrote whose sources changed and whose current version it has not read.
-    const noteDocs = this.db
-      .prepare(
+    const noteDocs = this.q(
         `SELECT DISTINCT d.doc_id FROM doc_lineage d WHERE d.doc_id IN (
            SELECT b.doc_id FROM receipts r JOIN blocks b ON b.block_id = r.block_id WHERE r.actor_id = ?
            UNION SELECT doc_id FROM reads WHERE actor_id = ?
