@@ -113,6 +113,13 @@ const CASES: Case[] = [
   ['make', [], false],
   ['make', ['build'], false],
   ['make', ['release'], true],
+  // 0.8.1 (L2-08): `ship` is a world word too
+  ['make', ['ship'], true],
+  ['make', ['shipping'], false],
+  ['npm', ['run', 'ship'], true],
+  ['npm', ['run', 'ship:prod'], true],
+  ['pnpm', ['ship'], true],
+  ['yarn', ['ship'], true],
   ['make', ['-C', 'sub', 'deploy'], true],
   ['make', ['VERSION=deploy', 'build'], false],
   ['make', ['-j4', 'publish'], true],
@@ -171,6 +178,14 @@ describe('shim decision table', () => {
   it('world words respect word boundaries', () => {
     for (const s of ['deploy', 'deploy:prod', 'db-migrate', 'release.yml', 'x_publish']) expect(hasWorldWord(s), s).toBe(s !== 'x_publish');
     for (const s of ['predeploy', 'deployment', 'released', 'republish']) expect(hasWorldWord(s), s).toBe(false);
+  });
+
+  it('a tool given by path uses that tool\'s rules (0.8.1, L2-08)', () => {
+    for (const t of ['/usr/bin/make', 'C:\\tools\\make.exe', 'make.exe']) {
+      expect(classify(specFor(t), ['release']).world, t).toBe(true);
+      expect(classify(specFor(t), ['all']).world, t).toBe(false);
+    }
+    expect(classify(specFor('/usr/bin/git'), ['-C', 'x', 'push']).world).toBe(true);
   });
 
   it('rejects unsafe user patterns (nothing reaches the generated sh unvalidated)', () => {

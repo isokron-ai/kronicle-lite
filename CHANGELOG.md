@@ -70,6 +70,87 @@ data dir prints `note: pinned 1 anchor service key(s) … on first use`;
 `unverified` until one online call pins the key; a non-loopback `http://`
 `anchor_url` exits 2 without `--insecure-http`.
 
+### Fixed — exec-time shims (hardening round 2, track 3: H2-12 … H2-16)
+
+- **`shim ack` is an operator action (H2-12, S2).** The refusal ended with
+  "To override without re-reading: `kronicle-lite shim ack --through N`",
+  and an agent that ran exactly that cleared the gate without reading. The
+  refusal now says who still has to re-read the current version and to ask
+  the operator otherwise; it never mentions `ack`. `shim ack` runs only
+  from an interactive terminal or with `--operator` (else exit 2, nothing
+  changes), and every ack and every refused attempt is logged in
+  `.kronicle-shim/shim.log` with the actor (`--actor`, `KRONICLE_LITE_ACTOR`
+  or the OS user), the OS user, the through-seq and how it was confirmed.
+  `shim status` no longer prints the ack command either. Re-running
+  `shim install` keeps the existing starting point instead of moving it to
+  the head (that acknowledged every pending change by the back door).
+- **Git pre-push hook (H2-13, S2):** `shim install --git-hook [--repo PATH]`
+  writes a `pre-push` hook that runs the same check for every push from the
+  repository and its initialized submodules, whatever started git: git's
+  exec-path (`/usr/lib/git-core`) comes first on PATH for aliases, hooks,
+  `rebase -x` and `submodule foreach`, so the PATH shim never saw those, nor
+  `/usr/bin/git`, `sudo`, `env -i`, `command -p` or a PATH prefix. It goes
+  into the hooks dir git reports (`core.hooksPath` respected), chains an
+  existing pre-push hook (moved to `pre-push.kronicle-chained`, run after
+  the check with the same arguments and stdin, put back on uninstall),
+  refuses rather than overwrite, never writes git config, and never prints
+  the remote URL. `shim status` shows each hook (active / INACTIVE /
+  missing); `shim uninstall` removes them, `shim uninstall --git-hook
+  [--repo PATH]` removes only the hooks. `git push --no-verify` skips it
+  (git's rule; the PATH shim still sees that).
+- **The project is the one the command acts on (H2-14, S2):**
+  `cd /tmp && git -C ~/work/api push` was checked against `/tmp`. The pulse
+  now resolves the target from `git -C` (cumulative), `--git-dir`,
+  `--work-tree`, `GIT_DIR` / `GIT_WORK_TREE`, `terraform -chdir=`,
+  `make -C`, `npm --prefix`, `pnpm -C/--dir` and `yarn --cwd`; a submodule
+  is also checked against its superproject. A directory option that does
+  not resolve is refused (`reason: "target"`). `shim exec --project DIR`
+  names the project explicitly (a missing DIR refuses).
+- **PATH bypasses documented (H2-15, S3):** docs/PUSH.md lists `sudo`,
+  `sudo -E`, `env -i`, `command -p`, `hash -p`, a PATH prefix, an absolute
+  path, git aliases, git running git and the forged same-process marker,
+  each with what catches it (for git: the pre-push hook).
+- **The invoking actor re-reads for itself (H2-16, S3):** with no
+  `--pending-actor`, the shim now checks the actor in the command's
+  environment (`KRONICLE_LITE_ACTOR`; `pulse --invoking-actor`): a change
+  blocks it when it read an earlier version (or the change is to an
+  instruction file, or nobody read it), and its own re-read clears it, so a
+  stale or finished agent no longer keeps another agent's gate shut. Each
+  actor keeps its own cursor per project; an operator ack still clears
+  them all. Without `KRONICLE_LITE_ACTOR`, or with the new
+  `shim install --all-readers` / `pulse --all-readers`, every reader must
+  re-read, as in 0.8.0 (the shim cannot tell whose reads count otherwise),
+  and the refusal now says that and names exactly who is left.
+- **A corrupt store fails closed (live finding L2-03, S2).** A store whose
+  file is damaged (a zeroed page, a bad header, SQLITE_CORRUPT / NOTADB)
+  was reported as "unavailable" (exit 3) and the command ran. It is now an
+  integrity failure: refused in deny mode, and in warn mode run with a loud
+  `running UNCHECKED — the kronicle-lite store is CORRUPT` line every time
+  (logged, `last-error`). A store that is there but locked or slow keeps the
+  `--on-timeout` behaviour, and `--on-timeout deny` now also refuses when
+  the store cannot be opened (exit 3), not only on a timeout.
+- **The shims check the store the server uses (protocol finding P2-01,
+  S2).** The README's own Cursor and Copilot snippets ran the server on a
+  project-local `.kronicle-lite/` while the shims checked `~/.kronicle-lite`,
+  so a push after a change landed silently. Unless `shim install --data-dir`
+  pins a store, the shims now use `$KRONICLE_LITE_DATA_DIR` or
+  `~/.kronicle-lite` plus the nearest `.kronicle-lite/` above the
+  repository the command acts on. **No store, or two different ones,
+  refuses world-changing commands in deny mode** (warn mode runs them with
+  a loud line): previously a missing store failed open. Each store gets its
+  own starting point. The Cursor snippet now uses the default store; the
+  Cursor and Copilot sections say how the shims find a per-workspace store.
+- **`ship` is a world word (live finding L2-08):** `npm run ship`,
+  `make ship`, `pnpm ship` / `yarn ship` are checked (with `deploy`,
+  `migrate`, `publish`, `release`). A tool given by path uses that tool's
+  rules and target (`shim exec --tool /usr/bin/make`, `pulse --
+  /usr/bin/git -C x push`); the PATH shim itself still never sees
+  `/usr/bin/make release` (documented with the other PATH bypasses).
+- `pulse --json` adds `pending_mode`, `invoking_actor`, `not_relied_on[]`,
+  `target` and the reasons `target`, `corrupt`, `no-store`,
+  `ambiguous-store`; nothing was renamed or removed. `kronicle-lite pulse`
+  without `--state` (a hook's own call) still exits 3 without a store.
+
 ## [0.8.0] — 2026-11-01
 
 ### Fixed — a pulse never reads as a clean bill
@@ -340,7 +421,6 @@ data dir prints `note: pinned 1 anchor service key(s) … on first use`;
   `integrity: {ok: false, problem, seq}` and an INTEGRITY FAILURE line
   first. docs/PUSH.md: "kronicle unavailable" (non-zero exit: fail open)
   vs "integrity failure" (push it; a pulse blocks).
-
 
 Fixes measured by agent-memory-bench Track A (deterministic, 20 seeds per
 cell; before = 0.6.0, after = this branch). Additive: no hash recipe,

@@ -194,8 +194,8 @@ Usage:
                                                                  the exec-time check: exit 0 allow, 77 refused (unreconciled
                                                                  retractions or integrity failure; reason on stderr), 3 no store
   kronicle-lite shim install [--dir D] [--commands git,terraform,kubectl,…] [--world "make release,…"] [--mode deny|warn]
-                 | status | ack [--through SEQ] | uninstall      PATH wrappers that pulse before world-changing commands
-                                                                 (git push, terraform apply, kubectl apply, npm publish, …)
+  [--git-hook]   | status | ack --operator [--through SEQ] | uninstall   PATH wrappers (+ git pre-push hook) that pulse before
+                                                                 world-changing commands (git push, terraform apply, …)
                                                                  for any client; \`kronicle-lite shim help\`
 
 Data dir defaults to $KRONICLE_LITE_DATA_DIR or ~/.kronicle-lite. Instruction slugs carry a project key
