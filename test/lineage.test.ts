@@ -166,7 +166,11 @@ describe('derived_from (explicit)', () => {
     copy.close();
 
     store.db.prepare('DELETE FROM doc_lineage').run();
-    expect(noteHit(store).authority_reason).toBe('no_source');
+    // 0.8.1 (R2-09): the note is no longer served as fresh: its lineage rows do not match the chain.
+    const r = store.recall.recall({ query: 'deploy target note' });
+    expect(r.hits.find((h) => h.doc_slug === 'note')).toBeUndefined();
+    expect(r.withheld).toContainEqual(expect.objectContaining({ doc_slug: 'note', problem: 'lineage_mismatch' }));
+    expect(store.orient.getSystemState({ actor_id: 'x', focus: 'retractions' }).integrity).toMatchObject({ ok: false });
     const v = store.verifyAll();
     expect(v.ok).toBe(false);
     expect(v.projection!.mismatches.some((m) => m.table === 'doc_lineage' && m.field === 'missing')).toBe(true);
@@ -180,9 +184,8 @@ describe('derived_from (explicit)', () => {
 describe('inferred lineage (derived_from_inferred)', () => {
   it('a note written after recalling a block in the same session is derived from it (S1 next-session copy)', async () => {
     const { store, target } = setup();
-    // An earlier session read the Notes block: outside this session, not inferred.
-    // (Session bounds are millisecond timestamps, inclusive: a read in the same
-    // millisecond as the next orient counts as in-session, the conservative side.)
+    // 0.8.1 (R2-04): an earlier session's read within the 24 h window counts too, whatever
+    // briefings came in between (before, a second orient dropped it).
     store.orient.getSystemState({ actor_id: 'agent' });
     store.recall.recall({ query: 'page on-call', actor_id: 'agent' });
     await new Promise((r) => setTimeout(r, 5));
@@ -190,8 +193,8 @@ describe('inferred lineage (derived_from_inferred)', () => {
     store.recall.recall({ query: 'deploys cluster', actor_id: 'agent' });
     store.recall.recall({ query: 'deploys cluster', actor_id: 'other-agent' });
     const put = store.docs.putDocument({ slug: 'note', title: 'Note', markdown: '# Note\n\nDeploy target note: blue-7.\n', actor_id: 'agent', cursor });
-    expect(put.lineage).toEqual({ derived_from: 0, derived_from_inferred: 1 });
-    expect(store.lineage.edges(put.doc_id)).toEqual([expect.objectContaining({ source_block_id: target.block_id, inferred: 1 })]);
+    expect(put.lineage).toEqual({ derived_from: 0, derived_from_inferred: 2 });
+    expect(store.lineage.edges(put.doc_id)).toContainEqual(expect.objectContaining({ source_block_id: target.block_id, inferred: 1 }));
 
     store.docs.putDocument({ slug: 'deploy', title: 'Deploy', markdown: RUNBOOK('green-2'), actor_id: 'human' });
     const hit = store.recall.recall({ query: 'deploy target note' }).hits.find((h) => h.doc_slug === 'note')!;
@@ -250,16 +253,16 @@ describe('inferred lineage is bounded', () => {
     expect(paras.length).toBe(205);
     // 205 reads, oldest first, one millisecond apart (block i read at t0 + i).
     const t0 = Date.now() - 60_000;
-    const ins = store.db.prepare(`INSERT INTO reads (actor_id, doc_id, block_id, content_hash, doc_revision, head_seq, read_at, via) VALUES ('agent', ?, ?, ?, 1, 1, ?, 'recall')`);
-    paras.forEach((b, i) => ins.run(b.doc_id, b.block_id, b.content_hash, new Date(t0 + i).toISOString()));
+    const ins = store.db.prepare(`INSERT INTO reads (actor_id, doc_id, block_id, content_hash, doc_revision, head_seq, read_at, via) VALUES ('agent', ?, ?, ?, 1, ?, ?, 'recall')`);
+    paras.forEach((b, i) => ins.run(b.doc_id, b.block_id, b.content_hash, i, new Date(t0 + i).toISOString()));
     const r = store.lineage.infer('agent', null, null);
     expect(r.truncated).toBe(true);
     expect(r.refs.length).toBe(200);
     expect(new Set(r.refs.map((x) => x.block_id))).toEqual(new Set(paras.slice(5).map((b) => b.block_id)));
-    // A session start bounds it instead (no cap, no flag).
-    const s = store.lineage.infer('agent', new Date(t0 + 100).toISOString(), null);
+    // 0.8.1: a session (a chain position) adds every read since it to the 200: no cap on those, no flag.
+    const s = store.lineage.infer('agent', 100, null);
     expect(s).toMatchObject({ truncated: false });
-    expect(s.refs.length).toBe(105);
+    expect(s.refs.length).toBe(205);
     // Under the bound: not truncated.
     store.db.prepare(`DELETE FROM reads WHERE actor_id = 'agent' AND read_at < ?`).run(new Date(t0 + 10).toISOString());
     expect(store.lineage.infer('agent', null, null)).toMatchObject({ truncated: false });
@@ -281,15 +284,34 @@ describe('inferred lineage is bounded', () => {
     store.close();
   });
 
-  it('an orient bounds inference to the session (earlier reads, even recent ones, are out)', async () => {
+  it('R2-04: recall → orient again → write keeps the read (the 24 h window holds whatever briefings came between)', () => {
+    for (const reorient of [{ focus: 'orientation' as const }, { focus: 'pulse' as const }]) {
+      const { store, target } = setup();
+      store.orient.getSystemState({ actor_id: 'agent' });
+      store.recall.recall({ query: 'deploys cluster', actor_id: 'agent' });
+      const c1 = store.orient.getSystemState({ actor_id: 'agent', ...reorient }).cursor; // the wake contract: orient before writing
+      const put = store.docs.putDocument({ slug: 'note', title: 'Note', markdown: '# Note\n\nDeploy target note: blue-7.\n', actor_id: 'agent', cursor: c1 });
+      expect(put.lineage).toEqual({ derived_from: 0, derived_from_inferred: 1 });
+      expect(store.lineage.edges(put.doc_id).map((e) => e.source_block_id)).toEqual([target.block_id]);
+      store.docs.putDocument({ slug: 'deploy', title: 'Deploy', markdown: RUNBOOK('green-2'), actor_id: 'human' });
+      expect(noteHit(store)).toMatchObject({ authority: 'never_act', authority_reason: 'stale_derived' });
+      store.close();
+    }
+  });
+
+  it('C2-05: the session is a chain position, not a wall-clock time (a skewed briefing clock drops nothing)', () => {
     const { store, target } = setup();
-    store.recall.recall({ query: 'page on-call', actor_id: 'agent' });
-    await new Promise((r) => setTimeout(r, 5));
-    store.orient.getSystemState({ actor_id: 'agent' });
+    const o = store.orient.getSystemState({ actor_id: 'agent' });
+    // The briefing's clock ran 2 h ahead of the one that stamps reads.
+    store.db.prepare(`UPDATE flight_recorder SET issued_at = ? WHERE briefing_id = ?`).run(new Date(Date.now() + 2 * 3600_000).toISOString(), o.briefing_id);
     store.recall.recall({ query: 'deploys cluster', actor_id: 'agent' });
-    const put = store.docs.putDocument({ slug: 'note', title: 'Note', markdown: '# Note\n\nDeploy target note: blue-7.\n', actor_id: 'agent' });
+    const put = store.docs.putDocument({ slug: 'note', title: 'Note', markdown: '# Note\n\nDeploy target note: blue-7.\n', actor_id: 'agent', cursor: o.cursor });
     expect(put.lineage).toEqual({ derived_from: 0, derived_from_inferred: 1 });
     expect(store.lineage.edges(put.doc_id).map((e) => e.source_block_id)).toEqual([target.block_id]);
+    // Reads every bound misses are never reported as a complete (empty) inference.
+    back(store, 'agent', 30 * 3600_000);
+    const p2 = store.docs.putDocument({ slug: 'note2', title: 'Note 2', markdown: '# Note 2\n\nX.\n', actor_id: 'agent', cursor: store.orient.getSystemState({ actor_id: 'agent', focus: 'pulse' }).cursor });
+    expect(p2.lineage).toEqual({ derived_from: 0, derived_from_inferred: 0, derived_from_inferred_truncated: true });
     store.close();
   });
 });

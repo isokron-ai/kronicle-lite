@@ -316,8 +316,8 @@ export async function runShimCli(cmd: 'pulse' | 'shim', argv: string[]): Promise
           lines.push(
             p.reason === 'integrity'
               ? `project ${r.project.key}: BLOCKED — store integrity failure`
-              : p.reason === 'target'
-                ? `project ${r.project.key}: BLOCKED — ${p.message ?? 'target unknown'}`
+              : p.reason === 'target' || p.reason === 'pending'
+                ? `project ${r.project.key}: BLOCKED — ${(p.message ?? 'target unknown').split('\n')[0]}`
                 : `project ${r.project.key}: BLOCKED — ${p.blocking.length} unreconciled change(s) through seq ${p.ack_through}; re-read the current version (operator override: see docs/PUSH.md)`,
           );
           for (const b of p.blocking.slice(0, 6)) lines.push('  ' + retractionLine(b));
