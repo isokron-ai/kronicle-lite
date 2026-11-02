@@ -10,11 +10,12 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
+import { isTransientError } from '../src/shim/pulse.js';
 import { commandTarget, repoOfGitDir } from '../src/shim/target.js';
 import { CLI, cleanEnv, tempDir } from './helpers/fs.js';
 
@@ -523,6 +524,22 @@ describe.skipIf(!POSIX)('L2-03: a corrupt store fails closed (deny) or warns lou
     expect(w.ran()).toBe('terraform apply\nterraform apply\n');
   });
 
+  it('a store that is there but unreadable refuses too; only a lock is transient', () => {
+    const d = toolRig();
+    const f = join(d.data, 'kronicle-lite.db');
+    const moved = f + '.real';
+    writeFileSync(moved, readFileSync(f));
+    rmSync(f);
+    mkdirSync(f); // EISDIR: not a lock
+    const a = d.run('terraform apply');
+    expect(a.status).toBe(77);
+    expect(a.stderr).toMatch(/the kronicle-lite store is UNREADABLE \(/);
+    expect(readFileSync(join(d.shims, '.kronicle-shim', 'shim.log'), 'utf8')).toMatch(/decision=deny reason=unreadable/);
+    expect(isTransientError(Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' }))).toBe(true);
+    expect(isTransientError(Object.assign(new Error('EISDIR: illegal operation on a directory'), { code: 'EISDIR' }))).toBe(false);
+    expect(d.ran()).toBe('');
+  });
+
   it('a bad header is corrupt too (shim exec refuses as well)', () => {
     const d = toolRig();
     zeroPage(d.data, 0);
@@ -578,7 +595,7 @@ describe('P2-01: the shims check the store the server uses', { timeout: 180_000 
     expect(a.stderr).toMatch(/found more than one kronicle-lite store \(.*\.kronicle-lite, .*\.kronicle-lite\)/);
     expect(a.stderr).toContain(join(r.proj, '.kronicle-lite'));
     expect(a.stderr).toContain(join(r.home, '.kronicle-lite'));
-    expect(a.stderr).toContain('kronicle-lite shim install --data-dir DIR');
+    expect(a.stderr).toMatch(/Operator fix: pin the store the MCP server uses \(its --data-dir\): kronicle-lite shim install --data-dir \S*\.kronicle-lite/);
     const w = r.pulse(r.proj, ['git', 'push'], {}, ['--mode', 'warn']);
     expect(w.status).toBe(0);
     expect(w.stderr).toMatch(/running UNCHECKED/);
@@ -594,5 +611,40 @@ describe('P2-01: the shims check the store the server uses', { timeout: 180_000 
     expect(none.status).toBe(77);
     expect(none.json).toMatchObject({ decision: 'deny', reason: 'no-store' });
     expect(none.stderr).toMatch(/found no kronicle-lite store \(looked in .*home.*\.kronicle-lite; \.kronicle-lite\/ in .*proj and its parents\)/);
+    expect(none.stderr).toContain('kronicle-lite shim install --data-dir DIR, or set KRONICLE_LITE_DATA_DIR=DIR');
+  });
+
+  it('first run: a store with nothing read yet passes (installed before or after the store existed)', () => {
+    const root = tempDir('kl-shimf-');
+    const r = { home: join(root, 'home'), proj: join(root, 'proj'), other: join(root, 'other'), shims: join(root, 'shims') };
+    for (const d of [r.home, r.proj, r.other]) mkdirSync(d, { recursive: true });
+    git(r, ['init', '-q', '-b', 'main'], r.proj);
+    git(r, ['init', '-q', '-b', 'main'], r.other);
+    const env = { USERPROFILE: r.home };
+    const pulse = (cwd: string) => kl(r, ['pulse', '--state', join(r.shims, '.kronicle-shim'), '--cwd', cwd, '--json', '--', 'git', 'push'], env, cwd);
+    const put = (slug: string) => {
+      writeFileSync(join(root, `${slug}.md`), `# ${slug}\n\nDeploy to stg-a.\n`);
+      expect(kl(r, ['put', slug, join(root, `${slug}.md`), '--cwd', r.proj], env).status).toBe(0);
+    };
+    // shims first, the store afterwards (no baseline): the first check seeds and passes
+    expect(kl(r, ['shim', 'install', '--dir', r.shims, '--commands', 'git'], env, r.proj).status).toBe(0);
+    put('runbook');
+    const a = pulse(r.proj);
+    expect(a.status, a.stderr).toBe(0);
+    put('notes'); // new documents nobody read: nothing to reconcile
+    expect(pulse(r.proj).status).toBe(0);
+    // another project in the same store, never checked before: passes too
+    expect(pulse(r.other).status).toBe(0);
+    // store first, then shims
+    const b = tempDir('kl-shimf-');
+    const s = { home: join(b, 'home'), proj: join(b, 'proj'), shims: join(b, 'shims') };
+    mkdirSync(s.home, { recursive: true });
+    mkdirSync(s.proj, { recursive: true });
+    git(s, ['init', '-q', '-b', 'main'], s.proj);
+    writeFileSync(join(b, 'rb.md'), '# rb\n\nx\n');
+    expect(kl(s, ['put', 'rb', join(b, 'rb.md'), '--cwd', s.proj], { USERPROFILE: s.home }).status).toBe(0);
+    expect(kl(s, ['shim', 'install', '--dir', s.shims, '--commands', 'git'], { USERPROFILE: s.home }, s.proj).status).toBe(0);
+    const c = kl(s, ['pulse', '--state', join(s.shims, '.kronicle-shim'), '--cwd', s.proj, '--json', '--', 'git', 'push'], { USERPROFILE: s.home }, s.proj);
+    expect(c.status, c.stderr).toBe(0);
   });
 });

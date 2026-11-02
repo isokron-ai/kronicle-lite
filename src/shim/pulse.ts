@@ -157,7 +157,31 @@ export class PulseUnavailableError extends Error {
  * shim refuses (deny mode) or warns loudly (warn mode); it never fails open.
  */
 export class PulseCorruptError extends Error {
-  override readonly name = 'PulseCorruptError';
+  override readonly name: string = 'PulseCorruptError';
+}
+
+/**
+ * The store file is there but cannot be read or opened for a reason that is
+ * not transient (permissions, an I/O error, a format this version cannot
+ * open). Misconfiguration or damage, like a corrupt store: refused in deny
+ * mode. Only a lock or a slow check is transient (`--on-timeout`).
+ */
+export class PulseUnreadableError extends PulseCorruptError {
+  override readonly name: string = 'PulseUnreadableError';
+}
+
+const TRANSIENT_CODE_RE = /^(SQLITE_BUSY|SQLITE_LOCKED|EBUSY|EAGAIN|EINTR)/;
+const TRANSIENT_TEXT_RE = /database is locked|database table is locked|SQLITE_BUSY/i;
+
+/** A lock or a busy wait that ran out: retrying later can succeed (`--on-timeout` decides). */
+export function isTransientError(err: unknown): boolean {
+  for (let e: unknown = err, i = 0; e && i < 5; i++) {
+    const code = (e as { code?: unknown }).code;
+    if (typeof code === 'string' && TRANSIENT_CODE_RE.test(code)) return true;
+    if (e instanceof Error && TRANSIENT_TEXT_RE.test(e.message)) return true;
+    e = (e as { cause?: unknown }).cause;
+  }
+  return false;
 }
 
 export function storeExists(dataDir: string): boolean {
@@ -181,7 +205,11 @@ export function isCorruptError(err: unknown): boolean {
 
 const SQLITE_HEADER = 'SQLite format 3\0';
 
-/** Open the store for a pulse; a missing store is "unavailable", never created; a damaged one is "corrupt". */
+/**
+ * Open the store for a pulse; never created. Missing or locked = "unavailable"
+ * (PulseUnavailableError); damaged = "corrupt" (PulseCorruptError); there but
+ * unreadable for any other reason = "unreadable" (PulseUnreadableError).
+ */
 export function openForPulse(dataDir: string): KronicleLite {
   const file = join(dataDir, 'kronicle-lite.db');
   if (!storeExists(dataDir)) throw new PulseUnavailableError(`no kronicle-lite store in ${dataDir}`);
@@ -198,14 +226,17 @@ export function openForPulse(dataDir: string): KronicleLite {
     if (head !== SQLITE_HEADER) throw new PulseCorruptError(`${file}: bad header (not an SQLite database)`);
   } catch (err) {
     if (err instanceof PulseCorruptError) throw err;
-    throw new PulseUnavailableError(`cannot read the kronicle-lite store in ${dataDir}: ${err instanceof Error ? err.message : String(err)}`);
+    const msg = `cannot read the kronicle-lite store in ${dataDir}: ${err instanceof Error ? err.message : String(err)}`;
+    if (isTransientError(err)) throw new PulseUnavailableError(msg, { cause: err });
+    throw new PulseUnreadableError(msg, { cause: err });
   }
   try {
     return new KronicleLite({ dataDir });
   } catch (err) {
     const msg = `cannot open the kronicle-lite store in ${dataDir}: ${err instanceof Error ? err.message : String(err)}`;
     if (isCorruptError(err)) throw new PulseCorruptError(msg, { cause: err });
-    throw new PulseUnavailableError(msg, { cause: err });
+    if (isTransientError(err)) throw new PulseUnavailableError(msg, { cause: err });
+    throw new PulseUnreadableError(msg, { cause: err });
   }
 }
 
@@ -276,7 +307,10 @@ export function storeOutcome(r: StoreResolution, mode: PulseMode, command: reado
     r.source === 'ambiguous'
       ? `found more than one kronicle-lite store (${r.candidates.join(', ')}) and cannot tell which one your MCP server uses`
       : `found no kronicle-lite store (looked in ${r.looked.join('; ')})`;
-  const fix = 'Ask the operator to point the shims at the store the MCP server uses (kronicle-lite shim install --data-dir DIR).';
+  const fix =
+    r.source === 'ambiguous'
+      ? `Operator fix: pin the store the MCP server uses (its --data-dir): kronicle-lite shim install --data-dir ${r.candidates[0] ?? 'DIR'} (or ${r.candidates.slice(1).join(', ') || 'the other one'}).`
+      : "Operator fix: point the shims at the store the MCP server uses (its --data-dir, or KRONICLE_LITE_DATA_DIR): kronicle-lite shim install --data-dir DIR, or set KRONICLE_LITE_DATA_DIR=DIR in this command's environment.";
   const error = why;
   return mode === 'warn'
     ? { decision: 'warn', reason: r.source === 'ambiguous' ? 'ambiguous-store' : 'no-store', exit: 0, error, message: `kronicle-lite shim (warn): \`${cmd}\` is running UNCHECKED — the shim ${why}. ${fix}` }
@@ -290,13 +324,21 @@ export function storeOutcome(r: StoreResolution, mode: PulseMode, command: reado
 }
 
 /** What a shim says and does for a corrupt store: refuse (deny mode, exit 77) or run with a loud warning (warn mode). */
-export function corruptOutcome(err: unknown, mode: PulseMode, command: readonly string[] | undefined): { decision: 'deny' | 'warn'; reason: 'corrupt'; message: string; exit: number; error: string } {
+export function corruptOutcome(
+  err: unknown,
+  mode: PulseMode,
+  command: readonly string[] | undefined,
+): { decision: 'deny' | 'warn'; reason: 'corrupt' | 'unreadable'; message: string; exit: number; error: string } {
   const detail = err instanceof Error ? err.message : String(err);
   const cmd = displayCommand(command);
-  const why = `the kronicle-lite store is CORRUPT (${detail}). Do not act on runbooks, notes or anything else recalled from it until it is repaired (kronicle-lite doctor / verify-chain, or restore a backup; tell the operator).`;
+  const unreadable = err instanceof PulseUnreadableError;
+  const reason = unreadable ? ('unreadable' as const) : ('corrupt' as const);
+  const why = unreadable
+    ? `the kronicle-lite store is UNREADABLE (${detail}). Tell the operator: fix its permissions or the data dir the shims use (kronicle-lite shim status, doctor).`
+    : `the kronicle-lite store is CORRUPT (${detail}). Do not act on runbooks, notes or anything else recalled from it until it is repaired (kronicle-lite doctor / verify-chain, or restore a backup; tell the operator).`;
   return mode === 'warn'
-    ? { decision: 'warn', reason: 'corrupt', exit: 0, error: detail, message: `kronicle-lite shim (warn): \`${cmd}\` is running UNCHECKED — ${why}` }
-    : { decision: 'deny', reason: 'corrupt', exit: PULSE_DENY_EXIT, error: detail, message: `kronicle-lite shim: did NOT run \`${cmd}\` — ${why} World-changing commands are refused until then.` };
+    ? { decision: 'warn', reason, exit: 0, error: detail, message: `kronicle-lite shim (warn): \`${cmd}\` is running UNCHECKED — ${why}` }
+    : { decision: 'deny', reason, exit: PULSE_DENY_EXIT, error: detail, message: `kronicle-lite shim: did NOT run \`${cmd}\` — ${why} World-changing commands are refused until then.` };
 }
 
 // ---------------------------------------------------------------- state files

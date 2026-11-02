@@ -126,9 +126,11 @@ data dir prints `note: pinned 1 anchor service key(s) … on first use`;
   was reported as "unavailable" (exit 3) and the command ran. It is now an
   integrity failure: refused in deny mode, and in warn mode run with a loud
   `running UNCHECKED — the kronicle-lite store is CORRUPT` line every time
-  (logged, `last-error`). A store that is there but locked or slow keeps the
-  `--on-timeout` behaviour, and `--on-timeout deny` now also refuses when
-  the store cannot be opened (exit 3), not only on a timeout.
+  (logged, `last-error`). A store that is there but unreadable for any
+  reason other than a lock (permissions, I/O error) is treated the same way
+  (`UNREADABLE`). Only a locked or slow store is transient and keeps the
+  `--on-timeout` behaviour; `--on-timeout deny` now also refuses when the
+  store is locked (exit 3), not only on a timeout.
 - **The shims check the store the server uses (protocol finding P2-01,
   S2).** The README's own Cursor and Copilot snippets ran the server on a
   project-local `.kronicle-lite/` while the shims checked `~/.kronicle-lite`,
@@ -137,7 +139,10 @@ data dir prints `note: pinned 1 anchor service key(s) … on first use`;
   `~/.kronicle-lite` plus the nearest `.kronicle-lite/` above the
   repository the command acts on. **No store, or two different ones,
   refuses world-changing commands in deny mode** (warn mode runs them with
-  a loud line): previously a missing store failed open. Each store gets its
+  a loud line): previously a missing store failed open. The refusal names
+  the operator's fix (`kronicle-lite shim install --data-dir DIR`, or
+  `KRONICLE_LITE_DATA_DIR=DIR`). A store with nothing read yet still passes
+  (the first check records its head). Each store gets its
   own starting point. The Cursor snippet now uses the default store; the
   Cursor and Copilot sections say how the shims find a per-workspace store.
 - **`ship` is a world word (live finding L2-08):** `npm run ship`,
@@ -421,6 +426,7 @@ data dir prints `note: pinned 1 anchor service key(s) … on first use`;
   `integrity: {ok: false, problem, seq}` and an INTEGRITY FAILURE line
   first. docs/PUSH.md: "kronicle unavailable" (non-zero exit: fail open)
   vs "integrity failure" (push it; a pulse blocks).
+
 
 Fixes measured by agent-memory-bench Track A (deterministic, 20 seeds per
 cell; before = 0.6.0, after = this branch). Additive: no hash recipe,

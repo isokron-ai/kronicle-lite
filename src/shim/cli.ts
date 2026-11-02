@@ -163,9 +163,9 @@ export async function runShimCli(cmd: 'pulse' | 'shim', argv: string[]): Promise
     const corrupt = (err: unknown): number => {
       const c = corruptOutcome(err, modeOf(flags['mode']) ?? 'deny', rest);
       if (stateDir !== undefined) {
-        shimLog(stateDir, rest[0] ?? 'pulse', `pulse(node) decision=${c.decision} reason=corrupt error=${c.error.replace(/\s+/g, '_').slice(0, 160)}`);
+        shimLog(stateDir, rest[0] ?? 'pulse', `pulse(node) decision=${c.decision} reason=${c.reason} error=${c.error.replace(/\s+/g, '_').slice(0, 160)}`);
         try {
-          writeFileSync(join(stateDir, 'last-error'), `${new Date().toISOString()} CORRUPT ${c.error}\n`);
+          writeFileSync(join(stateDir, 'last-error'), `${new Date().toISOString()} ${c.reason.toUpperCase()} ${c.error}\n`);
         } catch {
           // never block on logging
         }

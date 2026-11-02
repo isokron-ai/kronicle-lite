@@ -1006,7 +1006,7 @@ export function execShim(
         if (isCorruptError(err)) {
           // L2-03: a damaged store fails closed (deny mode) or warns loudly (warn mode), every time.
           const co = corruptOutcome(err, config.mode, [tool, ...args]);
-          shimLog(state, tool, `check ${Date.now() - t0}ms outcome=corrupt-${co.decision} (in-process)`);
+          shimLog(state, tool, `check ${Date.now() - t0}ms outcome=${co.reason}-${co.decision} (in-process)`);
           process.stderr.write(co.message + '\n');
           if (co.decision === 'deny') return PULSE_DENY_EXIT;
         } else if (err instanceof PulseUnavailableError && config.on_timeout === 'deny') {

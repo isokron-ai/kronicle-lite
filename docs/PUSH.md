@@ -252,8 +252,8 @@ an agent runs it). Use both for git.
 | exit 77 (unreconciled retractions, or an integrity failure) | refuses: exit 77, nothing runs |
 | timeout (124/137/142: no answer within `KRONICLE_SHIM_TIMEOUT` s) | **loud, every time**: ``kronicle-lite check TIMED OUT after Ns — `<cmd>` was NOT checked; see D/.kronicle-shim/shim.log`` on stderr. `--on-timeout allow` (the default, for compatibility): runs the command. `--on-timeout deny`: refuses it, exit 77 (``… was NOT checked and NOT run (--on-timeout deny)``) |
 | no store found, or two different stores (0.8.1, [below](#which-store-the-shims-check)) | `--mode deny`: **refused**, exit 77, saying where it looked / which stores it found. `--mode warn`: runs, with a loud line every time |
-| the store file is damaged (0.8.1: bad header, SQLITE_CORRUPT / NOTADB, "database disk image is malformed") | an integrity failure: `--mode deny` **refuses** (exit 77), `--mode warn` runs with a loud `running UNCHECKED — the kronicle-lite store is CORRUPT` line every time. Never "unavailable" |
-| store present but cannot be opened (locked, I/O error: exit 3) | `--on-timeout allow` (default): **fail open** as below. `--on-timeout deny` (0.8.1): refused, exit 77 (``kronicle-lite store UNAVAILABLE … was NOT checked and NOT run``) |
+| the store file is damaged (0.8.1: bad header, SQLITE_CORRUPT / NOTADB, "database disk image is malformed") or there but unreadable for a reason that is not a lock (permissions, I/O error, a directory) | misconfiguration or damage: `--mode deny` **refuses** (exit 77), `--mode warn` runs with a loud `running UNCHECKED — the kronicle-lite store is CORRUPT` (or `UNREADABLE`) line every time. Never "unavailable" |
+| store locked or busy (SQLITE_BUSY / "database is locked": exit 3) | transient: `--on-timeout allow` (default): **fail open** as below. `--on-timeout deny` (0.8.1): refused, exit 77 (``kronicle-lite store UNAVAILABLE … was NOT checked and NOT run``) |
 | anything else: CLI missing, crash | **fail open**: runs the command; one line on stderr the first time (`D/.kronicle-shim/unavailable` marks it; cleared on the next good check), every occurrence logged in `D/.kronicle-shim/shim.log`, the reason in `last-error` |
 
 A timeout is a safety check that did not happen, so it is never quiet. Pick
@@ -382,6 +382,11 @@ resolve the store the way the server does:
    and `env -i` look in the same place), **plus** the nearest
    `.kronicle-lite/` holding a store found walking up from the directory
    the command acts on (the target below).
+
+**No store found → refused; the fix is `kronicle-lite shim install
+--data-dir DIR` (DIR = the server's `--data-dir`) or `KRONICLE_LITE_DATA_DIR=DIR`
+in the agent's environment.** A store with nothing read yet is fine: the
+first check records its head and passes.
 
 Exactly one store found: it is checked. **None**, or **two different
 ones**: the shim cannot tell which store the agent uses, says so (where it
