@@ -15,7 +15,7 @@ import { createPublicKey } from 'node:crypto';
 import type { Checkpoint } from '../chain/chain.js';
 import { chainIdFromPublicKeyPem, keyIdFromPublicKey } from '../crypto/keys.js';
 import type { KronicleLite } from '../store.js';
-import { AnchorApiError, AnchorClient, AnchorListingError, AnchorUnreachableError, type RemoteAnchor, type RemoteChain } from './client.js';
+import { AnchorApiError, AnchorClient, AnchorListingError, AnchorRateLimitedError, AnchorUnreachableError, type RemoteAnchor, type RemoteChain } from './client.js';
 import { AnchorConfigError, assertAnchorTransport, loadConfig, type AnchorConfig } from './config.js';
 import { anchorReceiptJcs, type AnchorReceipt } from './receipt.js';
 import {
@@ -38,6 +38,8 @@ export interface AnchorCallOptions {
   insecureHttp?: boolean;
   fetch?: typeof fetch;
   timeoutMs?: number;
+  /** Waits between 429 retries (tests inject a fake clock). */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 function configFor(store: KronicleLite, opts: AnchorCallOptions): AnchorConfig {
@@ -53,6 +55,7 @@ function clientFor(cfg: AnchorConfig, opts: AnchorCallOptions): AnchorClient {
   return new AnchorClient(cfg.anchor_url, {
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    ...(opts.sleep ? { sleep: opts.sleep } : {}),
   });
 }
 
@@ -660,7 +663,7 @@ export async function tryPushCheckpoint(store: KronicleLite, opts: AnchorCallOpt
     const error: PushOutcome['error'] =
       err instanceof AnchorUnreachableError
         ? 'anchor_unreachable'
-        : err instanceof AnchorApiError
+        : err instanceof AnchorApiError || err instanceof AnchorRateLimitedError
           ? 'anchor_refused'
           : err instanceof AnchorConfigError || err instanceof ServiceKeyTrustError
             ? 'anchor_config'

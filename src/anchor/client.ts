@@ -120,6 +120,39 @@ export interface AnchorClientOptions {
   fetch?: typeof fetch;
   preloadedKeys?: ServiceKeys | null;
   timeoutMs?: number;
+  /** Waits between 429 retries (tests inject a fake clock). */
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/** Page size the client asks for (the service's CHAIN_PAGE_MAX). */
+export const CHAIN_PAGE_LIMIT = 500;
+/** 429 handling for GETs: at most this many retries per request… */
+export const MAX_RATE_LIMIT_RETRIES = 3;
+/** …each waiting `retry-after`, which must be at most this long, or we give up. */
+export const MAX_RETRY_AFTER_MS = 60_000;
+/** `retry-after` absent or unreadable: wait this long. */
+export const DEFAULT_RETRY_AFTER_MS = 1_000;
+
+/** `retry-after` as delta-seconds or an HTTP date, in ms (≥ 0); null when absent or unreadable. */
+export function parseRetryAfter(value: string | null, now = Date.now()): number | null {
+  if (value === null) return null;
+  const v = value.trim();
+  if (/^\d+$/.test(v)) return Number(v) * 1000;
+  if (!/^[A-Za-z]{3}, /.test(v)) return null; // HTTP-date (IMF-fixdate), e.g. "Mon, 02 Nov 2026 00:00:30 GMT"
+  const t = Date.parse(v);
+  return Number.isFinite(t) ? Math.max(0, t - now) : null;
+}
+
+/** The service kept answering 429 (or asked to wait longer than MAX_RETRY_AFTER_MS). */
+export class AnchorRateLimitedError extends Error {
+  override readonly name = 'AnchorRateLimitedError';
+  constructor(
+    readonly url: string,
+    readonly what: string,
+    readonly detail: string,
+  ) {
+    super(`anchor service at ${url} rate-limited ${what}: ${detail}`);
+  }
 }
 
 function describeFetchError(err: unknown): string {
@@ -140,16 +173,18 @@ export class AnchorClient {
   private keysCache: ServiceKeys | null;
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly sleep: (ms: number) => Promise<void>;
 
   constructor(baseUrl: string, opts: AnchorClientOptions = {}) {
     this.baseUrl = baseUrl.replace(/\/+$/, '');
     this.fetchImpl = opts.fetch ?? ((...a) => globalThis.fetch(...a));
     this.keysCache = opts.preloadedKeys ?? null;
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_ANCHOR_TIMEOUT_MS;
+    this.sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   }
 
   /** fetch + JSON parse; anything that is not a JSON answer is "unreachable". */
-  private async request(path: string, init: RequestInit = {}): Promise<{ status: number; json: unknown; isJson: boolean }> {
+  private async request(path: string, init: RequestInit = {}): Promise<{ status: number; json: unknown; isJson: boolean; retryAfter: string | null }> {
     const url = `${this.baseUrl}${path}`;
     let res: Response;
     try {
@@ -166,7 +201,28 @@ export class AnchorClient {
     } catch {
       isJson = false;
     }
-    return { status: res.status, json, isJson };
+    return { status: res.status, json, isJson, retryAfter: res.headers.get('retry-after') };
+  }
+
+  /**
+   * A GET that honours 429: waits `retry-after` (default 1 s) and retries,
+   * at most MAX_RATE_LIMIT_RETRIES times; a wait longer than
+   * MAX_RETRY_AFTER_MS, or a 429 after the last retry, throws
+   * AnchorRateLimitedError (fail closed). POST /v1/anchor is not retried here.
+   */
+  private async getWithRetry(path: string, what: string): Promise<{ status: number; json: unknown; isJson: boolean; retryAfter: string | null }> {
+    for (let attempt = 0; ; attempt++) {
+      const r = await this.request(path, { headers: { accept: 'application/json' } });
+      if (r.status !== 429) return r;
+      if (attempt >= MAX_RATE_LIMIT_RETRIES) {
+        throw new AnchorRateLimitedError(this.baseUrl, what, `still 429 after ${MAX_RATE_LIMIT_RETRIES} retries; giving up`);
+      }
+      const wait = parseRetryAfter(r.retryAfter) ?? DEFAULT_RETRY_AFTER_MS;
+      if (wait > MAX_RETRY_AFTER_MS) {
+        throw new AnchorRateLimitedError(this.baseUrl, what, `retry-after ${Math.ceil(wait / 1000)} s exceeds ${MAX_RETRY_AFTER_MS / 1000} s; giving up`);
+      }
+      await this.sleep(wait);
+    }
   }
 
   private refusal(status: number, json: unknown, isJson: boolean, what: string): Error {
@@ -193,8 +249,11 @@ export class AnchorClient {
   /**
    * The service's view of a chain with EVERY anchor, or null when nothing was
    * anchored for it. Since isokron-anchor hardening A2-13 the listing is
-   * paginated (≤ 500 per page, `next_cursor`, null on the last page); a
-   * service from before that returns one page without `next_cursor`. Throws
+   * paginated (≤ 500 per page, `next_cursor`, null on the last page). Every
+   * request carries `?limit=500` (plus `&cursor=` after the first page); a
+   * service from before that ignores both and returns one page without
+   * `next_cursor`. A 429 is retried after `retry-after` (≤ 60 s, ≤ 3 times
+   * per page); after that the listing is rejected. Throws
    * AnchorListingError — never a short list — when a page breaks the
    * protocol: a later page without `next_cursor`, a cursor seen before, an
    * anchor listed twice, another chain's page, more than MAX_CHAIN_PAGES
@@ -207,9 +266,27 @@ export class AnchorClient {
     const seen = new Set<string>();
     let cursor: string | null = null;
     for (let page = 0; page < MAX_CHAIN_PAGES; page++) {
-      const qs = cursor === null ? '' : `?cursor=${encodeURIComponent(cursor)}`;
+      // Always ask for a page: a hardened service serves an unpaged list only
+      // up to CHAIN_UNPAGED_MAX and answers 400 paginate_required above it; a
+      // pre-pagination service ignores the parameters.
+      const qs = `?limit=${CHAIN_PAGE_LIMIT}${cursor === null ? '' : `&cursor=${encodeURIComponent(cursor)}`}`;
       const what = `GET /v1/chains/${chain_id.slice(0, 12)}…${page > 0 ? ` (page ${page + 1})` : ''}`;
-      const r = await this.request(`/v1/chains/${chain_id}${qs}`, { headers: { accept: 'application/json' } });
+      let r: Awaited<ReturnType<AnchorClient['getWithRetry']>>;
+      try {
+        r = await this.getWithRetry(`/v1/chains/${chain_id}${qs}`, what);
+        if (r.status === 400 && r.isJson && (r.json as { error?: unknown }).error === 'paginate_required') {
+          // Should not happen with ?limit; retry the page once, then fail closed.
+          r = await this.getWithRetry(`/v1/chains/${chain_id}${qs}`, what);
+          if (r.status === 400 && r.isJson && (r.json as { error?: unknown }).error === 'paginate_required') {
+            throw new AnchorListingError(this.baseUrl, `${what} answered 400 paginate_required although ?limit=${CHAIN_PAGE_LIMIT} was sent`);
+          }
+        }
+      } catch (e) {
+        // Rate-limited mid-listing: the list is incomplete; report it as such
+        // (callers still check every receipt they hold).
+        if (e instanceof AnchorRateLimitedError) throw new AnchorListingError(this.baseUrl, `${e.what}: ${e.detail}`);
+        throw e;
+      }
       if (page === 0 && r.status === 404 && r.isJson && typeof (r.json as { error?: unknown }).error === 'string') return null;
       if (!(r.status === 200 && r.isJson && Array.isArray((r.json as { anchors?: unknown }).anchors))) throw this.refusal(r.status, r.json, r.isJson, what);
       const body = r.json as RemoteChain & { next_cursor?: unknown; page?: unknown };
@@ -249,7 +326,7 @@ export class AnchorClient {
 
   async serviceKeys(): Promise<ServiceKeys> {
     if (this.keysCache) return this.keysCache;
-    const r = await this.request('/.well-known/anchor-keys.json', { headers: { accept: 'application/json' } });
+    const r = await this.getWithRetry('/.well-known/anchor-keys.json', 'GET /.well-known/anchor-keys.json');
     if (r.status === 200 && r.isJson && Array.isArray((r.json as { keys?: unknown }).keys)) {
       this.keysCache = r.json as ServiceKeys;
       return this.keysCache;
