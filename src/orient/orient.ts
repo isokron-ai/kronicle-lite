@@ -233,6 +233,7 @@ export class Orient {
    */
   storeHealth: (() => string | null) | null = null;
   private lastHead: ChainHead | null = null;
+  private projectionMemo: { key: string; problem: string | null; blocks_checked: number; fts: boolean } | null = null;
 
   constructor(
     private readonly db: ConstructorParameters<typeof FlightRecorder>[0],
@@ -559,31 +560,53 @@ export class Orient {
       }
     }
     // Live blocks are always re-hashed (a tampered row must surface on every path, the push hook's too).
-    const blocks = opts.eventsOnly ? [] : this.docs.liveBlockRows(2000);
-    if (!problem) {
-      for (const b of blocks) {
-        const p = checkBlockRow(this.chain, b);
-        if (p) {
-          problem = `block ${b.block_id} (${p}): its stored text does not match the chain`;
-          break;
+    // 0.8.1: the projection part of the pass (live-block re-hash, lifecycle and lineage rows against
+    // the chain, the FTS index) is memoised per database state, so repeated pulses in a long-lived
+    // server cost a lookup: any write by this connection (total_changes) or another (data_version),
+    // or a new head, re-runs it.
+    let blocks_checked = 0;
+    if (!problem && !opts.eventsOnly) {
+      const memo = this.projectionMemo;
+      const fresh = memo !== null && memo.key === this.dbStateKey() && (!opts.fts || memo.fts);
+      if (fresh) {
+        problem = memo.problem;
+        blocks_checked = memo.blocks_checked;
+      } else {
+        const blocks = this.docs.liveBlockRows(2000);
+        blocks_checked = blocks.length;
+        for (const b of blocks) {
+          const p = checkBlockRow(this.chain, b);
+          if (p) {
+            problem = `block ${b.block_id} (${p}): its stored text does not match the chain`;
+            break;
+          }
         }
+        // 0.8.1 (R2-09): lifecycle and lineage rows of the projection against the chain (what
+        // recall, pending and the derived pass read), and (R2-17) the full-text index.
+        if (!problem) {
+          const lc = checkBlockLifecycle(this.db);
+          if (lc) problem = `projection: ${lc}`;
+        }
+        if (!problem && this.lineage) {
+          const lp = this.lineage.checkProjection();
+          if (lp) problem = `projection: ${lp}`;
+        }
+        if (!problem && opts.fts) {
+          const f = checkFtsContent(this.db);
+          if (f) problem = f;
+        }
+        // Keyed after the checks (the FTS check itself counts as a change).
+        this.projectionMemo = { key: this.dbStateKey(), problem, blocks_checked, fts: opts.fts === true };
       }
     }
-    // 0.8.1 (R2-09): lifecycle and lineage rows of the projection against the chain (what
-    // recall, pending and the derived pass read), and (R2-17) the full-text index.
-    if (!problem && !opts.eventsOnly) {
-      const lc = checkBlockLifecycle(this.db);
-      if (lc) problem = `projection: ${lc}`;
-    }
-    if (!problem && !opts.eventsOnly && this.lineage) {
-      const lp = this.lineage.checkProjection();
-      if (lp) problem = `projection: ${lp}`;
-    }
-    if (!problem && opts.fts) {
-      const f = checkFtsContent(this.db);
-      if (f) problem = f;
-    }
-    return { ok: problem === null, events_checked, blocks_checked: blocks.length, problem, seq };
+    return { ok: problem === null, events_checked, blocks_checked, problem, seq };
+  }
+
+  /** This connection's view of the database state: another connection's commit, this one's writes, the head. */
+  private dbStateKey(): string {
+    const dv = String(this.db.pragma('data_version', { simple: true }));
+    const tc = (this.db.prepare('SELECT total_changes() AS n').get() as { n: number }).n;
+    return `${dv}:${tc}:${this.chain.head().seq}`;
   }
 
   /**

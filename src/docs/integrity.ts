@@ -334,8 +334,10 @@ const RETIRED_ID = `(CASE WHEN json_valid(e.payload_canonical) THEN json_extract
 export function checkBlockLifecycle(db: Db): string | null {
   const live = db
     .prepare(
-      `SELECT b.block_id FROM blocks b WHERE b.valid_to IS NULL AND b.tombstoned_at IS NULL AND EXISTS (
-         SELECT 1 FROM events e WHERE e.event_type IN ('block.superseded', 'block.tombstoned') AND ${RETIRED_ID} = b.block_id) LIMIT 1`,
+      // IN over the retired ids (materialised once), not a correlated EXISTS: the planner would
+      // otherwise scan every retirement event per live block (seconds on a 1k-document store).
+      `SELECT b.block_id FROM blocks b WHERE b.valid_to IS NULL AND b.tombstoned_at IS NULL AND b.block_id IN (
+         SELECT ${RETIRED_ID} FROM events e WHERE e.event_type IN ('block.superseded', 'block.tombstoned')) LIMIT 1`,
     )
     .get() as { block_id: string } | undefined;
   if (live) return `block ${live.block_id} is live in the projection but the chain retired it`;
