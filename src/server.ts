@@ -13,14 +13,15 @@
  * instance is cheap and stateless (spec: "Statelessness").
  */
 
-import { McpServer, ResourceTemplate, type McpServerFactory } from '@modelcontextprotocol/server';
+import { McpServer, ProtocolError, ResourceNotFoundError, ResourceTemplate, type McpServerFactory } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 
 import { anchorStatus, tryPushCheckpoint, verifyLastAnchor } from './anchor/anchor.js';
 import { ChainConflictError } from './chain/index.js';
 import { bindGit } from './git/binding.js';
-import type { DocumentSource } from './docs/documents.js';
+import type { BlockSummary, DocumentSource } from './docs/documents.js';
 import { DocumentError } from './docs/documents.js';
+import { revisionBlocks } from './docs/put-blocks.js';
 import { checkRevisionRow } from './docs/integrity.js';
 import { FOCUSES, type ProjectScope } from './orient/orient.js';
 import { renderSystemStateMarkdown } from './orient/render.js';
@@ -86,7 +87,10 @@ export const CACHE_HINTS = {
 
 const ACTOR = z.string().min(1).max(200).optional().describe('Your agent id (default: server --actor). Cursors are bound to it.');
 
-const CURSOR = z.string().optional().describe('Your latest cursor (for the stale-write advisory).');
+/** 0.8.1: cursors are a few hundred characters; the bound keeps every schema-valid call under the message limit. */
+const CURSOR_MAX = 8192;
+
+const CURSOR = z.string().max(CURSOR_MAX).optional().describe('Your latest cursor (for the stale-write advisory).');
 
 const REDACT = z.boolean().default(false).describe('Store a redacted copy instead of refusing a detected secret.');
 
@@ -95,7 +99,7 @@ const REDACT = z.boolean().default(false).describe('Store a redacted copy instea
  * relies on inference from what you read this session).
  */
 const DERIVED_FROM = z
-  .array(z.strictObject({ block_id: z.uuid(), content_hash: z.string().regex(/^[0-9a-f]{64}$/) }))
+  .array(z.strictObject({ block_id: z.guid(), content_hash: z.string().regex(/^[0-9a-f]{64}$/) }))
   .max(200)
   .optional()
   .describe('Blocks (from recall) this text was derived from; when one changes, this note is marked stale. Inferred from your reads when omitted.');
@@ -112,15 +116,119 @@ type ToolResult = {
  */
 export const DEFAULT_MCP_MAX_CHARS = 4000;
 
-/** Structured result: the value as structuredContent and, for text-only clients, as JSON (pretty unless compact). */
-function json(value: object, opts: { compact?: boolean } = {}): ToolResult {
+/**
+ * 0.8.1 (P2-02): every tool result, text block and structuredContent
+ * together, stays under this many bytes of JSON. TS SDK stdio clients (v1 and
+ * v2) close the connection on a line over 10 MiB; a result over the budget is
+ * answered with a `result_too_large` tool error instead.
+ */
+export const RESULT_BUDGET_BYTES = 8 * 1024 * 1024;
+
+/**
+ * 0.8.1 (P2-05): a document's markdown, as JSON on the wire (control
+ * characters escape to 6 bytes), is at most this large, so reading it back
+ * (resources/read) fits a 10 MiB client buffer. Checked before anything is
+ * written; `markdown` maxLength (2,000,000 characters) still applies.
+ */
+export const MAX_DOCUMENT_BYTES = 8 * 1024 * 1024;
+
+/** 0.8.1 (P2-02): put_document lists at most this many blocks (and PUT_BLOCKS_BYTES of them); the rest is paged. */
+export const PUT_BLOCKS_LISTED = 100;
+const PUT_BLOCKS_BYTES = 64 * 1024;
+/** Page size of kronicle://docs/{slug}/blocks/{revision}/{offset} (and a byte cap per page). */
+export const BLOCKS_PAGE_SIZE = 1000;
+const BLOCKS_PAGE_BYTES = 1024 * 1024;
+
+export function blocksUri(slug: string, revision: number, offset: number): string {
+  return `kronicle://docs/${encodeURIComponent(slug)}/blocks/${revision}/${offset}`;
+}
+
+/** Structured result: the value as structuredContent and, for text-only clients, the same value as compact JSON. */
+function json(value: object): ToolResult {
   return {
-    content: [{ type: 'text', text: opts.compact ? JSON.stringify(value) : JSON.stringify(value, null, 2) }],
+    content: [{ type: 'text', text: JSON.stringify(value) }],
     structuredContent: value as Record<string, unknown>,
   };
 }
 
+/** 0.8.1 (P2-02): enforce RESULT_BUDGET_BYTES on any tool result. */
+export function withinBudget(result: ToolResult, tool: string): ToolResult {
+  const bytes = Buffer.byteLength(JSON.stringify(result));
+  if (bytes <= RESULT_BUDGET_BYTES) return result;
+  return {
+    isError: true,
+    content: [
+      {
+        type: 'text',
+        text: JSON.stringify({
+          error: 'result_too_large',
+          message: `${tool} produced a ${bytes}-byte result; the limit is ${RESULT_BUDGET_BYTES} bytes. Narrow the call (a smaller budget_tokens / max_chars / top_k, fewer claims) and retry.`,
+          bytes,
+          limit: RESULT_BUDGET_BYTES,
+        }),
+      },
+    ],
+  };
+}
+
+/** The first blocks that fit PUT_BLOCKS_LISTED / PUT_BLOCKS_BYTES. */
+function firstBlocks(blocks: readonly BlockSummary[], max: number, maxBytes: number): BlockSummary[] {
+  const out: BlockSummary[] = [];
+  let bytes = 2;
+  for (const b of blocks) {
+    if (out.length >= max) break;
+    const n = Buffer.byteLength(JSON.stringify(b)) + 1;
+    if (out.length > 0 && bytes + n > maxBytes) break;
+    out.push(b);
+    bytes += n;
+  }
+  return out;
+}
+
+/**
+ * 0.8.1 (P2-02): put_document's compatible summary. `blocks` keeps its shape
+ * and order but lists at most the first PUT_BLOCKS_LISTED entries; the
+ * counts cover all of them and `blocks_next` pages the rest.
+ */
+export function summarizePutBlocks(slug: string, revision: number, blocks: readonly BlockSummary[]) {
+  const listed = firstBlocks(blocks, PUT_BLOCKS_LISTED, PUT_BLOCKS_BYTES);
+  const added = blocks.filter((b) => b.status === 'created').length;
+  const kept = blocks.filter((b) => b.status === 'unchanged').length;
+  const retired = blocks.filter((b) => b.status === 'tombstoned').length + blocks.filter((b) => b.supersedes !== undefined).length;
+  const truncated = listed.length < blocks.length;
+  return {
+    blocks: listed,
+    block_counts: { total: blocks.length, listed: listed.length, added, kept, retired },
+    blocks_truncated: truncated,
+    blocks_next: truncated ? blocksUri(slug, revision, listed.length) : null,
+  };
+}
+
+/** 0.8.1 (P2-14): a schema-valid call the server cannot serve as asked (code invalid_params, or a more specific one). */
+class InvalidParamsError extends Error {
+  constructor(
+    message: string,
+    readonly code: string = 'invalid_params',
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * 0.8.1 (P2-10): resources/read of something that does not exist is "resource
+ * not found", not an internal error. The 2026-07-28 spec makes that -32602
+ * with `data.uri` (MUST; clients SHOULD also accept the older -32002), and SDK
+ * 2.4 encodes a thrown -32002 as -32602 on every revision, so this is the
+ * SDK's ResourceNotFoundError: -32602, data { uri }.
+ */
+function resourceNotFound(uri: string, detail: string): ProtocolError {
+  return new ResourceNotFoundError(uri, `Resource not found: ${uri} (${detail})`);
+}
+
 function errorResult(err: unknown): ToolResult {
+  if (err instanceof InvalidParamsError) {
+    return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err.code, message: err.message }) }] };
+  }
   if (err instanceof SecretDetectedError) {
     // Findings name the detector and line only; the secret is never echoed.
     return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err.code, message: err.message, findings: err.findings }) }] };
@@ -174,10 +282,12 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
   // 0.6.0: the core profile registers only CORE_TOOLS.
   const core = opts.profile === 'core';
   const register = server.registerTool.bind(server);
-  const registerTool = ((name: string, ...rest: unknown[]) =>
+  // 0.8.1 (P2-02): every handler's result goes through the byte budget.
+  const budgeted = (name: string, cb: unknown) => async (...a: unknown[]) => withinBudget((await (cb as (...x: unknown[]) => ToolResult | Promise<ToolResult>)(...a)) as ToolResult, name);
+  const registerTool = ((name: string, config: unknown, cb: unknown) =>
     core && !(CORE_TOOLS as readonly string[]).includes(name)
       ? undefined
-      : (register as (...a: unknown[]) => unknown)(name, ...rest)) as typeof server.registerTool;
+      : (register as (...a: unknown[]) => unknown)(name, config, budgeted(name, cb))) as typeof server.registerTool;
 
   // ───────────────────────────── orient ─────────────────────────────
 
@@ -193,7 +303,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
       inputSchema: lean(
         z.object({
           budget_tokens: z.number().int().min(200).max(64_000).default(3000),
-          since_cursor: z.string().optional().describe('cursor or cursor_compact from your last call'),
+          since_cursor: z.string().max(CURSOR_MAX).optional().describe('cursor or cursor_compact from your last call'),
           focus: z.enum(FOCUSES).default('orientation'),
           response_format: z.enum(['markdown', 'json']).default('markdown'),
           all_projects: z.boolean().default(false).describe('Include other projects\' documents and retractions.'),
@@ -293,7 +403,6 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
             session_since: store.orient.sessionStart(actor_id, args.cursor),
             project_keys: args.all_projects ? null : (opts.project?.keys ?? null),
           }),
-          { compact: true },
         );
       } catch (err) {
         return errorResult(err);
@@ -356,6 +465,12 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     },
     async (args) => {
       try {
+        // 0.8.1 (P2-14): an out-of-range request is the caller's error, not "internal".
+        const head = store.chain.head().seq;
+        const to = args.to_seq ?? head;
+        if (to > head || args.from_seq > to) {
+          return errorResult(new InvalidParamsError(`checkpoint range [${args.from_seq}, ${to}] is outside the chain (head seq ${head}); to_seq must be ≤ ${head} and ≥ from_seq`));
+        }
         const cp = store.chain.checkpoint(args.from_seq, args.to_seq);
         if (!args.push) return json(cp);
         const anchor = await tryPushCheckpoint(store, { checkpointId: cp.checkpoint_id });
@@ -424,6 +539,16 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
         if (args.bind_git && !args.source_path) {
           return errorResult(new DocumentError('invalid_source', 'bind_git requires source_path'));
         }
+        // 0.8.1 (P2-05): bounded in wire bytes, not only characters (resources/read must fit a 10 MiB client buffer).
+        const wireBytes = Buffer.byteLength(JSON.stringify(args.markdown));
+        if (wireBytes > MAX_DOCUMENT_BYTES) {
+          return errorResult(
+            new InvalidParamsError(
+              `markdown is ${wireBytes} bytes as JSON (control characters escape to 6 bytes each); the limit is ${MAX_DOCUMENT_BYTES}. Split it into several documents.`,
+              'document_too_large',
+            ),
+          );
+        }
         const warnings: string[] = [];
         let source: DocumentSource | undefined;
         if (args.source_path !== undefined) {
@@ -448,6 +573,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
         });
         return json({
           ...result,
+          ...summarizePutBlocks(result.slug, result.revision, result.blocks),
           ...(source !== undefined ? { source } : {}),
           ...(warnings.length > 0 ? { warnings } : {}),
           stale_write_advisory,
@@ -465,7 +591,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
       description: 'Replace one live block\'s content, with a reason. Receipts for the old block then verify as SUPERSEDED.',
       inputSchema: lean(
         z.object({
-          block_id: z.uuid(),
+          block_id: z.guid(),
           new_content: z.string().min(1).max(200_000),
           reason: z.string().min(1).max(1000),
           redact_secrets: REDACT,
@@ -503,7 +629,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     {
       title: 'Retire one block',
       description: 'Retire one live block with a reason (no successor). Receipts for it then verify as TOMBSTONED.',
-      inputSchema: lean(z.object({ block_id: z.uuid(), reason: z.string().min(1).max(1000), cursor: CURSOR, actor_id: ACTOR }), 'input'),
+      inputSchema: lean(z.object({ block_id: z.guid(), reason: z.string().min(1).max(1000), cursor: CURSOR, actor_id: ACTOR }), 'input'),
       outputSchema: lean(TombstoneBlockResultSchema, 'output'),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
@@ -551,9 +677,9 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
         slug = raw;
       }
       const doc = store.docs.getDocument(slug);
-      if (!doc) throw new Error(`no document ${slug}`);
+      if (!doc) throw resourceNotFound(uri.href, `no document ${slug}`);
       const rev = store.docs.getRevision(doc.doc_id, doc.current_revision);
-      if (!rev) throw new Error(`no revision ${doc.current_revision} of ${slug}`);
+      if (!rev) throw resourceNotFound(uri.href, `no revision ${doc.current_revision} of ${slug}`);
       // 0.5.0: never serve text that does not hash to the chain.
       const problem = checkRevisionRow(store.chain, rev);
       if (problem) throw new Error(`integrity failure (${problem}) in ${slug}@${rev.revision}: the stored text does not match the chain; run kronicle-lite verify-chain`);
@@ -562,6 +688,45 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
       // Unreleased: a document read is a read of its current version (pending reconciliation).
       store.lineage.recordDocumentRead(defaultActor, doc.doc_id, 'document');
       return { contents: [{ uri: uri.href, mimeType: 'text/markdown', text: markdown }] };
+    },
+  );
+
+  // 0.8.1 (P2-02): the full block list of a put, paged (put_document's blocks_next points here).
+  server.registerResource(
+    'document-blocks',
+    new ResourceTemplate('kronicle://docs/{slug}/blocks/{revision}/{offset}', { list: undefined }),
+    {
+      title: 'Document blocks',
+      description: `Every block of one document revision as put_document reports it (created / unchanged / tombstoned), ${BLOCKS_PAGE_SIZE} per page; next is the following page.`,
+      mimeType: 'application/json',
+      cacheHint: CACHE_HINTS['resources/read'],
+    },
+    (uri, vars) => {
+      let slug: string;
+      try {
+        slug = decodeURIComponent(String(vars['slug']));
+      } catch {
+        throw resourceNotFound(uri.href, 'bad slug encoding');
+      }
+      const revision = Number(vars['revision']);
+      const offset = Number(vars['offset']);
+      if (!Number.isInteger(revision) || revision < 1 || !Number.isInteger(offset) || offset < 0) {
+        throw new ProtocolError(-32602, `revision must be a positive integer and offset a non-negative integer in ${uri.href}`, { uri: uri.href });
+      }
+      const all = revisionBlocks(store.db, slug, revision);
+      if (!all) throw resourceNotFound(uri.href, `no revision ${revision} of ${slug}`);
+      const page = firstBlocks(all.blocks.slice(offset), BLOCKS_PAGE_SIZE, BLOCKS_PAGE_BYTES);
+      const end = offset + page.length;
+      const body = {
+        doc_id: all.doc_id,
+        slug,
+        revision,
+        total: all.blocks.length,
+        offset,
+        blocks: page,
+        next: end < all.blocks.length ? blocksUri(slug, revision, end) : null,
+      };
+      return { contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(body) }] };
     },
   );
 

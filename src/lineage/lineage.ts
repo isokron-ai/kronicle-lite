@@ -27,6 +27,7 @@
  * versions are the same (AST-equivalent, identical text leaves).
  */
 
+import { bestEffortWrite } from '../db/storage.js';
 import type BetterSqlite3 from 'better-sqlite3';
 
 import type { Chain } from '../chain/index.js';
@@ -487,10 +488,13 @@ export class Lineage {
     const now = new Date().toISOString();
     const rev = this.q(`SELECT current_revision FROM documents WHERE doc_id = ?`);
     const ins = this.q(`INSERT INTO reads (actor_id, doc_id, block_id, content_hash, doc_revision, head_seq, read_at, via) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
-    for (const b of blocks) {
-      const r = rev.get(b.doc_id) as { current_revision: number } | undefined;
-      ins.run(actor_id, b.doc_id, b.block_id, b.content_hash, r?.current_revision ?? 0, head, now, via);
-    }
+    // 0.8.1: on a read-only or full store the read is served but not logged (pending stays: fail-safe).
+    bestEffortWrite(() => {
+      for (const b of blocks) {
+        const r = rev.get(b.doc_id) as { current_revision: number } | undefined;
+        ins.run(actor_id, b.doc_id, b.block_id, b.content_hash, r?.current_revision ?? 0, head, now, via);
+      }
+    });
   }
 
   /** Record a whole-document read (and one row per live block) of the current revision. */
@@ -505,7 +509,7 @@ export class Lineage {
       ins.run(actor_id, doc_id, null, rev?.content_hash ?? '', doc.current_revision, head, now, via);
       for (const b of this.docs.liveBlocks(doc_id)) ins.run(actor_id, doc_id, b.block_id, b.content_hash, doc.current_revision, head, now, via);
     });
-    tx();
+    bestEffortWrite(() => tx());
   }
 
   // ───────────────────────────── pending ─────────────────────────────

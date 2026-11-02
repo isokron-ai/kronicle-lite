@@ -61,6 +61,7 @@ describe('doctor', () => {
       'chain',
       'projection',
       'fts',
+      'writers',
       'config',
       'anchor-local',
       'catalog',

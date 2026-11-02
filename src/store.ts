@@ -36,10 +36,18 @@ export class KronicleLite {
   readonly auditor: AssumptionAuditor;
   /** Unreleased: derived-note lineage, the read log and per-actor pending changes. */
   readonly lineage: Lineage;
+  /** 0.8.1: opened read-only (requested, or the data dir refuses writes); writes fail with SQLITE_READONLY. */
+  readonly readOnly: boolean;
+  /** 0.8.1: how a read-only store was opened (in place, a private snapshot, an in-memory image). */
+  readonly openedVia: 'read-write' | 'read-only' | 'snapshot' | 'memory-image';
+  private readonly cleanup: (() => void) | undefined;
 
   constructor(opts: KronicleLiteOptions = {}) {
     const opened = openDatabase(opts);
     this.db = opened.db;
+    this.readOnly = opened.readOnly === true;
+    this.openedVia = opened.via ?? 'read-write';
+    this.cleanup = opened.cleanup;
     this.identity = opened.identity;
     this.dataDir = opened.dataDir;
     this.chain = new Chain(this.db, this.identity.signer);
@@ -56,6 +64,7 @@ export class KronicleLite {
 
   close(): void {
     this.db.close();
+    this.cleanup?.();
   }
 
   /**

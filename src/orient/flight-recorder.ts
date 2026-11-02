@@ -4,6 +4,7 @@
  * operator can see exactly what an agent was told and when.
  */
 
+import { boundedBookkeepingWrite } from '../db/storage.js';
 import type { Db } from '../db/open.js';
 
 export interface FlightRecord {
@@ -40,6 +41,12 @@ export class FlightRecorder {
   constructor(private readonly db: Db) {}
 
   record(rec: FlightRecord): void {
+    // 0.8.1: a read-only or full store still briefs; the briefing is just not kept. Behind
+    // another process's long write it waits at most 1 s (C2-08), then skips the row.
+    boundedBookkeepingWrite(this.db, 1000, () => this.insert(rec));
+  }
+
+  private insert(rec: FlightRecord): void {
     this.db
       .prepare(
         `INSERT INTO flight_recorder (briefing_id, actor_id, issued_at, from_seq, to_seq, head_hash, focus, delta_hash, record_json)

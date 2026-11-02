@@ -327,7 +327,13 @@ export const SystemStateSchema = z.object({
     .nullable()
     .describe('Git-bound documents whose source file changed or was deleted since binding; null for focus=pulse and focus=retractions (not checked).'),
   integrity: z
-    .object({ ok: z.boolean(), events_checked: z.number().int().nonnegative(), blocks_checked: z.number().int().nonnegative(), problem: z.string().nullable() })
+    .object({
+      ok: z.boolean(),
+      events_checked: z.number().int().nonnegative(),
+      blocks_checked: z.number().int().nonnegative(),
+      problem: z.string().nullable(),
+      seq: z.number().int().nonnegative().nullable().optional().describe('Chain seq of the first bad event, when the problem is an event.'),
+    })
     .nullable(),
   scope: z
     .object({
@@ -594,7 +600,20 @@ export const PutDocumentResultSchema = z.object({
   revision: z.number().int().positive(),
   chain_seq: z.number().int().positive().describe('seq of the document.put event.'),
   head: ChainHeadSchema,
-  blocks: z.array(BlockSummarySchema),
+  blocks: z
+    .array(BlockSummarySchema)
+    .describe('0.8.1: the first block_counts.listed entries (at most 100), in ordinal order; blocks_next pages the rest.'),
+  block_counts: z
+    .object({
+      total: z.number().int().nonnegative().describe('Entries in the full list (added + kept + tombstoned).'),
+      listed: z.number().int().nonnegative().describe('Entries in `blocks`.'),
+      added: z.number().int().nonnegative().describe('New blocks, replacements included.'),
+      kept: z.number().int().nonnegative().describe('Unchanged blocks (same id).'),
+      retired: z.number().int().nonnegative().describe('Old blocks replaced or tombstoned by this put.'),
+    })
+    .describe('0.8.1: counts over every block of the put.'),
+  blocks_truncated: z.boolean().describe('0.8.1: true when `blocks` is not the whole list.'),
+  blocks_next: z.string().nullable().describe('0.8.1: resource URI (kronicle://docs/{slug}/blocks/{revision}/{offset}) of the rest of the list; null when blocks is complete.'),
   events: z.number().int().nonnegative().describe('Events appended by this call (0 on idempotent replay).'),
   source: DocumentSourceSchema.optional(),
   warnings: z.array(z.string()).optional().describe('Non-fatal notes, e.g. bind_git outside a git repository.'),
