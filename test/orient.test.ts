@@ -278,7 +278,7 @@ describe('Orient.getSystemState', () => {
     expect(s.recovery.method).toBe('genesis');
     expect(s.retractions).toEqual([]);
     expect(s.delta?.entries).toEqual([]);
-    expect(s.delta?.by_type).toEqual({ 'document.put': 1, 'block.created': 3, 'block.superseded': 1 });
+    expect(s.delta?.by_type).toEqual({ 'document.put': 1, 'block.created': 3, 'block.superseded': 1, 'document.revised': 1 });
     expect(s.digest).not.toBeNull(); // genesis recovery still gets the digest
     expect(s.integrity?.ok).toBe(true);
   });

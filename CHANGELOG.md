@@ -156,6 +156,57 @@ data dir prints `note: pinned 1 anchor service key(s) … on first use`;
   `ambiguous-store`; nothing was renamed or removed. `kronicle-lite pulse`
   without `--state` (a hook's own call) still exits 3 without a store.
 
+### Fixed — scale: bounded read log, cheap first contact, idempotent puts (hardening round 2, track 2: C2-09, C2-10)
+
+- **C2-09 (S3) — the read log is bounded and indexed.** `reads` (the local
+  log behind `pending`, `readCurrent`, lineage inference and `readersOf`)
+  was never pruned, and `pending` was linear in it (10k-doc store: 23 → 169
+  ms at 2k → 8k rows). Every question asked of the log is about the latest
+  read of a version, so per (actor, block, document, via) it now keeps only
+  the latest row by head seq, by read time and by insertion (normally one
+  row), pruned in the transaction that records a new read
+  (`src/lineage/read-log.ts`). Receipts stay (signed artifacts) but are
+  folded into the log, one row per actor and block, behind
+  `meta.reads_receipts_mark`; readers union the log with only the receipts
+  after the mark, so receipts an older binary writes are still seen. Same
+  store, same harness (`kl-reads-growth.mjs`): the log stays at 370 rows
+  (the blocks actually read) instead of 8000, `pending` 1–6 ms instead of
+  169 ms. New indexes `reads_actor_key_idx`, `reads_block_idx`,
+  `reads_doc_idx`, `receipts_actor_rowid_idx`; `reads_actor_block_idx` is
+  dropped. **Migration (forward-only, local tables only, no chain or hash
+  change):** the indexes are created on open; the first read-log write
+  compacts a 0.8.0 log once (`meta.reads_compacted`) and folds its receipts.
+  Answers are identical before and after (tested against a store written by
+  0.8.0, `test/fixtures/store-0.8.0.db.gz`). An older binary can still open
+  the store; it recreates the dropped index and writes unpruned rows, which
+  the next 0.8.1 write prunes.
+- **C2-09 — a first-contact `orient --focus retractions` answers from
+  indexes.** An actor with no briefing and no reads or receipts has relied
+  on nothing, so there is nothing to retract: `retractions` is `[]`, the
+  delta counts come from the `(event_type, seq)` index (identical to the
+  full fold; with a project scope one SQL pass counts `hidden_events`), and
+  integrity re-hashes the last 1000 events and the newest live blocks
+  instead of the whole chain. 10k docs (60k events), same loaded host, 0.8.0
+  → 0.8.1: in-process 4.7 s → 0.67 s (scoped 7.1 s → 1.1 s); CLI
+  `orient --focus retractions --all-projects` 2.2–10.1 s (six runs) → 0.39–1.5 s
+  (four runs). An actor that read anything before its first orient still gets
+  the full listing. The shims' genesis path (which re-seeds) benefits most.
+  In the track's 400-loop server soak the pulse p95 no longer climbs with
+  the read log (0.8.0: 98 → 184 and 49 → 176 ms; 0.8.1: 30 → 51 and
+  56 → 28 ms).
+- **C2-09 — `verify-chain --from N`** was already windowed (0.07 s for the
+  last 1000 of 60k events in-process); `verify-chain` without `--from` is the
+  whole chain plus the projection by design (the track's "last 1000" label
+  ran the whole-chain form).
+- **C2-10 (S3) — puts are idempotent by content.** 20 concurrent
+  `put --from-instructions` after one CLAUDE.md edit appended 10 and 4
+  identical `document.put` events. `putDocument` now appends nothing (and
+  reports `events: 0`, the current revision) when the current revision's put
+  already records the same markdown, title, source and project, decided
+  inside the write transaction; a put with lineage, an idempotency key, or
+  any recorded difference appends as before. Instruction import reports such
+  a put as `unchanged`.
+
 ## [0.8.0] — 2026-11-01
 
 ### Fixed — a pulse never reads as a clean bill
