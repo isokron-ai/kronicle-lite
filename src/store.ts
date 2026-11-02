@@ -4,11 +4,13 @@
  * both talk to this.
  */
 
+import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 
 import { Chain, ChainEventSchema, type ChainEvent, type VerifyChainResult } from './chain/index.js';
 import type { ServerIdentity } from './crypto/keys.js';
+import { StoreFileHealth } from './db/health.js';
 import { openDatabase, type Db, type OpenOptions } from './db/open.js';
 import { DocumentStore } from './docs/documents.js';
 import { rebuildProjection, verifyProjection, type ProjectionResult } from './docs/integrity.js';
@@ -49,7 +51,12 @@ export class KronicleLite {
     this.verifier = new ReceiptVerifier(this.db, this.chain, this.docs);
     this.orient = new Orient(this.db, this.chain, this.docs, this.identity.cursor_secret, opts.orient, this.lineage);
     // Lineage inference: what the author read since its session started (its cursor's briefing, else its latest orient).
-    this.docs.lineageInference = (actor_id, cursor, exclude) => this.lineage.infer(actor_id, this.orient.sessionStart(actor_id, cursor), exclude);
+    // 0.8.1: the session as a chain position (C2-05), plus the 24 h / 200 window whatever briefings came between (R2-04).
+    this.docs.lineageInference = (actor_id, cursor, exclude, o) => this.lineage.inferForWrite(actor_id, this.orient.sessionStartSeq(actor_id, cursor), exclude, o ?? {});
+    // 0.8.1 (L2-03): every integrity pass also checks the store file under this connection's cache.
+    const health = new StoreFileHealth(this.db, this.dataDir !== null ? join(this.dataDir, 'kronicle-lite.db') : null);
+    this.orient.storeHealth = () => health.check();
+    this.recall.storeHealth = () => health.check();
     this.auditor = new AssumptionAuditor(this.chain, this.docs);
   }
 

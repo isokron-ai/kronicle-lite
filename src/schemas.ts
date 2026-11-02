@@ -28,7 +28,7 @@ import { ReceiptSchema } from './recall/receipt.js';
 import { FOCUSES, RECOVERY_METHODS } from './orient/orient.js';
 import { FORMAT_RULES } from './orient/cosmetic.js';
 import { RETRACTION_KINDS } from './orient/retraction.js';
-import { ROW_PROBLEMS } from './docs/integrity.js';
+import { ROW_PROBLEMS, WITHHELD_PROBLEMS } from './docs/integrity.js';
 import { ABSENCE_VERDICTS, RECALL_SCOPES } from './recall/absence.js';
 import { AUTHORITIES, AUTHORITY_BASES, AUTHORITY_REASONS } from './recall/honesty.js';
 
@@ -420,7 +420,7 @@ export const RecallResultSchema = z.object({
     z.object({
       block_id: z.string(),
       doc_slug: z.string(),
-      problem: z.enum(ROW_PROBLEMS),
+      problem: z.enum(WITHHELD_PROBLEMS),
       authority: z.literal('never_act'),
       authority_reason: z.literal('integrity_failed'),
     }),

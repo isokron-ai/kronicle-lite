@@ -216,11 +216,12 @@ function checkFts(db: Database.Database): DoctorCheck {
     if (!tableExists(db, 'blocks_fts')) return { id: 'fts', status: 'fail', detail: 'blocks_fts is missing' };
     const blocks = (db.prepare('SELECT COUNT(*) AS n FROM blocks').get() as { n: number }).n;
     const indexed = (db.prepare('SELECT COUNT(*) AS n FROM blocks_fts_docsize').get() as { n: number }).n;
-    db.prepare(`INSERT INTO blocks_fts(blocks_fts) VALUES('integrity-check')`).run();
+    // 0.8.1 (R2-17): rank 1 also compares the index with the stored block text.
+    db.prepare(`INSERT INTO blocks_fts(blocks_fts, rank) VALUES('integrity-check', 1)`).run();
     if (blocks !== indexed) {
       return { id: 'fts', status: 'fail', detail: `blocks_fts indexes ${indexed} row(s) but blocks has ${blocks}; rebuild with: INSERT INTO blocks_fts(blocks_fts) VALUES('rebuild')` };
     }
-    return { id: 'fts', status: 'ok', detail: `FTS5 integrity-check ok; ${indexed} block(s) indexed` };
+    return { id: 'fts', status: 'ok', detail: `FTS5 integrity-check ok (index matches the stored text); ${indexed} block(s) indexed` };
   } catch (e) {
     return {
       id: 'fts',

@@ -20,7 +20,7 @@ import type { Chain } from '../chain/index.js';
 import type { Signer } from '../crypto/keys.js';
 import type { Db } from '../db/open.js';
 import { splitHeadingPath, type BlockRow, type DocumentSource } from '../docs/documents.js';
-import { checkBlockRow, type RowProblem } from '../docs/integrity.js';
+import { checkBlockRow, checkFtsContent, type WithheldProblem } from '../docs/integrity.js';
 import { scrubDeep, scrubForRead } from '../secrets/guard.js';
 import { certifyRecallAbsence, indexFreshness, type Absence, type RecallScope } from './absence.js';
 import { attentionRerank } from './attention.js';
@@ -95,7 +95,8 @@ export interface RecallHit {
 export interface WithheldHit {
   block_id: string;
   doc_slug: string;
-  problem: RowProblem;
+  /** 0.8.1: also projection_mismatch / lineage_mismatch / store_damaged (docs/integrity.ts WITHHELD_PROBLEMS). */
+  problem: WithheldProblem;
   /** 0.6.0: always never_act / integrity_failed. */
   authority: 'never_act';
   authority_reason: 'integrity_failed';
@@ -142,6 +143,11 @@ export function toMatchExpression(query: string, mode: 'AND' | 'OR'): string | n
 }
 
 export class Recall {
+  /** 0.8.1 (L2-03): store file check (set by KronicleLite); a problem withholds every match. */
+  storeHealth: (() => string | null) | null = null;
+  /** 0.8.1 (R2-17): last full-text content check, keyed by the connection's change counters. */
+  private ftsChecked: { key: string; problem: string | null } | null = null;
+
   constructor(
     private readonly db: Db,
     private readonly chain: Chain,
@@ -201,6 +207,13 @@ export class Recall {
     );
     const sources = new SourceChecker();
     const staleMemo = new Map<string, StaleSource[]>();
+    // 0.8.1: cross-checks against the chain before serving (R2-09, L2-03).
+    const storeProblem = rows.length > 0 ? (this.storeHealth?.() ?? null) : null;
+    const lineageOk = new Map<string, boolean>();
+    const retired = this.db.prepare(
+      `SELECT 1 FROM events WHERE event_type IN ('block.superseded', 'block.tombstoned')
+         AND CASE WHEN json_valid(payload_canonical) THEN json_extract(payload_canonical, '$.block_id') END = ? LIMIT 1`,
+    );
     const served: { block_id: string; doc_id: string; content_hash: string }[] = [];
     const hits: RecallHit[] = [];
     const withheld: WithheldHit[] = [];
@@ -209,7 +222,14 @@ export class Recall {
         // 0.5.0: re-hash the text we are about to serve and check it against
         // the chained block.created event. A tampered or corrupted row is
         // withheld: no content, no receipt.
-        const problem = checkBlockRow(this.chain, r);
+        let problem: WithheldProblem | null = storeProblem ? 'store_damaged' : checkBlockRow(this.chain, r);
+        // A row the projection serves as live must not be one the chain retired (a restored or edited `blocks` row).
+        if (!problem && r.valid_to === null && retired.get(r.block_id) !== undefined) problem = 'projection_mismatch';
+        if (!problem && this.lineage) {
+          let ok = lineageOk.get(r.doc_id);
+          if (ok === undefined) lineageOk.set(r.doc_id, (ok = this.lineage.checkProjection([r.doc_id]) === null));
+          if (!ok) problem = 'lineage_mismatch';
+        }
         if (problem) {
           withheld.push({ block_id: r.block_id, doc_slug: r.slug, problem, authority: 'never_act', authority_reason: 'integrity_failed' });
           continue;
@@ -239,13 +259,15 @@ export class Recall {
         const status: RecallHit['status'] = r.tombstoned_at ? 'tombstoned' : r.valid_to ? 'superseded' : 'live';
         const scrub = scrubForRead(r.content);
         const source = r.source_json !== null ? (JSON.parse(r.source_json) as DocumentSource) : null;
-        const stale = this.lineage ? this.lineage.staleness(r.doc_id, staleMemo) : [];
+        const assessed = this.lineage ? this.lineage.assess(r.doc_id, staleMemo) : { stale: [], undetermined: null };
+        const stale = assessed.stale;
         const honesty = resolveAuthority({
           status,
           source_kind: r.source_kind,
           source_check: source !== null && status === 'live' ? sources.check(source, r) : 'unchecked',
           read_scrubbed: scrub.detectors.length > 0,
           stale_derived: stale.length > 0,
+          lineage_undetermined: assessed.undetermined !== null,
         });
         served.push({ block_id: r.block_id, doc_id: r.doc_id, content_hash: r.content_hash });
         hits.push({
@@ -280,7 +302,13 @@ export class Recall {
     const truncated = applyContentBudget(hits, maxChars);
     const searched: RecallScope[] = searchedAny ? (includeTomb ? ['live_blocks', 'tombstoned_blocks'] : ['live_blocks']) : [];
     const all: RecallScope[] = ['live_blocks', 'tombstoned_blocks', 'superseded_blocks', ...(keys ? (['other_projects'] as RecallScope[]) : [])];
-    const fresh = indexFreshness(this.db);
+    let fresh = indexFreshness(this.db);
+    // 0.8.1 (R2-17): before certifying absence, the index must hold exactly the stored text (a
+    // rewritten full-text row otherwise "proves" a live block's term absent). Cached per state.
+    if (hits.length === 0 && withheld.length === 0 && searchedAny && fresh.fresh) {
+      const fts = this.storeHealth?.() ?? this.ftsContent();
+      if (fts) fresh = { fresh: false, detail: fts };
+    }
     const absence = certifyRecallAbsence({
       hits: hits.length,
       withheld: withheld.length,
@@ -303,6 +331,15 @@ export class Recall {
       truncated,
       scope: keys ? { project_keys: keys, other_projects_hidden: hiddenOther } : null,
     };
+  }
+
+  /** checkFtsContent, re-run only when this connection or another one changed the database since. */
+  private ftsContent(): string | null {
+    const key = `${String(this.db.pragma('data_version', { simple: true }))}:${String((this.db.prepare('SELECT total_changes() AS n').get() as { n: number }).n)}`;
+    if (this.ftsChecked?.key === key) return this.ftsChecked.problem;
+    const problem = checkFtsContent(this.db);
+    this.ftsChecked = { key, problem };
+    return problem;
   }
 
   /** Matching blocks in documents of other projects (not served; counted). */

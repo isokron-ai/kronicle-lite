@@ -98,7 +98,12 @@ export interface LineageCounts {
  * Unreleased: computes `derived_from_inferred` for a write (KronicleLite
  * wires it to the read log; see src/lineage/lineage.ts `infer`).
  */
-export type LineageInference = (actor_id: string, cursor: string | undefined, exclude_doc_id: string | null) => { refs: LineageRef[]; truncated: boolean };
+export type LineageInference = (
+  actor_id: string,
+  cursor: string | undefined,
+  exclude_doc_id: string | null,
+  opts?: { rewrite?: boolean },
+) => { refs: LineageRef[]; truncated: boolean; released?: LineageRef[] };
 
 export interface SupersedeBlockResult {
   old_block_id: string;
@@ -247,11 +252,19 @@ export class DocumentStore {
     return [...out.values()].sort((a, b) => a.block_id.localeCompare(b.block_id));
   }
 
-  private inferLineage(actor_id: string, cursor: string | undefined, infer: boolean | undefined, exclude_doc_id: string | null, explicit: readonly LineageRef[] | undefined): { refs: LineageRef[]; truncated: boolean } {
-    if (infer === false || !this.lineageInference) return { refs: [], truncated: false };
+  private inferLineage(
+    actor_id: string,
+    cursor: string | undefined,
+    infer: boolean | undefined,
+    exclude_doc_id: string | null,
+    explicit: readonly LineageRef[] | undefined,
+    opts: { rewrite?: boolean } = {},
+  ): { refs: LineageRef[]; truncated: boolean; released: LineageRef[] } {
+    if (infer === false || !this.lineageInference) return { refs: [], truncated: false, released: [] };
     const skip = new Set((explicit ?? []).map((r) => r.block_id));
-    const r = this.lineageInference(actor_id, cursor, exclude_doc_id);
-    return { refs: r.refs.filter((x) => !skip.has(x.block_id)), truncated: r.truncated };
+    const r = this.lineageInference(actor_id, cursor, exclude_doc_id, opts);
+    // An explicit derived_from replaces the whole lineage: nothing to release then.
+    return { refs: r.refs.filter((x) => !skip.has(x.block_id)), truncated: r.truncated, released: explicit !== undefined ? [] : (r.released ?? []) };
   }
 
   /** Unreleased: a write is a read of what was written (local read log, never chained). */
@@ -506,7 +519,10 @@ export class DocumentStore {
     const markdown = normalizeMarkdown(args.markdown);
     const markdown_hash = blake3Hex(markdown);
     const explicit = this.checkLineage(args.derived_from);
-    const { refs: inferred, truncated } = this.inferLineage(args.actor_id, args.cursor, args.infer_lineage, this.getDocument(args.slug)?.doc_id ?? null, explicit);
+    const prior = this.getDocument(args.slug);
+    const { refs: inferred, truncated, released } = this.inferLineage(args.actor_id, args.cursor, args.infer_lineage, prior?.doc_id ?? null, explicit, {
+      rewrite: prior !== null && this.currentMarkdownHash(args.slug) !== markdown_hash,
+    });
 
     const run = this.db.transaction((): PutDocumentResult => {
       const existing = this.getDocument(args.slug);
@@ -556,6 +572,8 @@ export class DocumentStore {
           ...(explicit !== undefined ? { derived_from: explicit as unknown as Record<string, unknown>[] } : {}),
           ...(inferred.length > 0 ? { derived_from_inferred: inferred as unknown as Record<string, unknown>[] } : {}),
           ...(truncated ? { derived_from_inferred_truncated: true } : {}),
+          // 0.8.1, additive: earlier inferred edges to removed sources this put re-derives past.
+          ...(released.length > 0 ? { derived_from_released: released as unknown as Record<string, unknown>[] } : {}),
         },
       });
       for (const c of [...created, ...replaced]) {
@@ -864,14 +882,17 @@ export class DocumentStore {
 
   // ───────────────────────────── projection ─────────────────────────────
 
-  /** Unreleased: insert the lineage fields of one event (malformed entries are skipped, never thrown). */
-  private applyLineage(doc_id: string, p: Record<string, unknown>, seq: number): void {
-    const explicit = lineageRefs(p['derived_from']);
-    const inferred = lineageRefs(p['derived_from_inferred']);
-    if (typeof doc_id !== 'string' || explicit.length + inferred.length === 0) return;
+  /** Apply the lineage fields of one event (lineageEffects; malformed entries are skipped, never thrown). */
+  private applyLineage(event_type: string, p: Record<string, unknown>, seq: number): void {
+    const fx = lineageEffects(event_type, p);
+    if (!fx) return;
+    if (fx.replace) this.db.prepare(`DELETE FROM doc_lineage WHERE doc_id = ?`).run(fx.doc_id);
+    const del = this.db.prepare(`DELETE FROM doc_lineage WHERE doc_id = ? AND source_block_id = ? AND inferred = 1`);
+    for (const id of fx.release) del.run(fx.doc_id, id);
     const ins = this.db.prepare(`INSERT OR IGNORE INTO doc_lineage (doc_id, source_block_id, source_content_hash, inferred, chain_seq) VALUES (?, ?, ?, ?, ?)`);
-    for (const r of explicit) ins.run(doc_id, r.block_id, r.content_hash, 0, seq);
-    for (const r of inferred) ins.run(doc_id, r.block_id, r.content_hash, 1, seq);
+    for (const a of fx.add) ins.run(fx.doc_id, a.block_id, a.content_hash, a.inferred, seq);
+    if (fx.gap === 'clear') this.db.prepare(`DELETE FROM doc_lineage_gaps WHERE doc_id = ?`).run(fx.doc_id);
+    else if (fx.gap === 'set') this.db.prepare(`INSERT INTO doc_lineage_gaps (doc_id, chain_seq) VALUES (?, ?) ON CONFLICT(doc_id) DO UPDATE SET chain_seq = excluded.chain_seq`).run(fx.doc_id, seq);
   }
 
   /** Apply one chain event to the derived tables. Idempotent per event. */
@@ -923,8 +944,7 @@ export class DocumentStore {
             this.db.prepare(`DELETE FROM doc_sources WHERE doc_id = ?`).run(doc_id);
           }
           // Unreleased: an explicit derived_from (even []) replaces the lineage; inferred edges add.
-          if (Array.isArray(p['derived_from'])) this.db.prepare(`DELETE FROM doc_lineage WHERE doc_id = ?`).run(doc_id);
-          this.applyLineage(doc_id, p, ev.seq);
+          this.applyLineage(ev.event_type, p, ev.seq);
         }
         return;
       }
@@ -949,7 +969,7 @@ export class DocumentStore {
             ev.occurred_at,
           );
         // Unreleased: supersede_block lineage adds to the document's.
-        this.applyLineage(p['doc_id'] as string, p, ev.seq);
+        this.applyLineage(ev.event_type, p, ev.seq);
         return;
       }
       case 'block.superseded': {
@@ -977,6 +997,40 @@ export class DocumentStore {
         return; // unknown types (checkpoints, future vocab) have no projection
     }
   }
+}
+
+/**
+ * 0.8.1: what one event does to a document's lineage projection
+ * (doc_lineage + doc_lineage_gaps), shared by the projection and the
+ * integrity replay so the two can never disagree. null: nothing.
+ *   document.put: an explicit `derived_from` (even []) replaces the rows and
+ *     clears a gap; `derived_from_released` drops earlier inferred edges;
+ *     inferred edges add; `derived_from_inferred_truncated` (without an
+ *     explicit statement) records a gap: the note's sources are undetermined.
+ *   block.created (supersede_block): edges add; truncated inference without
+ *     a non-empty explicit derived_from records a gap.
+ */
+export function lineageEffects(
+  event_type: string,
+  p: Record<string, unknown>,
+): { doc_id: string; replace: boolean; release: string[]; add: (LineageRef & { inferred: 0 | 1 })[]; gap: 'set' | 'clear' | null } | null {
+  if (event_type !== 'document.put' && event_type !== 'block.created') return null;
+  const doc_id = p['doc_id'];
+  if (typeof doc_id !== 'string') return null;
+  const replace = event_type === 'document.put' && Array.isArray(p['derived_from']);
+  const explicit = lineageRefs(p['derived_from']);
+  const inferred = lineageRefs(p['derived_from_inferred']);
+  const release = event_type === 'document.put' ? lineageRefs(p['derived_from_released']).map((r) => r.block_id) : [];
+  const truncated = p['derived_from_inferred_truncated'] === true;
+  const gap: 'set' | 'clear' | null = replace ? 'clear' : truncated && explicit.length === 0 ? 'set' : null;
+  if (!replace && explicit.length + inferred.length + release.length === 0 && gap === null) return null;
+  return {
+    doc_id,
+    replace,
+    release,
+    add: [...explicit.map((r) => ({ ...r, inferred: 0 as const })), ...inferred.map((r) => ({ ...r, inferred: 1 as const }))],
+    gap,
+  };
 }
 
 function lineageRefs(v: unknown): LineageRef[] {

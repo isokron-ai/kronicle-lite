@@ -115,7 +115,8 @@ export type PulseTarget = Pick<CommandTarget, 'dir' | 'explicit' | 'via'>;
 export interface PulseResult {
   format: 'kronicle-lite/1';
   decision: PulseDecision;
-  reason: 'clear' | 'retractions' | 'integrity' | 'seeded' | 'genesis' | 'target';
+  /** 0.8.1: `pending` = refused because a pending actor has unreconciled changes and the stored position was missing or unreadable. */
+  reason: 'clear' | 'retractions' | 'integrity' | 'seeded' | 'genesis' | 'target' | 'pending';
   mode: PulseMode;
   head: { seq: number; hash: string };
   /** The cursor to carry: the head when allowed / warned / seeded; the unchanged cursor when denied. */
@@ -144,6 +145,8 @@ export interface PulseResult {
   message: string | null;
   /** Denied for retractions: the head seq an operator acknowledges through (`shim ack --through`). Not shown to the agent. */
   ack_through: number | null;
+  /** 0.8.1: configured pending actors with unreconciled changes, when the position was missing or unreadable. */
+  pending?: { actor_id: string; count: number }[];
 }
 
 export class PulseUnavailableError extends Error {
@@ -633,6 +636,47 @@ function whoMustReRead(blocking: BlockingRetraction[], mode: PendingMode, invoke
 }
 
 /**
+ * 0.8.1 (R2-07, C2-03): the version-bound gate does not depend on a cursor.
+ * With no stored position, or one that does not decode or verify (junk
+ * bytes, a regenerated cursor-secret, a chain rolled back below it), the
+ * pulse still asks the configured pending actors' `pending`: any > 0 refuses.
+ */
+function pendingGate(store: KronicleLite, actors: readonly string[], scope: { keys: string[] } | null): { actor_id: string; count: number; lines: string[] }[] {
+  const out: { actor_id: string; count: number; lines: string[] }[] = [];
+  for (const a of actors) {
+    const p = store.lineage.pending(a, { project_keys: scope?.keys ?? null, limit: 6 });
+    if (p.count === 0) continue;
+    out.push({
+      actor_id: a,
+      count: p.count,
+      lines: p.items.map((i) => `- ${[i.doc_slug ?? '', i.heading_path.join(' › ')].filter((x) => x !== '').join(' › ')} (seq ${i.seq ?? '?'}, ${i.kind}/${i.severity}): read "${clip(i.old_text, 140)}" → ${i.current === null ? 'now REMOVED' : `now "${clip(i.new_text, 140)}"`}`),
+    });
+  }
+  return out;
+}
+
+function pendingDeny(b: Omit<PulseResult, 'decision' | 'reason' | 'cursor' | 'blocking' | 'resolved' | 'not_relied_on' | 'informational' | 'integrity' | 'message' | 'ack_through'>, gate: ReturnType<typeof pendingGate>, cursor: string, cmd: string, why: string, integrity: IntegritySummary | null): PulseResult {
+  const n = gate.reduce((x, g) => x + g.count, 0);
+  return {
+    ...b,
+    decision: 'deny',
+    reason: 'pending',
+    cursor,
+    blocking: [],
+    resolved: [],
+    not_relied_on: [],
+    informational: [],
+    integrity,
+    pending: gate.map((g) => ({ actor_id: g.actor_id, count: g.count })),
+    message:
+      `kronicle-lite shim: did NOT run \`${cmd}\` — ${why}, and ${n} change(s) are not reconciled by ${gate.map((g) => `${g.actor_id} (${g.count})`).join(', ')}:\n` +
+      gate.flatMap((g) => g.lines).slice(0, 6).join('\n') +
+      `\nRe-read the affected document(s) at the current version (recall them again, or read kronicle://docs/<slug>); that clears this gate. A plain retry is refused again.`,
+    ack_through: null,
+  };
+}
+
+/**
  * Run the pulse against an open store. Pure apart from the state files (when
  * `stateDir` is set) and orient's flight-recorder row.
  */
@@ -643,6 +687,8 @@ export function pulse(store: KronicleLite, opts: PulseOptions): PulseResult {
   const pm = pendingModeFor(opts);
   const configured = pm.configured;
   const invoker = pm.mode === 'actor' ? pm.invoker : null;
+  // 0.8.1 (R2-07, C2-03): whose `pending` gates a pulse that has no usable position.
+  const gateActors = configured ?? (pm.invoker !== null ? [pm.invoker] : []);
   const tgt = targetFor(opts);
   const target: PulseTarget = { dir: tgt.dir, explicit: tgt.explicit, via: tgt.via };
   const extra = { pending_mode: pm.mode, invoking_actor: pm.invoker, target };
@@ -702,6 +748,12 @@ export function pulse(store: KronicleLite, opts: PulseOptions): PulseResult {
     // First check: the head is the starting point (that is history, not news).
     const st = store.orient.getSystemState({ actor_id: actor, focus: 'pulse', project: scope });
     if (st.integrity && !st.integrity.ok) return integrityDeny(st, base(st), cursorAt(store, st.head.seq, actor), cmd);
+    // ...but never past a change a configured pending actor has not reconciled (not seeded: re-checked next time).
+    const gate = pendingGate(store, gateActors, scope);
+    if (gate.length > 0) {
+      const why = `no usable shim position is stored here (none yet, or none that verifies against this store${store.identity.cursor_secret_regenerated ? ': the cursor secret was regenerated' : ''})`;
+      return pendingDeny(base(st), gate, st.cursor, cmd, why, st.integrity);
+    }
     save(st.cursor);
     return {
       ...base(st),
@@ -718,12 +770,20 @@ export function pulse(store: KronicleLite, opts: PulseOptions): PulseResult {
     };
   }
 
-  const st = store.orient.getSystemState({ actor_id: actor, since_cursor: cursor, focus: 'retractions', project: scope });
+  // Not recorded unless it allows: a denial must never become the shim's position (C2-04).
+  const st = store.orient.getSystemState({ actor_id: actor, since_cursor: cursor, focus: 'retractions', project: scope, record: false });
   if (st.integrity && !st.integrity.ok) return integrityDeny(st, base(st), cursor, cmd);
+  const unreadable = st.recovery.cursor_error !== null || st.recovery.method === 'presented_stale';
+  if (unreadable) {
+    const gate = pendingGate(store, gateActors, scope);
+    const why = `the stored shim position is unreadable (${st.recovery.cursor_error ?? 'not on the chain: rolled back or rewritten'})${store.identity.cursor_secret_regenerated ? '; the cursor secret was regenerated' : ''}`;
+    if (gate.length > 0) return pendingDeny(base(st), gate, cursor, cmd, why, st.integrity);
+  }
   if (st.recovery.method === 'genesis') {
     // The cursor was unreadable and this actor has no briefing: re-seed rather
     // than replay the whole chain as news (docs/PUSH.md).
     save(st.cursor);
+    store.orient.recordBriefing(st);
     return {
       ...base(st),
       decision: 'seed',
@@ -752,6 +812,7 @@ export function pulse(store: KronicleLite, opts: PulseOptions): PulseResult {
 
   if (blocking.length === 0) {
     save(st.cursor);
+    store.orient.recordBriefing(st);
     const notes: string[] = [];
     if (resolved.length > 0) {
       const who = [...new Set(resolved.flatMap((r) => r.pending_actors))].join(', ');
@@ -779,6 +840,7 @@ export function pulse(store: KronicleLite, opts: PulseOptions): PulseResult {
   const n = blocking.length;
   if (mode === 'warn') {
     save(st.cursor);
+    store.orient.recordBriefing(st);
     return {
       ...base(st),
       decision: 'warn',

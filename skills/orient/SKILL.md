@@ -20,6 +20,15 @@ your beliefs aligned with what the store actually says now.
   when you oriented a few steps ago: the runbook can change while you work.
   When nothing changed the answer is one line; if it lists retractions,
   reconcile them before you run the command.
+- **Before any release-type wrapper** — `make release`, `npm run
+  release` / `deploy` / `ship`, `./scripts/deploy.sh`, anything that
+  deploys or publishes for you: call `focus=retractions` first, exactly as
+  for the command it wraps. If a change lands while such a step runs
+  (another agent, a teammate, a hook), orient again before the next
+  world-changing step and re-check the values it uses. A wrapper hides the
+  command from you: ask the operator to install the shims
+  (`kronicle-lite shim install --commands make,npm,…`) or the git hook so
+  the check also runs when you forget.
 - **After a compaction** — the compact summary is the least trustworthy
   belief source you have; it was written from a position that may be stale.
 - **Operator types `orient`** — a bare word, no slash. The operator is a drift
@@ -49,9 +58,10 @@ your beliefs aligned with what the store actually says now.
    2. `drift_banner` — if `surfaced`, you have been operating on stale
       ground; the delta below IS the catch-up.
    0. `integrity` — if `ok` is false (the Markdown starts with
-      `INTEGRITY FAILURE`), the store was edited outside kronicle-lite.
-      Stop, tell the operator to run `kronicle-lite verify-chain`, and do
-      not rely on recalled text until it passes.
+      `INTEGRITY FAILURE`), the store was edited outside kronicle-lite or
+      cannot be read. Every focus reports it, a pulse included. Stop, tell
+      the operator to run `kronicle-lite verify-chain`, and do not rely on
+      recalled text or run a world-changing command until it passes.
    3. `retractions` — things you may have relied on that are now wrong.
       Each carries `old_text`, `new_text` (null when removed) and a word
       `diff` (`[-old-]{+new+}`), so you usually do not need another call
