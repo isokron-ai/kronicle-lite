@@ -9,8 +9,9 @@
  *
  *   1. line endings: CRLF / CR → LF;
  *   2. trailing spaces and tabs removed from every line;
- *   3. reflow inside a paragraph: a run of spaces / tabs (with at most one
- *      newline) between two non-space characters becomes one space — but
+ *   3. reflow inside a paragraph: a whitespace run that CONTAINS exactly one
+ *      newline (a line break plus the spaces / tabs around it) between two
+ *      non-space characters becomes one space — but
  *      NOT inside inline code, link destinations, inline HTML or autolinks,
  *      quoted strings ('…', "…", “…”, ‘…’), and never across a line break
  *      that ends a backslash hard break, starts a list item / quote / heading
@@ -20,7 +21,8 @@
  *      every byte;
  *   4. runs of blank lines collapse to one.
  *
- * Nothing else is normalized: no emphasis markers (`*` ↔ `_`), bullet or
+ * Nothing else is normalized: no whitespace runs inside a line (two spaces
+ * → one, a tab → a space), no emphasis markers (`*` ↔ `_`), bullet or
  * ordered-list markers, renumbering, heading style, escapes, entities,
  * letter case, punctuation, Unicode (NFC / NFKC, no-break or thin spaces,
  * U+2028) — and no typo tolerance. Code blocks, front matter (a block that
@@ -210,7 +212,9 @@ function rawCanon(content: string): string | null {
     while (j < text.length && (text[j] === ' ' || text[j] === '\t' || text[j] === '\n')) j++;
     const run = text.slice(i, j);
     const newlines = run.split('\n').length - 1;
-    let collapsible = i > 0 && j < text.length && newlines <= 1;
+    // Strict (0.8.1 decision): only a line break is reflow. A run inside one line (two spaces → one,
+    // a tab → a space) keeps every byte: agents copy commands out of unfenced prose.
+    let collapsible = i > 0 && j < text.length && newlines === 1;
     for (let k = i; collapsible && k < j; k++) if (mask[k]) collapsible = false;
     if (collapsible && newlines === 1) {
       const nl = i + run.indexOf('\n');

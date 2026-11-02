@@ -5,19 +5,18 @@
 
 /**
  * 0.8.1 raw-text equivalence (docs/FORMAT.md §3.8): only line endings,
- * trailing whitespace, reflow inside a paragraph and blank-line runs.
+ * trailing whitespace, reflow (a line break) inside a paragraph and
+ * blank-line runs.
  */
 export const FORMAT_ONLY: [string, string, string][] = [
-  ['double space (bench whitespace_double)', 'Status updates go to the  incident channel.', 'Status updates go to the incident channel.'],
   ['reflow', 'Deploys go to the canary first and\nthen to every region in order.', 'Deploys go to the canary first\nand then to every region in order.'],
-  ['whitespace around inline code', 'Run `make deploy`  now.', 'Run `make deploy` now.'],
+  ['reflow next to inline code', 'Run `make deploy`\nnow.', 'Run `make deploy` now.'],
+  ['reflow with continuation indent', 'Restart the web\n   tier.', 'Restart the web tier.'],
   ['link text reflow', 'See [the deploy\nguide](https://x.example/deploy) first.', 'See [the deploy guide](https://x.example/deploy) first.'],
   ['CRLF → LF (bench line_ending_norm)', 'Postmortems are blameless.\r\nOwners file follow-ups.', 'Postmortems are blameless.\nOwners file follow-ups.'],
   ['trailing whitespace (bench whitespace_trim)', 'Escalations follow the paging policy.   ', 'Escalations follow the paging policy.'],
-  ['tab run in prose (rule 3)', 'Restart\tthe web tier.', 'Restart the web tier.'],
   ['list item continuation reflow', '- Page the on-call\n  before a deploy.', '- Page the on-call before a deploy.'],
   ['blank-line runs', 'One.\n\n\n\nTwo.', 'One.\n\nTwo.'],
-  ['heading text double space', 'Deploy  target', 'Deploy target'],
 ];
 
 export const MUST_ALARM: [string, string, string][] = [
@@ -76,6 +75,13 @@ export const MUST_ALARM: [string, string, string][] = [
   ['table row whitespace', 'host | port\n--- | ---\nweb |  80', 'host | port\n--- | ---\nweb | 80'],
   ['front matter whitespace', '---\nenv:  prod\n---', '---\nenv: prod\n---'],
   ['heading style closing #', 'Use C#', 'Use C'],
+  // 0.8.1 strict decision: a whitespace run inside one line is not reflow
+  ['double space (bench whitespace_double)', 'Status updates go to the  incident channel.', 'Status updates go to the incident channel.'],
+  ['tab in prose → space (R2 W06)', 'Indent\twith a tab in Makefiles.', 'Indent with a tab in Makefiles.'],
+  ['two spaces in prose → one (R2 W01)', 'Separator is two spaces:  between fields', 'Separator is two spaces: between fields'],
+  ['double space after inline code', 'Run `make deploy`  now.', 'Run `make deploy` now.'],
+  ['heading text double space', 'Deploy  target', 'Deploy target'],
+  ['line break vs double space', 'Restart the\nweb tier.', 'Restart the  web tier.'],
 ];
 
 // [id, label, old, new, note]   label: S = semantic (must retract), C = cosmetic (should stay quiet)

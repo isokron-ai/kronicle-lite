@@ -1,7 +1,8 @@
 /**
  * Format-only classifier (orient/cosmetic.ts), 0.8.1: RAW-TEXT equivalence.
- * Format-only = line endings, trailing whitespace, reflow inside a paragraph
- * (not in code, quotes, link destinations or HTML; never across a hard break
+ * Format-only = line endings, trailing whitespace, reflow (a line break)
+ * inside a paragraph (not in code, quotes, link destinations or HTML; a
+ * whitespace run inside one line is text; never across a hard break
  * or a block-construct line) and blank-line runs. Everything else — emphasis
  * markers, list markers, renumbering, any changed character — is a
  * retraction. Typo-shaped edits carry `hint: likely_typo` as a label only.
@@ -35,7 +36,8 @@ describe('classifyEdit: raw-text equivalence', () => {
   });
 
   it('names what differed (only whitespace since 0.8.1)', () => {
-    expect(classifyEdit('a  b', 'a b').rules).toEqual(['whitespace']);
+    expect(classifyEdit('a\nb', 'a b').rules).toEqual(['whitespace']);
+    expect(classifyEdit('a  b', 'a b').format_only).toBe(false); // strict: a run inside a line is text
     expect(classifyEdit('*a* b', '_a_ b')).toEqual({ format_only: false, rules: [], hint: null });
   });
 
@@ -49,14 +51,16 @@ describe('classifyEdit: raw-text equivalence', () => {
     expect(formatCanon('A <tag that  never closes')).toBeNull();
     expect(formatCanon('See [x](https://x.example/a  b')).toBeNull();
     // A reference link is plain raw text now: compared byte for byte, reflow allowed around it.
-    expect(formatCanon('See  [x][ref].')).toBe('See [x][ref].');
+    expect(formatCanon('See [x][ref]\nfirst.')).toBe('See [x][ref] first.');
+    expect(formatCanon('See\n[x][ref].')).toBe('See\n[x][ref].'); // a line starting with `[` keeps its break
   });
 
   it('the canonical form keeps raw bytes and only collapses prose whitespace', () => {
-    expect(formatCanon('Delete /tmp/*/cache/*  nightly.')).toBe('Delete /tmp/*/cache/* nightly.');
+    expect(formatCanon('Delete /tmp/*/cache/*\n  nightly.')).toBe('Delete /tmp/*/cache/* nightly.');
+    expect(formatCanon('Delete  /tmp/*/cache/*\tnightly.')).toBe('Delete  /tmp/*/cache/*\tnightly.'); // runs inside a line keep every byte
     expect(formatCanon('Run deploy\\\n--force')).toBe('Run deploy\\\n--force'); // hard break kept
     expect(formatCanon('Open ports:\n8080. web')).toBe('Open ports:\n8080. web'); // a numbered line keeps its break
-    expect(formatCanon("it's  a 'quoted  run' here")).toBe("it's a 'quoted  run' here"); // apostrophe is not a quote
+    expect(formatCanon("it's\na 'quoted\nrun' here")).toBe("it's a 'quoted\nrun' here"); // apostrophe is not a quote; the quote keeps its break
     expect(formatCanon('Line one\r\nline two   \n\n\n\nnext')).toBe('Line one line two\n\nnext');
   });
 

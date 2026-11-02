@@ -30,24 +30,25 @@ verify unchanged.
   `__init__.py` → `**init**.py`, `PATTERN=*.log*`), and contradictory raw
   list numbering. **Format-only now means the raw Markdown is
   byte-identical after only: CRLF/CR → LF, trailing whitespace per line,
-  reflow inside a paragraph (a run of spaces / tabs with at most one
-  newline between two non-space characters → one space; not inside inline
+  reflow inside a paragraph (a whitespace run that contains a line break,
+  between two non-space characters → one space; not inside inline
   code, link destinations, HTML or quoted strings, never across a hard
   break or before a line that could start a block construct), and
-  blank-line runs.** No emphasis-marker, list-marker, renumbering,
+  blank-line runs.** No whitespace-run (two spaces → one, tab → space
+  inside a line), emphasis-marker, list-marker, renumbering,
   heading-style, escape or Unicode normalization. Code blocks, front
   matter, HTML blocks and blocks with an unclosed code span, quote, tag or
   link destination are opaque (docs/FORMAT.md §3.8).
 - **R2-03 (S3).** A backslash hard break (`deploy\` + newline + `--force`)
   vs a literal backslash (`deploy\ --force`) was format-only. The line break
   after a backslash is kept.
-- **Honest cost:** list renumbering, ordered-list delimiter (`1)` ↔ `1.`),
-  bullet style (`-` ↔ `*`) and emphasis-marker (`*x*` ↔ `_x_`) edits now
-  produce retractions (and `pending`, and a refusing pulse) where 0.7.0–0.8.0
-  stayed quiet. A change of a whitespace run in prose (two spaces → one, a
-  tab → a space) stays format-only by rule; whitespace that carries meaning
-  belongs in code or quotes, which keep every byte. Bench S7 (benign-edit
-  quiet rate): see below.
+- **Honest cost:** a double space or a tab changed inside a line, list
+  renumbering, ordered-list delimiter (`1)` ↔ `1.`), bullet style (`-` ↔
+  `*`) and emphasis-marker (`*x*` ↔ `_x_`) edits now produce retractions
+  (and `pending`, and a refusing pulse) where 0.7.0–0.8.0 stayed quiet.
+  Deliberate: agents copy commands out of unfenced prose, where a double
+  space or a tab can matter, and a false format-only is far worse than a
+  false alarm. Bench S7 (benign-edit quiet rate): see "Bench" below.
 - `format_rules` only ever holds `whitespace` now (`markup` stays in the type).
 
 ### Fixed — a reorder inside a section made no event (R2-06, S2; lead L2)
@@ -115,11 +116,21 @@ verify unchanged.
 
 - Both bench corpora are permanent tests (`test/stress-corpus.test.ts`):
   round 1 false format-only 0/38; round 2 (69 cases) every real change a
-  retraction except W01 / W06, which rule 3 defines as format-only. The
+  retraction, 0/61 hidden (W01 two spaces → one and W06 tab → space
+  included). The
   R2-01..03 and L2 repros run through the CLI (orient / pending / pulse
   exit 77) with a temp HOME and data dir (`test/fix-081.test.ts`), with
   L1–L6. Two new mutants (emphasis-marker folding, list renumbering) join
   the six; all eight are killed.
+
+### Bench (agent-memory-bench Track A, branch `kl-0.8.1`, 20 seeds)
+
+- S7 benign-edit quiet rate **10/20 (0.8.0) → 4/20 (0.8.1)**, by design:
+  only `whitespace_trim` and `line_ending_norm` stay quiet;
+  `whitespace_double`, `numbered_list_renumber` and `markdown_emphasis` are
+  now delivered as retractions (the typo, comma, quote, period and hyphen
+  templates already were). S1, S5, S8 and S11: grades and flags identical
+  on every seed.
 
 ### Security — anchor client trusts only countersigned, pinned receipts (hardening track 6)
 

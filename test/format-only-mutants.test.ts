@@ -18,8 +18,6 @@ import { mutate, reported } from './helpers/format-only.js';
 
 type Mutant = Parameters<typeof __mutants.add>[0];
 const MUTANTS: Mutant[] = ['hyphen_strip', 'lowercase', 'typo', 'date_mask', 'nfkc', 'gate_trusts_label', 'emphasis_fold', 'list_renumber'];
-/** Round-2 cases rule 3 defines as format-only (see test/stress-corpus.test.ts). */
-const R2_RULE3 = new Set(['W01', 'W06']);
 
 /** Run the suite's checks in-process; return the failures it would report. */
 function suiteFailures(): string[] {
@@ -37,7 +35,7 @@ function suiteFailures(): string[] {
     kl.close();
   }
   {
-    const S = R2_CORPUS.filter(([id, l]) => l === 'S' && !R2_RULE3.has(id));
+    const S = R2_CORPUS.filter(([, l]) => l === 'S');
     const kl = new KronicleLite({ memory: true });
     S.forEach(([, , a], i) => kl.docs.putDocument({ slug: `r2-${i}`, title: 'R', markdown: `# Runbook\n\n${a}\n`, actor_id: 'w' }));
     const c0 = kl.orient.getSystemState({ actor_id: 'a', focus: 'pulse' }).cursor;

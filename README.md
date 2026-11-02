@@ -387,8 +387,8 @@ that are **format-only** — the same raw text up to line endings, trailing
 whitespace, reflow inside a paragraph and blank lines (not inside code,
 quotes or link targets) — are chained like any other but reported under
 `format_only_edits`, not as retractions. Every other change is a retraction
-with its diff: a changed character, quote, date, case or hyphen, an
-emphasis or list marker (`*`↔`_`, `1)`↔`1.`, renumbering: agents copy raw
+with its diff: a changed character, quote, date, case or hyphen, a
+double space or tab inside a line, an emphasis or list marker (`*`↔`_`, `1)`↔`1.`, renumbering: agents copy raw
 text into commands), a paragraph moved to another section, and blocks
 reordered within a section. A typo-shaped one carries `hint: likely_typo`, a label only.
 

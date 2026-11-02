@@ -357,8 +357,9 @@ when the two RAW texts are byte-identical after exactly these steps:
 
 1. line endings: CRLF / CR → LF;
 2. trailing spaces and tabs removed from every line;
-3. reflow inside a paragraph: a run of spaces and tabs, with at most one
-   newline, between two non-space characters becomes one space — except
+3. reflow inside a paragraph: a whitespace run that contains exactly one
+   line break (the break plus the spaces and tabs around it), between two
+   non-space characters, becomes one space — except
    inside inline code, link destinations (`](…)`), inline HTML and
    autolinks, and quoted strings (`'…'`, `"…"`, `“…”`, `‘…’`; an apostrophe
    inside a word opens nothing); a line break is never collapsed after a
@@ -370,7 +371,8 @@ when the two RAW texts are byte-identical after exactly these steps:
    breaks around them;
 4. runs of blank lines collapse to one.
 
-Nothing else is normalized: no emphasis markers (`*` ↔ `_`), bullet or
+Nothing else is normalized: no whitespace runs inside a line (two spaces →
+one, a tab → a space), no emphasis markers (`*` ↔ `_`), bullet or
 ordered-list markers, renumbering, heading style, escapes, entities, letter
 case, quotes, punctuation, dates, typo tolerance, and no Unicode
 normalization (NFC / NFKC; no-break and thin spaces, U+2028 and zero-width
@@ -379,9 +381,10 @@ characters are text). Code blocks, front matter (a block that opens with
 construct the scanner cannot close (an unclosed code span, double quote,
 `<tag` or link destination): only identical text is format-only there. A
 block that moved to another section, or within its section (1a), is never
-format-only. Rule 3 means a change of a whitespace RUN in prose (two
-spaces → one, a tab → a space) is format-only; whitespace that carries
-meaning belongs in code or quotes, which keep every byte.
+format-only. Only a line break is reflow: a whitespace run inside one line
+is text, because agents copy commands out of unfenced prose, where a double
+space or a tab can matter (the founding rule: a false format-only is far
+worse than a false alarm).
 
 Why raw text (0.8.1, agent-memory-bench hardening round 2, R2-01..03): an
 agent copies the raw Markdown into commands. 0.7.0–0.8.0 compared a narrow
