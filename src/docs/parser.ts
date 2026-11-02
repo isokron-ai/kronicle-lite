@@ -31,7 +31,13 @@ export interface ParsedBlock {
   content_hash: string;
 }
 
-const HEADING_RE = /^(#{1,6})\s+(.*?)\s*#*\s*$/;
+const HEADING_RE = /^(#{1,6})[ \t]+(.*)$/;
+/**
+ * 0.8.1: an ATX closing sequence is `#`s preceded by a space or tab (or the
+ * whole text), as in CommonMark. Before, any trailing `#` was stripped, so
+ * `## Use C#` was stored as "Use C" and `C#` → `C` made no event.
+ */
+const CLOSING_RE = /(?:^|[ \t]+)#+[ \t]*$/;
 const FENCE_RE = /^(`{3,}|~{3,})/;
 
 export function normalizeMarkdown(markdown: string): string {
@@ -87,7 +93,7 @@ export function parseMarkdown(markdown: string): ParsedBlock[] {
     if (h) {
       flushPara();
       const level = h[1]!.length;
-      const text = h[2]!.trim();
+      const text = h[2]!.replace(CLOSING_RE, '').trim();
       while (headingStack.length > 0 && headingStack[headingStack.length - 1]!.level >= level) {
         headingStack.pop();
       }

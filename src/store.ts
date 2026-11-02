@@ -48,8 +48,9 @@ export class KronicleLite {
     this.recall = new Recall(this.db, this.chain, this.identity.signer, opts.workspace ?? 'local', this.lineage);
     this.verifier = new ReceiptVerifier(this.db, this.chain, this.docs);
     this.orient = new Orient(this.db, this.chain, this.docs, this.identity.cursor_secret, opts.orient, this.lineage);
-    // Lineage inference: what the author read since its session started (its cursor's briefing, else its latest orient).
-    this.docs.lineageInference = (actor_id, cursor, exclude) => this.lineage.infer(actor_id, this.orient.sessionStart(actor_id, cursor), exclude);
+    // Lineage inference: what the author read since its session began (0.8.1: the first briefing of the
+    // cursor chain behind its cursor, else behind its latest orient).
+    this.docs.lineageInference = (actor_id, cursor, exclude) => this.lineage.infer(actor_id, this.orient.sessionOrigin(actor_id, cursor), exclude);
     this.auditor = new AssumptionAuditor(this.chain, this.docs);
   }
 

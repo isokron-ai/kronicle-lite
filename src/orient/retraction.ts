@@ -13,7 +13,7 @@
 
 import type { ChainEvent } from '../chain/index.js';
 import type { StaleSource } from '../lineage/lineage.js';
-import { isInstructionSlug } from '../docs/documents.js';
+import { isInstructionSlug, REORDERED_RE } from '../docs/documents.js';
 import { classifyEdit, type FormatRule } from './cosmetic.js';
 import { snippet, wordDiff } from './textdiff.js';
 
@@ -57,8 +57,8 @@ export interface Retraction {
   diff: string | null;
   /**
    * Unreleased, additive: true when this supersession is FORMAT-ONLY: old
-   * and new text parse to the same Markdown tree with byte-identical text
-   * leaves (whitespace runs collapsed). Orient lists those under
+   * and new raw text are identical up to line endings, trailing whitespace,
+   * reflow inside a paragraph and blank lines (0.8.1; docs/FORMAT.md §3.8). Orient lists those under
    * `format_only_edits` instead of `retractions` unless asked
    * (`include_format_only`). Presentation only: nothing else changes.
    */
@@ -130,15 +130,18 @@ export function classifyRetraction(ev: ChainEvent, lookup?: BlockTextLookup): Re
   const newB = successor_block_id && lookup ? lookup(successor_block_id) : null;
   // A block that changed section is a change even when its words did not.
   const moved = oldB && newB && oldB.heading_path.join('\u0000') !== newB.heading_path.join('\u0000') ? newB.heading_path : null;
+  // 0.8.1: the same text in the same section is a reorder (planRevision 1a): order is meaning.
+  const reordered = rule.kind === 'supersession' && oldB !== null && newB !== null && !moved && oldB.content === newB.content && reason !== null && REORDERED_RE.test(reason);
   const contentDiff = oldB && newB ? wordDiff(oldB.content, newB.content) : null;
   const sectionDiff = moved ? `section: ${wordDiff(oldB!.heading_path.join(' › '), moved.join(' › '))}` : null;
+  const orderDiff = reordered ? `order: same text, new position within ${oldB!.heading_path.join(' › ') || '(top)'}` : null;
   const text = {
     heading_path: oldB?.heading_path ?? newB?.heading_path ?? null,
     old_text: oldB ? snippet(oldB.content) : null,
     new_text: oldB && newB ? snippet(newB.content) : null,
-    diff: sectionDiff && oldB!.content === newB!.content ? sectionDiff : sectionDiff ? `${sectionDiff}; ${contentDiff}` : contentDiff,
+    diff: orderDiff ?? (sectionDiff && oldB!.content === newB!.content ? sectionDiff : sectionDiff ? `${sectionDiff}; ${contentDiff}` : contentDiff),
   };
-  const edit = rule.kind === 'supersession' && oldB && newB && !moved ? classifyEdit(oldB.content, newB.content, oldB.kind ?? newB.kind) : null;
+  const edit = rule.kind === 'supersession' && oldB && newB && !moved && !reordered ? classifyEdit(oldB.content, newB.content, oldB.kind ?? newB.kind) : null;
   const format_only = edit?.format_only === true;
   const hint = !format_only && edit?.hint ? edit.hint : null;
   const base = {
@@ -160,17 +163,19 @@ export function classifyRetraction(ev: ChainEvent, lookup?: BlockTextLookup): Re
       ...base,
       kind: instruction ? 'instruction' : rule.kind,
       severity: 'informational',
-      reason_line: `Format-only edit (${edit!.rules.join(', ')}) of "${text.old_text}"${where(doc_slug, text.heading_path)} at seq ${ev.seq}: same Markdown structure and identical text; nothing to reconcile.`,
+      reason_line: `Format-only edit (${edit!.rules.join(', ')}) of "${text.old_text}"${where(doc_slug, text.heading_path)} at seq ${ev.seq}: identical raw text up to whitespace and reflow; nothing to reconcile.`,
     };
   }
   // With the words in hand, say them: "you relied on <old>; it is now <new>".
   if (oldB && (rule.kind === 'tombstone' || (rule.kind === 'supersession' && newB))) {
     const loc = where(doc_slug, text.heading_path);
     // Auto-generated put reasons ("replaced in revision 3") add nothing to the words.
-    const why = reason && !/^(replaced|removed) in revision \d+$/.test(reason) ? reason : null;
+    const why = reason && !/^(replaced|removed|reordered) in revision \d+$/.test(reason) ? reason : null;
     const asserted = `${instruction ? 'instruction ' : ''}"${text.old_text}"${loc}`;
     let truth: string;
-    if (rule.kind === 'supersession' && moved) {
+    if (reordered) {
+      truth = `the same text MOVED within ${doc_slug ?? 'the document'} › ${oldB.heading_path.join(' › ') || '(top)'} (seq ${ev.seq}): the order of that section changed; re-read it in its new order`;
+    } else if (rule.kind === 'supersession' && moved) {
       const now = oldB.content === newB!.content ? 'the same text' : `"${text.new_text}"`;
       truth = `${now} MOVED to ${doc_slug ?? 'the document'} › ${moved.join(' › ') || '(top)'} (seq ${ev.seq}): re-read it in its new section`;
     } else if (rule.kind === 'supersession') {

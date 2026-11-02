@@ -154,7 +154,8 @@ the current rows equals `root` with the same `leaf_count`.
 trailing whitespace per line, and splits into blocks:
 
 - an ATX heading line (`#`..`######`) is a `heading` block and pushes/pops the
-  heading path;
+  heading path; a closing sequence of `#`s is stripped only when a space or
+  tab precedes it (0.8.1: `## Use C#` is "Use C#", `## Title ##` is "Title");
 - a fenced code block (``` or ~~~, fence included) is a `code` block;
 - any other run of non-blank lines is a `paragraph` block.
 
@@ -192,6 +193,12 @@ On a re-put, live blocks are compared to the freshly parsed set:
 
 1. same `(kind, content_hash, heading_path)` → **carried** (block id kept,
    position updated); a reorder of whole sections carries;
+1a. (0.8.1) inside one section (same `heading_path`) carried blocks must keep
+   their relative order: the fewest blocks that changed order (those outside
+   a longest increasing run of old positions) are **superseded** by an
+   identical-text block with reason `reordered in revision N` (orient: "MOVED
+   within …", diff `order: same text, new position within …`); insertions and
+   removals around unmoved blocks are not reorders;
 1b. (0.7.0) same `(kind, content_hash)` under a different
    `heading_path` → old is **superseded** by an identical-text block under
    the new path (orient: `new_heading_path`, a `section: [-old-]{+new+}`
@@ -338,27 +345,52 @@ counted in `scope.hidden_retractions`). Documents with no project (every
 put made before this field existed) stay visible from every project.
 `all_projects: true` / `--all-projects` turns scoping off.
 
-### 3.8 Format-only edits (0.7.0)
+### 3.8 Format-only edits (0.7.0; raw-text rule since 0.8.1)
 
 Orient classifies each supersession whose old and new block text it still
-has (`src/orient/cosmetic.ts`). An edit is **format-only** when both texts
-parse to the same Markdown tree under one narrow, pinned parser (paragraphs,
-`*`/`_` emphasis and strong, `-`/`*`/`+` and `1.`/`1)` lists, headings,
-inline code, links, raw HTML) and every text leaf is byte-identical, except
-that runs of spaces, tabs and newlines inside prose text are collapsed. So
-reflow, whitespace runs, `*`↔`_` emphasis, bullet style, the ordered-list
-delimiter and renumbering after the first item are format-only.
+has (`src/orient/cosmetic.ts`). Since 0.8.1 an edit is **format-only** only
+when the two RAW texts are byte-identical after exactly these steps:
 
-Nothing else is normalized: no typo tolerance, letter case, hyphens, quotes,
-punctuation, dates or review stamps, and no Unicode normalization (NFC or
-NFKC). Code blocks, inline code, link targets, raw HTML and anything outside
-the subset (tables, block quotes, front matter, indented code, reference
-links, an unclosed code span) are opaque: any byte change there is a change.
-A block that moved to another section is never format-only.
+1. line endings: CRLF / CR → LF;
+2. trailing spaces and tabs removed from every line;
+3. reflow inside a paragraph: a run of spaces and tabs, with at most one
+   newline, between two non-space characters becomes one space — except
+   inside inline code, link destinations (`](…)`), inline HTML and
+   autolinks, and quoted strings (`'…'`, `"…"`, `“…”`, `‘…’`; an apostrophe
+   inside a word opens nothing); a line break is never collapsed after a
+   backslash hard break or before a line that could open a block construct
+   (list marker `-`/`*`/`+` or `N.`/`N)`, `#`, `>`, `|`, `<`, a fence, `[`,
+   `=`, `_`, `~`); lines that are table rows (any `|`), headings, quotes,
+   HTML, fences, reference definitions, thematic breaks or setext
+   underlines, or indented by 4+ spaces or a tab keep every byte and the
+   breaks around them;
+4. runs of blank lines collapse to one.
+
+Nothing else is normalized: no emphasis markers (`*` ↔ `_`), bullet or
+ordered-list markers, renumbering, heading style, escapes, entities, letter
+case, quotes, punctuation, dates, typo tolerance, and no Unicode
+normalization (NFC / NFKC; no-break and thin spaces, U+2028 and zero-width
+characters are text). Code blocks, front matter (a block that opens with
+`---` / `+++`) and HTML blocks are opaque, and so is a block with a
+construct the scanner cannot close (an unclosed code span, double quote,
+`<tag` or link destination): only identical text is format-only there. A
+block that moved to another section, or within its section (1a), is never
+format-only. Rule 3 means a change of a whitespace RUN in prose (two
+spaces → one, a tab → a space) is format-only; whitespace that carries
+meaning belongs in code or quotes, which keep every byte.
+
+Why raw text (0.8.1, agent-memory-bench hardening round 2, R2-01..03): an
+agent copies the raw Markdown into commands. 0.7.0–0.8.0 compared a narrow
+Markdown tree and so filed as format-only `*` ↔ `_` in unfenced globs and
+identifiers (`/tmp/*/cache/*` → `/tmp/_/cache/_`, `__init__.py` →
+`**init**.py`), list renumbering (and, through a parser bug, `9090. admin`
+→ `9091. admin` after a paragraph line), and a backslash hard break vs a
+literal backslash. Those, list-delimiter / bullet style and emphasis-marker
+style edits are retractions now.
 
 Format-only supersessions are listed under `format_only_edits` (alias
 `cosmetic_edits`; entries `seq, doc_slug, block_id, successor_block_id,
-rules[] (whitespace | markup), diff`) instead of `retractions`; with
+rules[] (`whitespace`; `markup` is no longer produced since 0.8.1), diff`) instead of `retractions`; with
 `include_format_only` (alias `include_cosmetic`) they are also retractions
 with `format_only: true` and severity `informational`. This label is
 presentation only: it is the single thing orient may move out of
@@ -393,9 +425,13 @@ A note written from other blocks records which exact versions it rests on:
   hash are refused with `invalid_lineage`, nothing chained. A block that is
   no longer live is accepted (the note is stale from the start).
 - `derived_from_inferred` — every block the writing actor read (recall hits,
-  document reads; its own writes excluded) since its session started (the
-  briefing behind the cursor it passes, else its latest orient), outside the
-  document being written. Sorted by `block_id`, deduplicated by block and by
+  document reads; its own writes excluded) since its session began, outside
+  the document being written. The session (0.8.1) is the cursor chain behind
+  the cursor it passes (else behind its latest orient): from that briefing
+  back through every briefing served from a cursor the actor presented, to
+  the first one served without a usable cursor (flight recorder, genesis).
+  Before 0.8.1 it began at the latest orient, so recall → orient → write
+  (the wake contract) inferred nothing. Sorted by `block_id`, deduplicated by block and by
   lineage (two versions of one block read: only the later one).
   Instruction-file imports infer nothing.
 - No session (the actor never oriented): never "everything ever read", but
@@ -421,6 +457,9 @@ block through format-only edits only (§3.8, same section), or when the note
 also has an edge to a block of that current version. Otherwise it is
 **stale** with `change`: `superseded`, `moved` (another section), `tombstoned`
 or `missing`. A note derived from a stale note is stale (`via`, depth ≤ 4).
+A reorder within the source's section (§3.2 1a) is a real change. A result
+cut short by the depth bound or a cycle is never reused for another note in
+the same read (0.8.1).
 Recall labels a stale note's hits `never_act` / `stale_derived`
 (docs/HONESTY.md row 3); orient lists a retraction of kind `derived`
 (docs/PUSH.md).

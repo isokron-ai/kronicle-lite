@@ -59,8 +59,8 @@ your beliefs aligned with what the store actually says now.
       touched documents (step 4). Retractions about other projects'
       documents are hidden (`scope.hidden_retractions`); pass
       `all_projects: true` only when the operator asks. Format-only
-      edits (same Markdown, identical text: reflow, whitespace, emphasis or
-      list-marker style) are not retractions: they are listed under
+      edits (identical raw text up to line endings, trailing whitespace,
+      reflow and blank lines) are not retractions: they are listed under
       `format_only_edits` and need no action. Everything else is a
       retraction, including a typo fix (`hint: likely_typo` — still use the
       new wording and check it is not a different name or value) and a

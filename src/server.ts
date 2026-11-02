@@ -197,7 +197,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
           focus: z.enum(FOCUSES).default('orientation'),
           response_format: z.enum(['markdown', 'json']).default('markdown'),
           all_projects: z.boolean().default(false).describe('Include other projects\' documents and retractions.'),
-          include_format_only: z.boolean().default(false).describe('Also list format-only edits (same Markdown, identical text) as retractions.'),
+          include_format_only: z.boolean().default(false).describe('Also list format-only edits (identical raw text up to whitespace and reflow) as retractions.'),
           include_cosmetic: z.boolean().default(false).describe('Deprecated alias of include_format_only.'),
           actor_id: ACTOR,
         }),

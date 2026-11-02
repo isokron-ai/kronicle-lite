@@ -172,9 +172,11 @@ the copy is wrong and, before this, came back next session unmarked
   text rests on (`content_hash` must be the block's; a block id names one
   version). Lineage is also **inferred**: every block the writing actor read
   (recall hits, document reads; its own writes excluded) since its session
-  started (the briefing behind the `cursor` it passes, else its latest
-  orient) is recorded as `derived_from_inferred`, one edge per block (the
-  latest version read). An actor that never oriented has no session: then
+  began (0.8.1: the first briefing of the cursor chain behind the `cursor` it
+  passes, else behind its latest orient — re-orienting before a write, as
+  the wake contract says, no longer drops what was read before it) is
+  recorded as `derived_from_inferred`, one edge per block (the latest
+  version read). An actor that never oriented has no session: then
   only the blocks it read in the last 24 hours count, at most the 200 most
   recent, and a write that left reads out records
   `derived_from_inferred_truncated: true`. Within those bounds inference
@@ -182,11 +184,17 @@ the copy is wrong and, before this, came back next session unmarked
   declared ones. Instruction-file imports
   infer nothing (they are the file's text).
 - An edge is **fresh** while its source's supersession lineage reaches a
-  live block through format-only edits only (docs/FORMAT.md §3.8), or when
+  live block through format-only edits only (docs/FORMAT.md §3.8: since
+  0.8.1 raw-text equivalence — line endings, trailing whitespace, reflow,
+  blank lines; an emphasis-marker, list-marker or renumbering edit, or a
+  reorder inside the section, makes it stale), or when
   the note also has an edge to the current version (it was re-derived:
   re-put or supersede after reading the current version). Otherwise it is
   **stale**: superseded, moved (re-sectioned), tombstoned, or missing. A
-  note derived from a stale note is stale too (`via`).
+  note derived from a stale note is stale too (`via`, depth ≤ 4); 0.8.1: a
+  verdict cut short by that bound or by a cycle is never reused for another
+  note in the same read, so a note listed after its descendant is not shown
+  fresh.
 - A stale note's hits are `never_act` / `stale_derived` (row 3) and carry
   `stale_derived: [{source_block_id, source_content_hash, source_doc_slug,
   change, seq, current_block_id, current_content_hash, old_text, new_text,
