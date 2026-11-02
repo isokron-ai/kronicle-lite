@@ -335,10 +335,10 @@ export class Recall {
 
   /** checkFtsContent, re-run only when this connection or another one changed the database since. */
   private ftsContent(): string | null {
-    const key = `${String(this.db.pragma('data_version', { simple: true }))}:${String((this.db.prepare('SELECT total_changes() AS n').get() as { n: number }).n)}`;
-    if (this.ftsChecked?.key === key) return this.ftsChecked.problem;
+    const key = () => `${String(this.db.pragma('data_version', { simple: true }))}:${String((this.db.prepare('SELECT total_changes() AS n').get() as { n: number }).n)}`;
+    if (this.ftsChecked?.key === key()) return this.ftsChecked.problem;
     const problem = checkFtsContent(this.db);
-    this.ftsChecked = { key, problem };
+    this.ftsChecked = { key: key(), problem }; // keyed after the check: the check itself counts as a change
     return problem;
   }
 
