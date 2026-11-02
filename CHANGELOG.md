@@ -4,6 +4,72 @@ All notable changes to kronicle-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
+## Unreleased (0.8.1)
+
+### Security — anchor client trusts only countersigned, pinned receipts (hardening track 6)
+
+- **A2-01 (S1):** `verify --remote`, `verify --remote --offline`, MCP
+  `anchor_status` (`verifyLastAnchor`) and `doctor` compared the local root
+  with unsigned values — the service listing's top-level `root`/range, or the
+  local `anchors.root` column — so a rewritten chain passed behind a MITM or
+  after one `UPDATE anchors`. They now compare only against
+  `receipt.checkpoint.root` and the signed range of a receipt whose
+  countersignature verifies, whose `chain_id` is this chain's and whose
+  checkpoint signature verifies against the local chain key. `--offline`
+  re-verifies the stored `receipt_json`. Disagreeing unsigned fields are
+  reported as problems (exit 1). New range result `unverified` (receipt not
+  trusted, nothing compared) in `verify --remote --json` and the MCP
+  `anchor_status` schema; `VerifyRemoteResult` gains `problems` and `notes`.
+- **A2-11 (S2):** online `verify --remote` also checks every receipt held
+  locally; an anchor the service does not list is still compared, and the
+  omission is reported.
+- **A2-12 (S2):** the anchor service key is pinned in
+  `<data-dir>/anchor-keys.pinned.json` (0600) on first use, or from
+  `service_key_pins` in `config.json` / a package-shipped pin (both turn
+  first-use pinning off; the shipped list is empty for now). A pinned key is
+  never overwritten from the network; `key_id` must derive from
+  `public_key_pem`; a new key needs a valid `successor_signature` from a
+  pinned key or `kronicle-lite anchor keys add PEM-FILE`
+  (`anchor keys [list|remove|reset]` too). `anchor-keys.cache.json` is no
+  longer written or trusted.
+- **A2-04 (S2, client side):** a service key vouches for a receipt only with
+  status `active` or `retired` and with the receipt's signed `received_at`
+  inside `valid_from`/`valid_to`; pinned status only tightens. Applies to
+  `AnchorClient.verifyReceipt` too.
+- **A2-17 (S3):** `checkpoint --push` refuses (exit 2, nothing stored) a
+  `receipt_jcs` that is not exactly the JCS of the verified receipt.
+- **A2-20 (S4):** `http://` anchor URLs are refused unless the host is
+  localhost/127.0.0.1/[::1] or `--insecure-http` is passed; `--key` on argv
+  prints a warning (prefer `KRONICLE_ANCHOR_KEY` or `config.json`).
+- **A2-21 (S4):** THREAT-MODEL and README: the service is deployed (Free
+  tier); `409 CONFLICT` only for the identical range; what the client checks.
+- **Compatibility with the hardened anchor service (isokron-anchor
+  hardening A2), while staying compatible with the current one:**
+  - `GET /v1/chains/{id}` is followed across pages (`next_cursor`, ≤ 500
+    per page). A paginated page without `next_cursor`, a repeated cursor, an
+    anchor listed twice, another chain's page, or fewer anchors than the
+    service's `anchor_count` rejects the listing: `verify --remote` reports
+    it as a problem (exit 1) and still checks every receipt held locally;
+    MCP `anchor_status` reports `remote: "invalid"`. A pre-pagination
+    service (one page, no `next_cursor`) still works.
+  - A push to an erased chain (`410 chain_erased`) is reported as such,
+    exits 2 and is not retried.
+  - Service-key rules match the service's `src/core/servicekeys.ts`:
+    absent status = active; `retired` needs `valid_to`; `valid_from ≤
+    received_at < valid_to`; a key listed twice, or with a
+    `successor_signature` that does not verify against a listed, trusted
+    predecessor, is refused.
+  - Strict Ed25519 for service keys, receipt countersignatures, successor
+    and re-checked checkpoint signatures: small-order or non-canonical keys
+    and R, and S ≥ L, are refused (node:crypto alone accepts the identity key
+    with R = identity, S = 0 over any message).
+
+Behaviour you will notice: the first online push or `verify --remote` per
+data dir prints `note: pinned 1 anchor service key(s) … on first use`;
+`verify --remote --offline` on a data dir anchored with ≤ 0.8.0 reports
+`unverified` until one online call pins the key; a non-loopback `http://`
+`anchor_url` exits 2 without `--insecure-http`.
+
 ## [0.8.0] — 2026-11-01
 
 ### Fixed — a pulse never reads as a clean bill

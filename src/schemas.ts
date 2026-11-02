@@ -511,12 +511,16 @@ export const CheckpointSchema = z.object({
         .nullable()
         .describe('Why the push did not complete. The local checkpoint is stored either way.'),
       message: z.string().nullable(),
+      key_notes: z
+        .array(z.string())
+        .optional()
+        .describe('Service-key pinning events: first-use pin, accepted rotation, keys ignored because they are not pinned.'),
     })
     .optional()
     .describe('Present when push=true: the hosted anchor outcome.'),
 });
 
-const RANGE_RESULTS = ['match', 'diverged', 'beyond_head', 'gap'] as const;
+const RANGE_RESULTS = ['match', 'diverged', 'beyond_head', 'gap', 'unverified'] as const;
 
 export const AnchorStatusResultSchema = z.object({
   chain_id: HEX64.describe('sha256 of the signing key SPKI DER; the service keys the chain by it.'),
@@ -537,9 +541,13 @@ export const AnchorStatusResultSchema = z.object({
     })
     .nullable(),
   verification: z.object({
-    result: z.enum([...RANGE_RESULTS, 'none']).describe('Local root over the last anchored range vs the anchored root.'),
+    result: z
+      .enum([...RANGE_RESULTS, 'none'])
+      .describe(
+        'Local root over the range in the last countersigned receipt vs the root it signs. unverified: the receipt does not verify against a pinned service key or the local chain key, so nothing was compared.',
+      ),
     countersignature: z.enum(['ok', 'failed', 'unchecked']),
-    remote: z.enum(['checked', 'skipped', 'unreachable']),
+    remote: z.enum(['checked', 'skipped', 'unreachable', 'invalid']).describe('invalid: the service answered but its paginated listing was incomplete or looping; nothing remote was trusted.'),
     remote_conflict: z.boolean().nullable(),
     detail: z.string().nullable(),
   }),

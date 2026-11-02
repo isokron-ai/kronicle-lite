@@ -62,12 +62,55 @@ you against a hosted anchor service, and `verify --remote` does the comparing:
 | evidence | who signs | what it proves | what it cannot |
 |---|---|---|---|
 | local checkpoint | the box's own key | the rows still hash to the root the box signed | anything against the box owner: they hold the key and can re-sign |
-| anchored checkpoint (0.4.0) | the box's key, countersigned by the anchor service, `received_at` bound | that this root for this range existed no later than `received_at`; a later rewrite of that range shows as `diverged` locally and as a `409 CONFLICT` if re-pushed | that the root covers real events (the service never sees leaves); that `[1..N+k]` extends an earlier `[1..N]` (no consistency proof in v1); who holds the signing key (the license key only pays) |
+| anchored checkpoint (0.4.0) | the box's key, countersigned by the anchor service, `received_at` bound | that this root for this range existed no later than `received_at`; a later rewrite of that range shows as `diverged` in `verify --remote`. Re-pushing the *identical* range with a different root is answered `409 CONFLICT`; a different range (e.g. `[1..N+1]`) is accepted, and two concurrent pushes may both be accepted (isokron-anchor A2-03), so `verify --remote` from a box holding the original receipt is the check, not the 409 | that the root covers real events (the service never sees leaves); that `[1..N+k]` extends an earlier `[1..N]` (no consistency proof in v1); who holds the signing key (the license key only pays) |
 | published anchor (service day roots, later) | as above, plus a public log | as above, without trusting the service's database | as above |
 
-An anchor is a timestamped commitment, not a content audit. The service is
-not deployed yet; until it is, `--push` and `--remote` report "anchor service
+An anchor is a timestamped commitment, not a content audit. The default
+service, `https://anchor.isokron.ai`, is deployed with a Free tier; when it
+cannot be reached, `--push` and `--remote` report "anchor service
 unreachable" and every local command behaves exactly as without them.
+
+**What the client checks (0.8.1).** The person rewriting the chain usually
+also controls `config.json`, `anchor_url`, the network path and the
+`anchors` table, so `verify --remote`, `verify --remote --offline`, MCP
+`anchor_status` and `doctor` trust none of those:
+
+- The root and range compared come only from a receipt whose
+  countersignature verifies against a **pinned** service key, whose
+  `receipt.chain_id` derives from the local key that signed its checkpoint
+  (and equals the local chain id for listed anchors), and whose
+  `receipt.checkpoint.signature` verifies against that local key. Unsigned
+  listing fields and the local `anchors.root` column are cross-checked and
+  reported when they disagree, never used.
+- Service keys: `key_id` must derive from `public_key_pem`; status must be
+  `active` or `retired`, and the receipt's signed `received_at` must lie in
+  the key's `valid_from`/`valid_to`. The first online call pins the key it is
+  served (trust on first use, `<data-dir>/anchor-keys.pinned.json`); a
+  package-shipped or `config.json` (`service_key_pins`) pin replaces first
+  use. A pinned key is never overwritten from the network; a new key needs a
+  successor signature from a pinned key or `kronicle-lite anchor keys add`.
+  Status only tightens.
+- Every receipt held locally is checked online too, so a service (or a
+  man-in-the-middle) that stops listing an anchor cannot hide a divergence
+  in it; the omission is reported. A paginated listing is followed to the
+  end; a missing or looping cursor, or fewer anchors than the service's
+  `anchor_count`, rejects the listing instead of passing it.
+- Ed25519 is verified strictly on these paths (no small-order keys or R,
+  canonical encodings, S < L), matching the service.
+- `checkpoint --push` stores only `receipt_jcs` that is exactly the JCS of
+  the verified receipt; anything else is refused (exit 2) and nothing is
+  stored.
+- `http://` anchor URLs are refused unless the host is loopback or
+  `--insecure-http` is given; `--key` on the command line warns.
+
+Limits: first-use pinning trusts the network once — pin out of band
+(`service_key_pins` or `anchor keys add`) if that first contact matters.
+Anyone who can write the data dir can also edit the pin file or the
+client, so these checks protect a verifier running an honest client, e.g.
+an auditor who checks a copy of the data dir with pins they set themselves; they do
+not make the box owner's own `verify --remote` evidence for a third party.
+The service key document is not itself signed; a status change it reports
+can tighten a pin but a man-in-the-middle can withhold one.
 
 ## What it does not give you
 

@@ -2,7 +2,10 @@
  * Anchor configuration and the service-key cache.
  *
  *   <data-dir>/config.json              {"anchor_url": "...", "license_key": "KLA_..."}   mode 0600
- *   <data-dir>/anchor-keys.cache.json   service public keys from the last online call  mode 0600
+ *   <data-dir>/anchor-keys.pinned.json  pinned anchor service keys (trust.ts)          mode 0600
+ *   <data-dir>/anchor-keys.cache.json   0.4.0–0.8.0 only: last fetched key document; no longer
+ *                                       written or trusted (it came over the same channel as
+ *                                       the receipts — hardening A2-12)
  *
  * Precedence: explicit arguments (CLI flags) > KRONICLE_ANCHOR_URL /
  * KRONICLE_ANCHOR_KEY > config.json > defaults. A store opened in memory
@@ -19,7 +22,7 @@ export const DEFAULT_ANCHOR_URL = 'https://anchor.isokron.ai';
 export const CONFIG_FILE = 'config.json';
 export const KEYS_CACHE_FILE = 'anchor-keys.cache.json';
 /** Keys config.json may carry. Anything else is reported by `doctor`. */
-export const CONFIG_KEYS = ['anchor_url', 'license_key'] as const;
+export const CONFIG_KEYS = ['anchor_url', 'license_key', 'service_key_pins'] as const;
 
 export interface AnchorConfig {
   anchor_url: string;
@@ -77,8 +80,36 @@ export function ensureDefaultConfig(dataDir: string): boolean {
   }
 }
 
+/** true for localhost, 127.0.0.1 and [::1]: the hosts an http:// anchor_url may name. */
+export function isLoopbackHost(hostname: string): boolean {
+  return ['localhost', '127.0.0.1', '[::1]'].includes(hostname);
+}
+
+/**
+ * Refuse an anchor_url that would send the license key and receipts in
+ * clear text (A2-20): https, or http to a loopback host, or http anywhere
+ * with an explicit `insecureHttp` (`--insecure-http`).
+ */
+export function assertAnchorTransport(anchorUrl: string, insecureHttp = false): void {
+  let u: URL;
+  try {
+    u = new URL(anchorUrl);
+  } catch {
+    throw new AnchorConfigError(`anchor_url ${anchorUrl} is not a URL`);
+  }
+  if (u.protocol === 'https:') return;
+  if (u.protocol === 'http:' && (isLoopbackHost(u.hostname) || insecureHttp)) return;
+  if (u.protocol === 'http:') {
+    throw new AnchorConfigError(
+      `refusing http:// anchor_url ${u.origin}: the license key and receipts would travel in clear text; use https, a loopback host, or pass --insecure-http`,
+    );
+  }
+  throw new AnchorConfigError(`anchor_url ${u.origin} must be https://`);
+}
+
 const memoryKeys = new Map<string, ServiceKeys>();
 
+/** @deprecated 0.8.1: the key cache is no longer trusted or written; see trust.ts (pins). */
 export function readKeysCache(dataDir: string | null): ServiceKeys | null {
   if (!dataDir) return memoryKeys.get('memory') ?? null;
   const p = join(dataDir, KEYS_CACHE_FILE);
@@ -91,6 +122,7 @@ export function readKeysCache(dataDir: string | null): ServiceKeys | null {
   }
 }
 
+/** @deprecated 0.8.1: the key cache is no longer trusted or written; see trust.ts (pins). */
 export function writeKeysCache(dataDir: string | null, keys: ServiceKeys): void {
   if (!dataDir) {
     memoryKeys.set('memory', keys);

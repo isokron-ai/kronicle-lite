@@ -13,7 +13,8 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 import { AnchorClient } from './anchor/client.js';
-import { CONFIG_KEYS, DEFAULT_ANCHOR_URL, KEYS_CACHE_FILE, readKeysCache } from './anchor/config.js';
+import { CONFIG_KEYS, DEFAULT_ANCHOR_URL, KEYS_CACHE_FILE } from './anchor/config.js';
+import { PINS_FILE, receiptChainRefusal, trustedServiceKeys, verifyReceiptWithPins } from './anchor/trust.js';
 import { CATALOG_FINGERPRINT, CATALOG_VERSION, liveCatalogFingerprint } from './catalog.js';
 import { Chain, type AnchorRecord, type Checkpoint } from './chain/chain.js';
 import type { Signer } from './crypto/keys.js';
@@ -117,6 +118,7 @@ function checkPermissions(dataDir: string, platform: NodeJS.Platform, licenseInC
     ...SECRET_FILES.map((name) => ({ name, secret: true })),
     { name: 'config.json', secret: licenseInConfig },
     { name: KEYS_CACHE_FILE, secret: false },
+    { name: PINS_FILE, secret: false },
     { name: 'kronicle-lite.db', secret: false },
   ];
   const seen: Record<string, string> = {};
@@ -313,21 +315,38 @@ async function checkAnchorLocal(db: Database.Database, dataDir: string, anchorUr
   const last: AnchorRecord | null = chain.lastAnchor();
   if (!last) return { id: 'anchor-local', status: 'skip', detail: 'never anchored' };
   const head = chain.head();
-  const over = last.to_seq <= head.seq ? chain.rootOver(last.from_seq, last.to_seq) : null;
-  const result = last.to_seq > head.seq ? 'beyond_head' : !over ? 'gap' : over.root === last.root ? 'match' : 'diverged';
+  // Compare against the countersigned receipt (pinned service key, local
+  // chain key), never the unsigned anchors.root column (hardening A2-01).
   let countersig = 'unchecked';
-  const keys = readKeysCache(dataDir);
-  if (keys) {
-    try {
-      await new AnchorClient(anchorUrl, { preloadedKeys: keys }).verifyReceipt(JSON.parse(last.receipt_json));
-      countersig = 'ok';
-    } catch {
-      countersig = 'failed';
+  let why = '';
+  let from = last.from_seq;
+  let to = last.to_seq;
+  let root: string | null = null;
+  try {
+    const { keys } = trustedServiceKeys({ dataDir }, anchorUrl);
+    if (keys.length > 0) {
+      const v = verifyReceiptWithPins(JSON.parse(last.receipt_json), keys);
+      const refusal = v.ok ? receiptChainRefusal(db, v.receipt, null) : v.reason;
+      if (v.ok && refusal === null) {
+        countersig = 'ok';
+        ({ from_seq: from, to_seq: to, root } = v.receipt.checkpoint);
+      } else {
+        countersig = 'failed';
+        why = refusal ?? '';
+      }
+    } else {
+      why = 'no anchor service key pinned yet';
     }
+  } catch (e) {
+    countersig = 'failed';
+    why = e instanceof Error ? e.message : String(e);
   }
-  const detail = `last anchor [${last.from_seq}, ${last.to_seq}] ${last.status} at ${last.received_at}: local root ${result}, countersignature ${countersig}; ${Math.max(0, head.seq - last.to_seq)} event(s) since`;
+  const over = root !== null && to <= head.seq ? chain.rootOver(from, to) : null;
+  const result = root === null ? 'unverified' : to > head.seq ? 'beyond_head' : !over ? 'gap' : over.root === root ? 'match' : 'diverged';
+  const detail = `last anchor [${from}, ${to}] ${last.status} at ${last.received_at}: local root ${result}, countersignature ${countersig}${why ? ` (${why})` : ''}; ${Math.max(0, head.seq - to)} event(s) since`;
+  if (countersig === 'unchecked') return { id: 'anchor-local', status: 'warn', detail };
   const status: CheckStatus = result !== 'match' || countersig === 'failed' ? 'fail' : 'ok';
-  return { id: 'anchor-local', status, detail: status === 'fail' ? `${detail} — the local chain no longer matches what was anchored` : detail };
+  return { id: 'anchor-local', status, detail: status === 'fail' ? `${detail} — the local chain no longer matches what was anchored, or the receipt is not trusted` : detail };
 }
 
 async function checkAnchorReachable(anchorUrl: string, opts: DoctorOptions): Promise<DoctorCheck> {

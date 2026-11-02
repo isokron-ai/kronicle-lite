@@ -372,7 +372,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
       title: 'Hosted anchor status',
       description:
         'Last off-box anchor and whether the local chain still matches it: match | diverged (rewritten after anchoring) | ' +
-        'beyond_head | gap. remote:true also asks the anchor service.',
+        'beyond_head | gap | unverified (receipt not trusted). remote:true also asks the anchor service.',
       inputSchema: lean(z.object({ remote: z.boolean().default(false) }), 'input'),
       outputSchema: lean(AnchorStatusResultSchema, 'output'),
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },

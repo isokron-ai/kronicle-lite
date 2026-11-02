@@ -277,8 +277,9 @@ export KRONICLE_ANCHOR_KEY=KLA_…                 # or {"license_key": "KLA_…
 kronicle-lite checkpoint --push        # sign a checkpoint, anchor it, store the countersigned receipt
 kronicle-lite verify --remote          # recompute every anchored range; exit 1 on
                                        #   "local chain diverges from anchor at [a,b]"
-kronicle-lite verify --remote --offline   # same, from stored receipts + cached service keys
+kronicle-lite verify --remote --offline   # same, from stored receipts + the pinned service keys
 kronicle-lite anchor status            # last anchor, status, events since (no network)
+kronicle-lite anchor keys              # pinned anchor service keys (add PEM-FILE | remove KEY_ID | reset)
 ```
 
 - **What leaves the box:** the root, range, signature and your public key.
@@ -286,19 +287,30 @@ kronicle-lite anchor status            # last anchor, status, events since (no n
   and [THREAT-MODEL](docs/THREAT-MODEL.md#what-tamper-evidence-gives-you-here).
 - **MCP:** `checkpoint_chain {push: true}` returns the anchor outcome next to
   the local checkpoint; `anchor_status` (read-only) compares the local chain
-  with the last anchor (`match | diverged | beyond_head | gap`), `remote:
+  with the last anchor (`match | diverged | beyond_head | gap | unverified`), `remote:
   true` also asks the service. Once something was anchored,
   `get_system_state` adds one banner line: `anchored N events ago
   (status)`; before that it says nothing about anchoring, and `doctor`
   only probes the service when a license key or URL is configured.
-- **Not deployed yet.** The default service, `https://anchor.isokron.ai`, is
-  not live. Until it is, `--push` stores the checkpoint locally and exits 2
-  with `anchor service unreachable at …`; `verify --remote` exits 2 the same
-  way; every local command, the MCP server and `orient` behave exactly as
-  without anchoring. Planned pricing at launch: 1,000 anchors a month free,
-  $5 a month beyond that.
-- Exit codes: 0 ok, 1 divergence or conflict, 2 usage or I/O (incl.
-  unreachable).
+- **The service.** The default, `https://anchor.isokron.ai`, is deployed
+  with a Free tier. When it cannot be reached, `--push` stores the
+  checkpoint locally and exits 2 with `anchor service unreachable at …`;
+  `verify --remote` exits 2 the same way; every local command, the MCP
+  server and `orient` behave exactly as without anchoring.
+- **What the client trusts (0.8.1).** Only countersigned receipts: every
+  comparison uses the root and range inside a receipt whose countersignature
+  verifies against a *pinned* service key and whose checkpoint signature
+  verifies against your own chain key — never the unsigned fields of the
+  service's listing or the local `anchors.root` column. The first online
+  push or `verify --remote` pins the service key it is served
+  (`<data-dir>/anchor-keys.pinned.json`, 0600); later keys are accepted only
+  with a successor signature from a pinned key or by `anchor keys add`.
+  Receipts you hold are checked even when the service stops listing them.
+  `http://` URLs are refused unless the host is loopback or you pass
+  `--insecure-http`; prefer `KRONICLE_ANCHOR_KEY` / `config.json` over
+  `--key` (which warns: argv is visible to other users).
+- Exit codes: 0 ok, 1 divergence, conflict or an untrusted receipt, 2 usage
+  or I/O (incl. unreachable and a refused `http://` URL).
 
 ## Chained instructions (0.4.0)
 
