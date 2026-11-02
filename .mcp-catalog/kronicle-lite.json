@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-01T23:58:59.657Z",
+  "capturedAt": "2026-11-02T01:25:58.055Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -259,7 +259,7 @@
             },
             "include_format_only": {
               "default": false,
-              "description": "Also list format-only edits (same Markdown, identical text) as retractions.",
+              "description": "Also list format-only edits (identical raw text up to whitespace and reflow) as retractions.",
               "type": "boolean"
             },
             "response_format": {
@@ -1078,7 +1078,7 @@
   "server": {
     "name": "kronicle-lite",
     "title": "kronicle-lite",
-    "version": "0.8.0"
+    "version": "0.8.1"
   },
-  "sha256": "058f2e2306347bc9d3d3c8732678c90c7fc95091db65912f51727b99016e009d"
+  "sha256": "c7956c7d40508d1bc1a2b1e06f0f27c3e12ddf93c100b9084bff91e248bacbbc"
 }

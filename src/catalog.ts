@@ -19,7 +19,7 @@ import { sha256Hex } from './crypto/hash.js';
 import { createServerFactory } from './server.js';
 import { KronicleLite } from './store.js';
 
-export const CATALOG_FINGERPRINT = '058f2e2306347bc9d3d3c8732678c90c7fc95091db65912f51727b99016e009d';
+export const CATALOG_FINGERPRINT = 'c7956c7d40508d1bc1a2b1e06f0f27c3e12ddf93c100b9084bff91e248bacbbc';
 /** Package version the fingerprint above was pinned for. */
 export const CATALOG_VERSION = '0.8.1';
 /** 0.6.0: the `serve --core` catalog (.mcp-catalog/kronicle-lite-core.json). */
