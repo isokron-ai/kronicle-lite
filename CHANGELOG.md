@@ -6,6 +6,26 @@ uses semantic versioning once past 0.x.
 
 ## Unreleased (0.8.1)
 
+### Fixed — anchor chain listing always paged; 429 honoured (anchor re-review)
+
+- `verify --remote` and MCP `anchor_status` could never verify a large
+  chain against the hardened anchor service: the first
+  `GET /v1/chains/{id}` carried no parameters, so it took the service's
+  unpaged path, which serves at most `CHAIN_UNPAGED_MAX` anchors (5,000 in
+  the current review revision) and answers `400 paginate_required` above
+  that. Every listing request now
+  carries `?limit=500` (and `&cursor=` after the first page). A
+  pre-pagination service (7327b55) ignores both and still returns its one
+  full page. A `400 paginate_required` is retried once and then rejects
+  the listing.
+- A `429` on a listing page or on the service key document is no longer an
+  immediate error. The client waits `retry-after` (delta-seconds or
+  HTTP-date; 1 s when absent) and retries, at most 3 times per request.
+  When the wait asked for is over 60 s, or the 429 persists, it fails
+  closed: a listing is rejected (`verify --remote` exit 1, held receipts
+  still checked, MCP `remote: "invalid"`), and a key document makes the
+  command exit 2. `POST /v1/anchor` is not retried.
+
 ### Security — anchor client trusts only countersigned, pinned receipts (hardening track 6)
 
 - **A2-01 (S1):** `verify --remote`, `verify --remote --offline`, MCP

@@ -636,7 +636,9 @@ that does not verify is refused. Ed25519 checks on these paths are strict:
 small-order or non-canonical public keys and R, and S ≥ L, never verify.
 
 The chain listing is paginated by newer services (`next_cursor`, null on
-the last page; `?cursor=` to continue). The client follows it to the end and
+the last page; `?cursor=` to continue). The client sends `?limit=500` on
+every listing request (older services ignore it) and honours `429
+retry-after` up to 60 s, 3 times per request, before failing closed. The client follows it to the end and
 rejects the whole listing — reported, never treated as complete — on a
 paginated page without `next_cursor`, a repeated cursor or anchor, another
 chain's page, or fewer anchors than `anchor_count`. A push to an erased
