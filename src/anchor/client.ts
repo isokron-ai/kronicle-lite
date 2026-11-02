@@ -12,6 +12,7 @@
  */
 
 import { parseAnchorReceipt, verifyAnchorReceiptSignature, type AnchorReceipt } from './receipt.js';
+import { serviceKeyIdFromPem, serviceKeyRefusal } from './trust.js';
 import type { WireCheckpoint } from './wire.js';
 
 export const DEFAULT_ANCHOR_TIMEOUT_MS = 10_000;
@@ -187,18 +188,40 @@ export class AnchorClient {
     throw this.refusal(r.status, r.json, r.isJson, 'GET /.well-known/anchor-keys.json');
   }
 
+  /**
+   * The published key for `service_key_id`, only when its public key derives
+   * to that id and its status is active or retired. Unpinned: the anchor
+   * commands verify against the local pins (trust.ts), not this.
+   */
   async servicePublicKeyPem(service_key_id: string): Promise<string | null> {
     const keys = await this.serviceKeys();
-    const k = keys.keys.find((x) => x.key_id === service_key_id && x.status !== 'revoked');
-    return k ? k.public_key_pem : null;
+    const k = keys.keys.find((x) => x.key_id === service_key_id);
+    if (!k || typeof k.public_key_pem !== 'string') return null;
+    try {
+      if (serviceKeyIdFromPem(k.public_key_pem) !== service_key_id) return null;
+    } catch {
+      return null;
+    }
+    return k.status === 'active' || k.status === 'retired' ? k.public_key_pem : null;
   }
 
-  /** Parse + countersignature check against the published service keys. Throws on failure. */
+  /**
+   * Parse + countersignature check against the keys this client was given
+   * (preloaded) or fetched: key_id must derive from the public key, status
+   * must be active/retired, and the receipt's signed time must fall inside
+   * valid_from/valid_to. Throws on failure. NOT pinned: a key document from
+   * the same channel as the receipt proves little on its own — the CLI and
+   * MCP paths use verifyReceiptWithPins.
+   */
   async verifyReceipt(input: unknown): Promise<AnchorReceipt> {
     const parsed = parseAnchorReceipt(input);
     if (!parsed.ok) throw new Error(`anchor receipt malformed: ${parsed.detail}`);
-    const pem = await this.servicePublicKeyPem(parsed.value.service_key_id);
-    if (!pem) throw new Error(`service key ${parsed.value.service_key_id} not published at ${this.baseUrl}/.well-known/anchor-keys.json`);
+    const id = parsed.value.service_key_id;
+    const pem = await this.servicePublicKeyPem(id);
+    if (!pem) throw new Error(`service key ${id} not published (or not usable) at ${this.baseUrl}/.well-known/anchor-keys.json`);
+    const entry = (await this.serviceKeys()).keys.find((x) => x.key_id === id)!;
+    const refusal = serviceKeyRefusal(entry, parsed.value.received_at);
+    if (refusal) throw new Error(refusal);
     if (!verifyAnchorReceiptSignature(parsed.value, pem)) throw new Error('anchor receipt countersignature does not verify');
     return parsed.value;
   }

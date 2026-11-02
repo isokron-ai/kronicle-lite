@@ -30,6 +30,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { anchorStatus, pushCheckpoint, tryPushCheckpoint, verifyLastAnchor, verifyRemote } from '../src/anchor/anchor.js';
 import { AnchorApiError, AnchorClient, AnchorUnreachableError } from '../src/anchor/client.js';
 import { DEFAULT_ANCHOR_URL, KEYS_CACHE_FILE, loadConfig } from '../src/anchor/config.js';
+import { PINS_FILE } from '../src/anchor/trust.js';
 import { anchorReceiptSigningPayload, type AnchorReceipt } from '../src/anchor/receipt.js';
 import { GENESIS_HASH } from '../src/chain/genesis.js';
 import { verifyEd25519 } from '../src/crypto/keys.js';
@@ -175,7 +176,8 @@ describe.each(backends)('anchoring against the $name backend', { timeout: 60_000
     expect(store.chain.head()).toEqual(headBefore);
     expect(store.chain.listCheckpoints()).toHaveLength(1);
     expect(store.chain.verify().ok).toBe(true);
-    expect(existsSync(join(dataDir, KEYS_CACHE_FILE))).toBe(true);
+    expect(existsSync(join(dataDir, PINS_FILE))).toBe(true);
+    expect(existsSync(join(dataDir, KEYS_CACHE_FILE))).toBe(false); // 0.8.1: the unpinned cache is no longer written
     store.close();
   });
 
@@ -286,7 +288,7 @@ describe.each(backends)('anchoring against the $name backend', { timeout: 60_000
     two.store.close();
   });
 
-  it('--offline uses stored receipts and cached service keys; a tampered stored receipt fails its countersignature', async () => {
+  it('--offline re-verifies stored receipts against the pinned service keys; a tampered stored receipt fails its countersignature', async () => {
     const { store } = makeStore(1);
     await pushCheckpoint(store, opts());
     const dead = await closedPortUrl();

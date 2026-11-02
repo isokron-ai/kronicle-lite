@@ -15,8 +15,18 @@ import { createPublicKey } from 'node:crypto';
 import type { Checkpoint } from '../chain/chain.js';
 import { chainIdFromPublicKeyPem, keyIdFromPublicKey } from '../crypto/keys.js';
 import type { KronicleLite } from '../store.js';
-import { AnchorApiError, AnchorClient, AnchorUnreachableError, type RemoteAnchor, type ServiceKeys } from './client.js';
-import { AnchorConfigError, loadConfig, readKeysCache, writeKeysCache, type AnchorConfig } from './config.js';
+import { AnchorApiError, AnchorClient, AnchorUnreachableError, type RemoteAnchor, type RemoteChain } from './client.js';
+import { AnchorConfigError, assertAnchorTransport, loadConfig, type AnchorConfig } from './config.js';
+import { anchorReceiptJcs, type AnchorReceipt } from './receipt.js';
+import {
+  receiptChainRefusal,
+  reconcileServiceKeys,
+  ServiceKeyTrustError,
+  trustedServiceKeys,
+  verifyReceiptWithPins,
+  type KeyReconciliation,
+  type PinnedServiceKey,
+} from './trust.js';
 import { parseWireCheckpoint, type WireCheckpoint } from './wire.js';
 
 export interface AnchorCallOptions {
@@ -24,6 +34,8 @@ export interface AnchorCallOptions {
   anchorUrl?: string;
   /** Overrides KRONICLE_ANCHOR_KEY / config.json. */
   licenseKey?: string;
+  /** Allow an http:// anchor_url to a non-loopback host (CLI `--insecure-http`). */
+  insecureHttp?: boolean;
   fetch?: typeof fetch;
   timeoutMs?: number;
 }
@@ -35,20 +47,45 @@ function configFor(store: KronicleLite, opts: AnchorCallOptions): AnchorConfig {
   });
 }
 
-function clientFor(cfg: AnchorConfig, opts: AnchorCallOptions, preloadedKeys: ServiceKeys | null = null): AnchorClient {
+/** Every network call goes through here: refuses clear-text transport first. */
+function clientFor(cfg: AnchorConfig, opts: AnchorCallOptions): AnchorClient {
+  assertAnchorTransport(cfg.anchor_url, opts.insecureHttp === true);
   return new AnchorClient(cfg.anchor_url, {
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
-    preloadedKeys,
   });
 }
 
-async function refreshKeysCache(store: KronicleLite, api: AnchorClient): Promise<void> {
+/** Fetch the service key document and merge it into the pins (TOFU / successor / tighten-only). */
+async function refreshPins(store: KronicleLite, cfg: AnchorConfig, api: AnchorClient): Promise<KeyReconciliation> {
+  return reconcileServiceKeys(store, cfg.anchor_url, await api.serviceKeys());
+}
+
+/** Local pins only (no network). A corrupt pin file is reported, not trusted. */
+function localPins(store: KronicleLite, cfg: AnchorConfig): { keys: PinnedServiceKey[]; problem: string | null } {
   try {
-    writeKeysCache(store.dataDir, await api.serviceKeys());
-  } catch {
-    // best effort
+    return { keys: trustedServiceKeys(store, cfg.anchor_url).keys, problem: null };
+  } catch (e) {
+    if (e instanceof ServiceKeyTrustError || e instanceof AnchorConfigError) return { keys: [], problem: e.message };
+    throw e;
   }
+}
+
+/**
+ * Verify a receipt against the pinned service keys AND tie it to this chain
+ * (chain_id, checkpoint key, checkpoint signature). Only a receipt that
+ * passes both may supply a root or range to compare.
+ */
+export function checkHeldReceipt(
+  store: KronicleLite,
+  input: unknown,
+  keys: readonly PinnedServiceKey[],
+  expectedChainId: string | null,
+): { ok: true; receipt: AnchorReceipt } | { ok: false; reason: string; claimed: AnchorReceipt | null } {
+  const v = verifyReceiptWithPins(input, keys);
+  if (!v.ok) return v;
+  const refusal = receiptChainRefusal(store.db, v.receipt, expectedChainId);
+  return refusal ? { ok: false, reason: refusal, claimed: v.receipt } : v;
 }
 
 /** The active local signing identity as the service names it. */
@@ -83,15 +120,19 @@ export interface PushResult {
   verify_url: string;
   public_status: string;
   usage?: { used_this_month: number; limit: number | null; tier: string };
+  /** Service-key pinning events (first-use pin, rotation, ignored keys). */
+  key_notes: string[];
 }
 
 /**
  * Push one local checkpoint (latest by default). Refuses a checkpoint that
  * does not verify against signing_keys, and one whose range the local chain
- * no longer matches. After the POST the receipt is parsed, its
- * countersignature checked against the service's published keys, and its
- * checkpoint compared field by field with what was sent, before anything is
- * stored in `anchors`.
+ * no longer matches. After the POST the service key document is reconciled
+ * with the local pins, the receipt's countersignature is checked against a
+ * pinned key (status and validity window included), its checkpoint
+ * signature against the local chain key, its checkpoint compared field by
+ * field with what was sent, and `receipt_jcs` checked to be exactly that
+ * receipt — before anything is stored in `anchors`.
  */
 export async function pushCheckpoint(store: KronicleLite, opts: AnchorCallOptions & { checkpointId?: string } = {}): Promise<PushResult> {
   const cfg = configFor(store, opts);
@@ -125,8 +166,11 @@ export async function pushCheckpoint(store: KronicleLite, opts: AnchorCallOption
 
   const api = clientFor(cfg, opts);
   const resp = await api.push(cfg.license_key, { chain_id, pubkey: pem, checkpoint: cp });
-  const receipt = await api.verifyReceipt(resp.receipt);
-  await refreshKeysCache(store, api);
+  const pins = await refreshPins(store, cfg, api);
+  if (pins.violations.length > 0) throw new Error(`${pins.violations.join('; ')}; nothing stored`);
+  const checked = checkHeldReceipt(store, resp.receipt, pins.keys, chain_id);
+  if (!checked.ok) throw new Error(`anchor receipt rejected: ${checked.reason}; nothing stored`);
+  const receipt = checked.receipt;
   if (
     receipt.chain_id !== chain_id ||
     receipt.checkpoint.root !== cp.root ||
@@ -137,6 +181,21 @@ export async function pushCheckpoint(store: KronicleLite, opts: AnchorCallOption
   ) {
     throw new Error('anchor receipt does not describe the checkpoint that was sent; nothing stored');
   }
+  // A2-17: what is stored is the verified receipt's JCS. A receipt_jcs string
+  // from the service must be exactly that, or nothing is stored.
+  const jcs = anchorReceiptJcs(receipt);
+  if (resp.receipt_jcs !== undefined && resp.receipt_jcs !== null) {
+    if (typeof resp.receipt_jcs !== 'string') throw new Error('anchor response receipt_jcs is not a string; nothing stored');
+    let parsedJcs: unknown;
+    try {
+      parsedJcs = JSON.parse(resp.receipt_jcs);
+    } catch {
+      throw new Error('anchor response receipt_jcs is not JSON; nothing stored');
+    }
+    const again = checkHeldReceipt(store, parsedJcs, pins.keys, chain_id);
+    if (!again.ok) throw new Error(`anchor response receipt_jcs rejected: ${again.reason}; nothing stored`);
+    if (resp.receipt_jcs !== jcs) throw new Error('anchor response receipt_jcs is not the JCS of the countersigned receipt; nothing stored');
+  }
   store.chain.recordAnchor({
     anchor_id: receipt.anchor_id,
     checkpoint_id: local.checkpoint_id,
@@ -146,7 +205,7 @@ export async function pushCheckpoint(store: KronicleLite, opts: AnchorCallOption
     to_seq: cp.to_seq,
     root: cp.root,
     received_at: receipt.received_at,
-    receipt_json: typeof resp.receipt_jcs === 'string' ? resp.receipt_jcs : JSON.stringify(receipt),
+    receipt_json: jcs,
     day: resp.public?.day ?? null,
     leaf_index: resp.public?.leaf_index ?? null,
     path_json: resp.public?.path ? JSON.stringify(resp.public.path) : null,
@@ -164,15 +223,18 @@ export async function pushCheckpoint(store: KronicleLite, opts: AnchorCallOption
     verify_url: resp.verify_url,
     public_status: resp.public?.status ?? 'pending_public',
     ...(resp.usage ? { usage: resp.usage } : {}),
+    key_notes: pins.notes,
   };
 }
 
-export type RangeResult = 'match' | 'diverged' | 'beyond_head' | 'gap';
+/** unverified: no receipt whose countersignature verifies against a pinned key, so the range was not compared. */
+export type RangeResult = 'match' | 'diverged' | 'beyond_head' | 'gap' | 'unverified';
 
 export interface RangeCheck {
   anchor_id: string;
   from_seq: number;
   to_seq: number;
+  /** The root inside the countersigned receipt (what the comparison used); the receipt's unverified claim when result=unverified. */
   anchored_root: string;
   local_root: string | null;
   received_at: string;
@@ -188,6 +250,10 @@ export interface VerifyRemoteResult {
   head_seq: number;
   checks: RangeCheck[];
   divergences: string[];
+  /** Trust failures (untrusted receipts, key document violations, listings that contradict their signed receipts). Any one fails verification. */
+  problems: string[];
+  /** Informational: first-use pins, rotations, anchors we hold that the service did not list. */
+  notes: string[];
   summary: string;
 }
 
@@ -206,10 +272,39 @@ function divergenceLine(e: { from_seq: number; to_seq: number; root: string; rec
   })`;
 }
 
+/** Unsigned fields (a service listing or the local `anchors` row) that disagree with the signed receipt. */
+function unsignedMismatch(
+  signed: AnchorReceipt,
+  claimed: { anchor_id?: string; from_seq?: number; to_seq?: number; root?: string; received_at?: string },
+): string[] {
+  const bad: string[] = [];
+  if (claimed.anchor_id !== undefined && claimed.anchor_id !== signed.anchor_id) bad.push('anchor_id');
+  if (claimed.from_seq !== undefined && claimed.from_seq !== signed.checkpoint.from_seq) bad.push('from_seq');
+  if (claimed.to_seq !== undefined && claimed.to_seq !== signed.checkpoint.to_seq) bad.push('to_seq');
+  if (claimed.root !== undefined && claimed.root !== signed.checkpoint.root) bad.push('root');
+  if (claimed.received_at !== undefined && claimed.received_at !== signed.received_at) bad.push('received_at');
+  return bad;
+}
+
+interface Candidate {
+  anchor_id: string;
+  receipt: unknown;
+  source: 'remote' | 'local';
+  conflict: boolean;
+  /** Unsigned values shown next to the receipt, cross-checked only. */
+  unsigned: { anchor_id?: string; from_seq?: number; to_seq?: number; root?: string; received_at?: string };
+  unsignedLabel: string;
+}
+
 /**
  * `verify --remote`: fetch this chain's anchors from the service (or, with
- * `offline`, use the stored receipts and the cached service keys), recompute
- * the local root for every anchored range, compare. A mismatch is the
+ * `offline`, use the stored receipts), and for every receipt — every one the
+ * service lists AND every one held locally — verify its countersignature
+ * against a pinned service key and its checkpoint signature against the
+ * local chain key, then recompute the local root over the SIGNED range and
+ * compare with the SIGNED root. Unsigned listing fields and the local
+ * `anchors.root` column are never comparison values; when they disagree with
+ * the signed receipt that is reported as a problem. A mismatch is the
  * sentence verify_chain cannot say on its own: "local chain diverges from
  * anchor at [a,b]".
  */
@@ -217,88 +312,147 @@ export async function verifyRemote(store: KronicleLite, opts: AnchorCallOptions 
   const cfg = configFor(store, opts);
   const { chain_id } = localChainIdentity(store);
   const head = store.chain.head();
-  const cached = readKeysCache(store.dataDir);
-  const api = clientFor(cfg, opts, opts.offline ? cached : null);
-  const checks: RangeCheck[] = [];
+  const problems: string[] = [];
+  const notes: string[] = [];
+  const held = store.chain.listAnchors();
+  const candidates: Candidate[] = [];
+  let keys: PinnedServiceKey[];
 
-  type Entry = { anchor_id: string; from_seq: number; to_seq: number; root: string; received_at: string; receipt: unknown; conflict: boolean; source: 'remote' | 'local' };
-  let entries: Entry[];
   if (opts.offline) {
-    entries = store.chain.listAnchors().map((a) => ({
-      anchor_id: a.anchor_id,
-      from_seq: a.from_seq,
-      to_seq: a.to_seq,
-      root: a.root,
-      received_at: a.received_at,
-      receipt: safeJson(a.receipt_json),
-      conflict: a.status === 'conflict',
-      source: 'local' as const,
-    }));
+    const lp = localPins(store, cfg);
+    keys = lp.keys;
+    if (lp.problem) problems.push(lp.problem);
+    for (const a of held) {
+      candidates.push({
+        anchor_id: a.anchor_id,
+        receipt: safeJson(a.receipt_json),
+        source: 'local',
+        conflict: a.status === 'conflict',
+        unsigned: { anchor_id: a.anchor_id, from_seq: a.from_seq, to_seq: a.to_seq, root: a.root, received_at: a.received_at },
+        unsignedLabel: 'local anchors row',
+      });
+    }
   } else {
-    const remote = await api.chain(chain_id);
-    await refreshKeysCache(store, api);
-    entries = (remote?.anchors ?? []).map((a: RemoteAnchor) => ({
-      anchor_id: a.anchor_id,
-      from_seq: a.from_seq,
-      to_seq: a.to_seq,
-      root: a.root,
-      received_at: a.received_at,
-      receipt: a.receipt,
-      conflict: a.conflict,
-      source: 'remote' as const,
-    }));
-    // Refresh the public status of anchors we already hold.
-    const mine = new Map(store.chain.listAnchors().map((x) => [x.anchor_id, x]));
-    for (const a of remote?.anchors ?? []) {
-      const m = mine.get(a.anchor_id);
-      if (m) {
-        store.chain.recordAnchor({
-          ...m,
-          day: a.public?.day ?? null,
-          leaf_index: a.public?.leaf_index ?? null,
-          path_json: a.public?.path ? JSON.stringify(a.public.path) : null,
-          status: a.conflict ? 'conflict' : (a.public?.status ?? m.status),
-          fetched_at: new Date().toISOString(),
+    const api = clientFor(cfg, opts);
+    const remote: RemoteChain | null = await api.chain(chain_id);
+    const rec = await refreshPins(store, cfg, api);
+    keys = rec.keys;
+    problems.push(...rec.violations);
+    notes.push(...rec.notes);
+    const listed = remote?.anchors ?? [];
+    const listedIds = new Set(listed.map((a) => a.anchor_id));
+    const heldById = new Map(held.map((h) => [h.anchor_id, h]));
+    for (const a of listed as RemoteAnchor[]) {
+      candidates.push({
+        anchor_id: a.anchor_id,
+        receipt: a.receipt,
+        source: 'remote',
+        conflict: a.conflict === true,
+        unsigned: { anchor_id: a.anchor_id, from_seq: a.from_seq, to_seq: a.to_seq, root: a.root, received_at: a.received_at },
+        unsignedLabel: `listing from ${cfg.anchor_url}`,
+      });
+      const mine = heldById.get(a.anchor_id);
+      if (mine && !sameReceipt(mine.receipt_json, a.receipt)) {
+        notes.push(`anchor ${a.anchor_id}: the receipt ${cfg.anchor_url} lists differs from the one stored locally; checking both`);
+        candidates.push({
+          anchor_id: mine.anchor_id,
+          receipt: safeJson(mine.receipt_json),
+          source: 'local',
+          conflict: mine.status === 'conflict',
+          unsigned: { anchor_id: mine.anchor_id, from_seq: mine.from_seq, to_seq: mine.to_seq, root: mine.root, received_at: mine.received_at },
+          unsignedLabel: 'local anchors row',
         });
       }
+    }
+    // A2-11: a receipt we hold is checked even when the service leaves it out.
+    for (const h of held) {
+      if (listedIds.has(h.anchor_id)) continue;
+      notes.push(`anchor ${h.anchor_id} [${h.from_seq},${h.to_seq}] is held locally but not listed by ${cfg.anchor_url}; checked from the local receipt`);
+      candidates.push({
+        anchor_id: h.anchor_id,
+        receipt: safeJson(h.receipt_json),
+        source: 'local',
+        conflict: h.status === 'conflict',
+        unsigned: { anchor_id: h.anchor_id, from_seq: h.from_seq, to_seq: h.to_seq, root: h.root, received_at: h.received_at },
+        unsignedLabel: 'local anchors row',
+      });
+    }
+    // Refresh the public status of anchors we hold whose listed receipt verifies.
+    for (const a of listed) {
+      const m = heldById.get(a.anchor_id);
+      if (!m || !checkHeldReceipt(store, a.receipt, keys, chain_id).ok) continue;
+      store.chain.recordAnchor({
+        ...m,
+        day: a.public?.day ?? null,
+        leaf_index: a.public?.leaf_index ?? null,
+        path_json: a.public?.path ? JSON.stringify(a.public.path) : null,
+        status: a.conflict ? 'conflict' : (a.public?.status ?? m.status),
+        fetched_at: new Date().toISOString(),
+      });
     }
   }
 
   const divergences: string[] = [];
-  for (const e of entries) {
-    let countersignature: RangeCheck['countersignature'] = 'unchecked';
-    if (!(opts.offline && !cached)) {
-      try {
-        await api.verifyReceipt(e.receipt);
-        countersignature = 'ok';
-      } catch {
-        countersignature = 'failed';
-      }
+  const checks: RangeCheck[] = [];
+  for (const c of candidates) {
+    // Listed anchors must be for the chain we asked about; a held receipt
+    // must derive from one of our own signing keys (checked either way).
+    const v = checkHeldReceipt(store, c.receipt, keys, c.source === 'remote' ? chain_id : null);
+    if (!v.ok) {
+      const claimed = v.claimed;
+      problems.push(`anchor ${c.anchor_id} (${c.source}): ${v.reason}; range not compared`);
+      checks.push({
+        anchor_id: c.anchor_id,
+        from_seq: claimed?.checkpoint.from_seq ?? c.unsigned.from_seq ?? 0,
+        to_seq: claimed?.checkpoint.to_seq ?? c.unsigned.to_seq ?? 0,
+        anchored_root: claimed?.checkpoint.root ?? c.unsigned.root ?? '',
+        local_root: null,
+        received_at: claimed?.received_at ?? c.unsigned.received_at ?? '',
+        source: c.source,
+        countersignature: 'failed',
+        conflict_remote: c.conflict,
+        result: 'unverified',
+      });
+      continue;
     }
+    const r = v.receipt;
+    const off = unsignedMismatch(r, c.unsigned);
+    if (off.length > 0) problems.push(`anchor ${c.anchor_id}: ${c.unsignedLabel} disagrees with its countersigned receipt (${off.join(', ')}); the signed values were used`);
+    const e = { from_seq: r.checkpoint.from_seq, to_seq: r.checkpoint.to_seq, root: r.checkpoint.root, received_at: r.received_at };
     const { result, local_root } = compareRange(store, e.from_seq, e.to_seq, e.root);
     if (result !== 'match') divergences.push(divergenceLine(e, result, local_root));
     checks.push({
-      anchor_id: e.anchor_id,
+      anchor_id: r.anchor_id,
       from_seq: e.from_seq,
       to_seq: e.to_seq,
       anchored_root: e.root,
       local_root,
       received_at: e.received_at,
-      source: e.source,
-      countersignature,
-      conflict_remote: e.conflict,
+      source: c.source,
+      countersignature: 'ok',
+      conflict_remote: c.conflict,
       result,
     });
   }
   const badSigs = checks.filter((c) => c.countersignature === 'failed');
-  const ok = divergences.length === 0 && badSigs.length === 0 && checks.length > 0;
+  const ok = divergences.length === 0 && badSigs.length === 0 && problems.length === 0 && checks.length > 0;
   const summary =
     checks.length === 0
-      ? 'nothing anchored for this chain'
+      ? problems.length > 0
+        ? `nothing anchored for this chain; ${problems.length} problem(s)`
+        : 'nothing anchored for this chain'
       : ok
         ? `${checks.length} anchored range(s) match the local chain (head ${head.seq})`
-        : `${divergences.length} divergence(s), ${badSigs.length} bad countersignature(s) across ${checks.length} anchored range(s)`;
-  return { ok, chain_id, head_seq: head.seq, checks, divergences, summary };
+        : `${divergences.length} divergence(s), ${badSigs.length} untrusted receipt(s), ${problems.length} problem(s) across ${checks.length} anchored range(s)`;
+  return { ok, chain_id, head_seq: head.seq, checks, divergences, problems, notes, summary };
+}
+
+function sameReceipt(storedJson: string, other: unknown): boolean {
+  try {
+    return anchorReceiptJcs(other as AnchorReceipt) === anchorReceiptJcs(JSON.parse(storedJson) as AnchorReceipt);
+  } catch {
+    return false;
+  }
 }
 
 function safeJson(s: string): unknown {
@@ -355,61 +509,86 @@ export function anchorStatus(store: KronicleLite, opts: AnchorCallOptions = {}):
 }
 
 export interface LastAnchorVerification {
-  /** Local root comparison for the latest anchor; `none` when never anchored. */
+  /** Local root over the range in the last anchor's countersigned receipt vs that receipt's root; `none` when never anchored; `unverified` when the receipt is not trusted. */
   result: RangeResult | 'none';
   countersignature: 'ok' | 'failed' | 'unchecked';
-  /** remote: checked against the service; skipped: local + cached keys only; unreachable: the service did not answer. */
+  /** remote: checked against the service; skipped: local pins only; unreachable: the service did not answer. */
   remote: 'checked' | 'skipped' | 'unreachable';
   remote_conflict: boolean | null;
   detail: string | null;
 }
 
 /**
- * The MCP `anchor_status` check: compare the latest anchor's root with the
- * local rows (always), check its countersignature with cached keys (or fresh
- * ones when `remote`), and, when `remote`, read the service's conflict flag.
- * Never throws for network trouble: reports `remote: 'unreachable'`.
+ * The MCP `anchor_status` check: verify the latest stored receipt against
+ * the pinned service keys (refreshed from the service when `remote`) and the
+ * local chain key, then compare the local root over the receipt's signed
+ * range with its signed root — never the `anchors.root` column. When
+ * `remote`, also read the service's conflict flag. Never throws for network
+ * trouble: reports `remote: 'unreachable'` and falls back to local pins.
  */
 export async function verifyLastAnchor(store: KronicleLite, opts: AnchorCallOptions & { remote?: boolean } = {}): Promise<LastAnchorVerification> {
   const last = store.chain.lastAnchor();
   if (!last) return { result: 'none', countersignature: 'unchecked', remote: 'skipped', remote_conflict: null, detail: 'never anchored' };
-  const { result, local_root } = compareRange(store, last.from_seq, last.to_seq, last.root);
-  const detail = result === 'match' ? null : divergenceLine(last, result, local_root);
   const cfg = configFor(store, opts);
-  const cached = readKeysCache(store.dataDir);
-  if (!opts.remote) {
-    let countersignature: LastAnchorVerification['countersignature'] = 'unchecked';
-    if (cached) {
-      try {
-        await clientFor(cfg, opts, cached).verifyReceipt(safeJson(last.receipt_json));
-        countersignature = 'ok';
-      } catch {
-        countersignature = 'failed';
+  const { chain_id } = localChainIdentity(store);
+  const extra: string[] = [];
+  let remoteState: LastAnchorVerification['remote'] = 'skipped';
+  let remoteConflict: boolean | null = null;
+  let keys: PinnedServiceKey[] = [];
+  let violations = false;
+  let fromNetwork = false;
+  if (opts.remote) {
+    try {
+      const api = clientFor(cfg, opts);
+      const remote = await api.chain(chain_id);
+      const rec = await refreshPins(store, cfg, api);
+      keys = rec.keys;
+      fromNetwork = true;
+      extra.push(...rec.violations);
+      violations = rec.violations.length > 0;
+      remoteState = 'checked';
+      remoteConflict = remote ? remote.conflict : null;
+      const entry = remote?.anchors.find((a) => a.anchor_id === last.anchor_id) ?? null;
+      if (!entry) extra.push(`anchor ${last.anchor_id} not listed by ${cfg.anchor_url}`);
+    } catch (err) {
+      if (err instanceof ServiceKeyTrustError) {
+        extra.push(err.message);
+        violations = true;
+        remoteState = 'checked';
+      } else {
+        remoteState = 'unreachable';
+        extra.push(err instanceof Error ? err.message : String(err));
       }
     }
-    return { result, countersignature, remote: 'skipped', remote_conflict: null, detail };
   }
-  const api = clientFor(cfg, opts);
-  try {
-    const remote = await api.chain(localChainIdentity(store).chain_id);
-    let countersignature: LastAnchorVerification['countersignature'] = 'failed';
-    try {
-      await api.verifyReceipt(safeJson(last.receipt_json));
-      countersignature = 'ok';
-    } catch {
-      countersignature = 'failed';
+  if (!fromNetwork) {
+    const lp = localPins(store, cfg);
+    keys = lp.keys;
+    if (lp.problem) {
+      extra.push(lp.problem);
+      violations = true;
     }
-    const entry = remote?.anchors.find((a) => a.anchor_id === last.anchor_id) ?? null;
-    return {
-      result,
-      countersignature,
-      remote: 'checked',
-      remote_conflict: remote ? remote.conflict : null,
-      detail: entry ? detail : `${detail ? detail + '; ' : ''}anchor ${last.anchor_id} not listed by ${cfg.anchor_url}`,
-    };
-  } catch (err) {
-    return { result, countersignature: 'unchecked', remote: 'unreachable', remote_conflict: null, detail: err instanceof Error ? err.message : String(err) };
   }
+  const v = checkHeldReceipt(store, safeJson(last.receipt_json), keys, null);
+  const join = (d: string | null) => {
+    const all = [...(d ? [d] : []), ...extra];
+    return all.length > 0 ? all.join('; ') : null;
+  };
+  if (!v.ok) {
+    return { result: 'unverified', countersignature: 'failed', remote: remoteState, remote_conflict: remoteConflict, detail: join(`anchor ${last.anchor_id}: ${v.reason}; range not compared`) };
+  }
+  const r = v.receipt;
+  const e = { from_seq: r.checkpoint.from_seq, to_seq: r.checkpoint.to_seq, root: r.checkpoint.root, received_at: r.received_at };
+  const off = unsignedMismatch(r, { anchor_id: last.anchor_id, from_seq: last.from_seq, to_seq: last.to_seq, root: last.root, received_at: last.received_at });
+  if (off.length > 0) extra.push(`local anchors row disagrees with its countersigned receipt (${off.join(', ')}); the signed values were used`);
+  const { result, local_root } = compareRange(store, e.from_seq, e.to_seq, e.root);
+  return {
+    result,
+    countersignature: violations ? 'failed' : 'ok',
+    remote: remoteState,
+    remote_conflict: remoteConflict,
+    detail: join(result === 'match' ? null : divergenceLine(e, result, local_root)),
+  };
 }
 
 export interface PushOutcome {
@@ -423,6 +602,8 @@ export interface PushOutcome {
   public_status: string | null;
   error: 'anchor_unreachable' | 'anchor_refused' | 'anchor_config' | 'anchor_failed' | null;
   message: string | null;
+  /** Service-key pinning events from this push (first-use pin, rotation, ignored keys). */
+  key_notes: string[];
 }
 
 /**
@@ -446,6 +627,7 @@ export async function tryPushCheckpoint(store: KronicleLite, opts: AnchorCallOpt
       message: r.conflict
         ? `CONFLICT: [${r.range[0]}, ${r.range[1]}] was already anchored with a different root (${r.conflicting_anchor_ids.join(', ')}); the chain was rewritten after an earlier anchor`
         : null,
+      key_notes: r.key_notes,
     };
   } catch (err) {
     const error: PushOutcome['error'] =
@@ -453,7 +635,7 @@ export async function tryPushCheckpoint(store: KronicleLite, opts: AnchorCallOpt
         ? 'anchor_unreachable'
         : err instanceof AnchorApiError
           ? 'anchor_refused'
-          : err instanceof AnchorConfigError
+          : err instanceof AnchorConfigError || err instanceof ServiceKeyTrustError
             ? 'anchor_config'
             : 'anchor_failed';
     return {
@@ -467,6 +649,7 @@ export async function tryPushCheckpoint(store: KronicleLite, opts: AnchorCallOpt
       public_status: null,
       error,
       message: err instanceof Error ? err.message : String(err),
+      key_notes: [],
     };
   }
 }

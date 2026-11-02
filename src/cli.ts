@@ -8,6 +8,7 @@
  *   kronicle-lite checkpoint [--data-dir DIR] [--from N] [--to N] [--push [--key K] [--url U]]
  *   kronicle-lite verify [--remote [--offline] [--url U] [--json]]   local by default (= verify-chain)
  *   kronicle-lite anchor status [--url U] [--json]
+ *   kronicle-lite anchor keys [list|add PEM-FILE|remove KEY_ID|reset] [--json]
  *   kronicle-lite export [--data-dir DIR] [--out FILE]  JSONL of events (stdout default)
  *   kronicle-lite import [--data-dir DIR] --in FILE [--allow-secrets]   into an empty store
  *   kronicle-lite keys [--data-dir DIR]                 show key id + public key
@@ -78,6 +79,7 @@ const BOOLEAN_FLAGS = new Set([
   'core',
   'redact-secrets',
   'allow-secrets',
+  'insecure-http',
 ]);
 
 function parseArgs(argv: string[]): Args {
@@ -140,11 +142,18 @@ Usage:
                                                                  against the chain; exit 1 on any mismatch
   kronicle-lite rebuild      [--data-dir DIR]                     re-derive documents and blocks from a verified chain
   kronicle-lite checkpoint   [--data-dir DIR] [--from N] [--to N] sign a Merkle checkpoint
-                 [--push [--key K] [--url U]]                    …and anchor it off-box (hosted service countersigns)
+                 [--push [--url U] [--insecure-http]]            …and anchor it off-box (hosted service countersigns);
+                                                                 license key from KRONICLE_ANCHOR_KEY or config.json
+                                                                 (--key K works but warns: argv is visible to other users)
   kronicle-lite verify       [--remote [--offline]] [--url U] [--json]
                                                                  local: = verify-chain; --remote: recompute each anchored
-                                                                 range, exit 1 on "local chain diverges from anchor at [a,b]"
+                                                                 range from its countersigned receipt (pinned service key),
+                                                                 exit 1 on "local chain diverges from anchor at [a,b]" or
+                                                                 an untrusted receipt
   kronicle-lite anchor status [--url U] [--json]                 last anchor, its status, events since (no network)
+  kronicle-lite anchor keys  [list | add PEM-FILE | remove KEY_ID | reset] [--json]
+                                                                 pinned anchor service keys (first use pins; rotation needs
+                                                                 a successor signature or \`anchor keys add\`)
   kronicle-lite export       [--data-dir DIR] [--out FILE]        JSONL of all events (stdout by default)
   kronicle-lite import       [--data-dir DIR] --in FILE [--allow-secrets]
                                                                  rebuild an EMPTY store from JSONL; refused when an event
@@ -192,19 +201,109 @@ Usage:
 Data dir defaults to $KRONICLE_LITE_DATA_DIR or ~/.kronicle-lite. Instruction slugs carry a project key
 (<repo>-<hash8>); $KRONICLE_LITE_PROJECT overrides it.
 Anchor config: flags > KRONICLE_ANCHOR_URL / KRONICLE_ANCHOR_KEY > DIR/config.json {anchor_url, license_key}
-  > https://anchor.isokron.ai. Exit codes for anchor commands: 0 ok, 1 divergence/conflict, 2 usage or I/O
-  (including "anchor service unreachable").
+  > https://anchor.isokron.ai. http:// is refused unless the host is localhost/127.0.0.1/[::1] or
+  --insecure-http is given. Exit codes for anchor commands: 0 ok, 1 divergence/conflict/untrusted receipt,
+  2 usage or I/O (including "anchor service unreachable").
 `;
 
 function anchorOpts(flags: Record<string, string | true>): AnchorCallOptions {
+  if (str(flags['key']) !== undefined) {
+    process.stderr.write(
+      'warning: --key puts the license key on the command line (shell history, `ps` for other users); prefer KRONICLE_ANCHOR_KEY or license_key in <data-dir>/config.json (0600)\n',
+    );
+  }
   return {
     ...(str(flags['key']) !== undefined ? { licenseKey: str(flags['key'])! } : {}),
     ...(str(flags['url']) !== undefined ? { anchorUrl: str(flags['url'])! } : {}),
+    ...(flags['insecure-http'] === true ? { insecureHttp: true } : {}),
   };
 }
 
 function isAnchorIoError(err: unknown): boolean {
-  return err instanceof Error && ['AnchorUnreachableError', 'AnchorApiError', 'AnchorConfigError'].includes(err.name);
+  return err instanceof Error && ['AnchorUnreachableError', 'AnchorApiError', 'AnchorConfigError', 'ServiceKeyTrustError'].includes(err.name);
+}
+
+/** `anchor keys`: the explicit operator path for service-key pins (A2-12). */
+async function anchorKeysCommand(dataDir: string, args: string[], flags: Record<string, string | true>): Promise<number> {
+  const { readFileSync } = await import('node:fs');
+  const trust = await import('./anchor/trust.js');
+  const { loadConfig } = await import('./anchor/config.js');
+  const store = new KronicleLite({ dataDir });
+  try {
+    const op = args[0] ?? 'list';
+    if (op === 'list') {
+      const url = loadConfig(store.dataDir, str(flags['url']) !== undefined ? { anchor_url: str(flags['url'])! } : {}).anchor_url;
+      const { keys, authoritative } = trust.trustedServiceKeys(store, url);
+      if (flags['json']) {
+        process.stdout.write(JSON.stringify({ anchor_url: url, authoritative, keys }, null, 2) + '\n');
+      } else if (keys.length === 0) {
+        process.stdout.write(`no anchor service key pinned for ${url}; the next online push or verify --remote pins the one it is served\n`);
+      } else {
+        const lines = [`${keys.length} pinned anchor service key(s)${authoritative ? ' (shipped/config pins: first-use pinning off)' : ''}:`];
+        for (const k of keys) {
+          lines.push(
+            `  ${k.key_id} ${k.status} source=${k.source}${k.signed_by ? ` signed_by=${k.signed_by}` : ''}${k.valid_from ? ` from ${k.valid_from}` : ''}${k.valid_to ? ` to ${k.valid_to}` : ''}${k.issuer ? ` via ${k.issuer}` : ''}`,
+          );
+        }
+        process.stdout.write(lines.join('\n') + '\n');
+      }
+      return 0;
+    }
+    if (op === 'add') {
+      const file = args[1];
+      if (!file) {
+        process.stderr.write('usage: kronicle-lite anchor keys add PEM-FILE\n');
+        return 2;
+      }
+      const pem = readFileSync(file, 'utf8');
+      let key_id: string;
+      try {
+        key_id = trust.serviceKeyIdFromPem(pem);
+      } catch {
+        process.stderr.write(`error: ${file} is not a public key PEM\n`);
+        return 2;
+      }
+      const { createPublicKey } = await import('node:crypto');
+      if (createPublicKey(pem).asymmetricKeyType !== 'ed25519') {
+        process.stderr.write(`error: ${file} is not an Ed25519 public key\n`);
+        return 2;
+      }
+      const pins = trust.readPinFile(store).filter((k) => k.key_id !== key_id);
+      pins.push({ key_id, public_key_pem: pem, status: 'active', valid_from: null, valid_to: null, source: 'operator', pinned_at: new Date().toISOString(), signed_by: null, issuer: null });
+      trust.writePinFile(store, pins);
+      process.stdout.write(`pinned ${key_id} (operator)\n`);
+      return 0;
+    }
+    if (op === 'remove') {
+      const id = args[1];
+      if (!id) {
+        process.stderr.write('usage: kronicle-lite anchor keys remove KEY_ID\n');
+        return 2;
+      }
+      const pins = trust.readPinFile(store);
+      const rest = pins.filter((k) => k.key_id !== id);
+      if (rest.length === pins.length) {
+        process.stderr.write(`error: ${id} is not pinned in ${trust.PINS_FILE}\n`);
+        return 2;
+      }
+      trust.writePinFile(store, rest);
+      process.stdout.write(`removed pin ${id}\n`);
+      return 0;
+    }
+    if (op === 'reset') {
+      const removed = trust.resetPins(store);
+      process.stdout.write(removed ? `removed ${trust.PINS_FILE}; the next online push or verify --remote pins the key it is served\n` : 'nothing pinned\n');
+      return 0;
+    }
+    process.stderr.write('usage: kronicle-lite anchor keys [list | add PEM-FILE | remove KEY_ID | reset] [--json]\n');
+    return 2;
+  } catch (err) {
+    if (!isAnchorIoError(err)) throw err;
+    process.stderr.write(`error: ${(err as Error).message}\n`);
+    return 2;
+  } finally {
+    store.close();
+  }
 }
 
 async function main(argv: string[]): Promise<number> {
@@ -341,6 +440,7 @@ async function main(argv: string[]): Promise<number> {
       process.stderr.write(
         `${anchor.duplicate ? 'already anchored' : 'anchored'} [${cp.from_seq}, ${cp.to_seq}] root ${cp.root.slice(0, 16)}… at ${anchor.received_at}; verify: ${anchor.verify_url}\n`,
       );
+      for (const n of anchor.key_notes) process.stderr.write(`note: ${n}\n`);
       return 0;
     }
     case 'verify': {
@@ -360,6 +460,8 @@ async function main(argv: string[]): Promise<number> {
             );
           }
           for (const d of r.divergences) lines.push(d);
+          for (const p of r.problems) lines.push(`problem: ${p}`);
+          for (const n of r.notes) lines.push(`note: ${n}`);
           process.stdout.write(lines.join('\n') + '\n');
         }
         return r.ok ? 0 : 1;
@@ -374,8 +476,9 @@ async function main(argv: string[]): Promise<number> {
     }
     case 'anchor': {
       const sub = positional[0];
+      if (sub === 'keys') return anchorKeysCommand(dataDir, positional.slice(1), flags);
       if (sub !== 'status') {
-        process.stderr.write(`usage: kronicle-lite anchor status [--url U] [--json]\n`);
+        process.stderr.write(`usage: kronicle-lite anchor status [--url U] [--json] | anchor keys [list|add PEM-FILE|remove KEY_ID|reset]\n`);
         return 2;
       }
       const store = new KronicleLite({ dataDir });

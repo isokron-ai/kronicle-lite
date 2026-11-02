@@ -536,7 +536,8 @@ holds the public half so a copied database verifies on its own. Setting
 
 ```
 <data-dir>/config.json               {"anchor_url", "license_key"}, mode 0600 (0.4.0; created with anchor_url only)
-<data-dir>/anchor-keys.cache.json    anchor service public keys from the last online call, mode 0600 (0.4.0)
+<data-dir>/anchor-keys.pinned.json   pinned anchor service keys, mode 0600 (0.8.1; §9)
+<data-dir>/anchor-keys.cache.json    0.4.0–0.8.0: last fetched service key document; no longer written or trusted (0.8.1)
 ```
 
 ## 7. Export
@@ -583,9 +584,11 @@ signature = base64( Ed25519_sign_service( utf8( canonicalize(receipt without "si
 leaf      = sha256( canonicalize(receipt) )          // the receipt's public-log leaf
 ```
 
-Service public keys are published at `/.well-known/anchor-keys.json`. The
+Service public keys are published at `/.well-known/anchor-keys.json`
+(`service_key_id = "anchor-ed25519-" + hex(sha256(SPKI DER))[0..16]`). The
 client verifies the countersignature and that `receipt.checkpoint` equals
-what it sent before storing anything:
+what it sent before storing anything, and since 0.8.1 that `receipt_jcs` in
+the response is exactly `canonicalize(receipt)`:
 
 | `anchors` column | meaning |
 |---|---|
@@ -600,6 +603,31 @@ what it sent before storing anything:
 
 `verify --remote` recomputes §2 over the local rows for every anchored range:
 `match`, `diverged` (local root differs: the chain was rewritten after it was
-anchored), `beyond_head` (the range is gone: truncation) or `gap`. Pushing a
+anchored), `beyond_head` (the range is gone: truncation), `gap`, or (0.8.1)
+`unverified` (no trusted receipt, so nothing was compared).
+
+**Receipt trust (0.8.1).** The range and root compared come only from a
+receipt that passes all of: countersignature against a pinned service key;
+that key's `status` is `active` or `retired` and `received_at` lies within
+its `valid_from`/`valid_to`; `receipt.chain_id` derives from the local
+signing key named by `receipt.checkpoint.key_id` (and equals the local chain
+id for entries the service lists); `receipt.checkpoint.signature` verifies
+against that local key. Unsigned listing fields and `anchors.root` are
+cross-checked and a disagreement is reported, never used. Every receipt held
+in `anchors` is checked, whether or not the service lists it; `--offline`
+re-verifies the stored `receipt_json`.
+
+Pins (`anchor-keys.pinned.json`, `{v:1, keys:[{key_id, public_key_pem,
+status, valid_from, valid_to, source, pinned_at, signed_by, issuer}]}`):
+with nothing pinned, the first key document fetched is pinned (`tofu`). A
+package-shipped pin for the origin or `service_key_pins: [PEM…]` in
+`config.json` is authoritative and turns first-use pinning off. A new key is
+pinned only when its `successor_signature` is a valid Ed25519 signature by a
+pinned, non-revoked key named in `signed_by` over
+`canonicalize({key_id, public_key_pem, valid_from})`, or by
+`kronicle-lite anchor keys add PEM-FILE`. A pinned public key is never
+replaced from the network; status and validity only tighten (active →
+retired → revoked; `valid_to` only earlier). A key document entry whose
+key_id does not derive from its public key fails verification. Pushing a
 different root for an already-anchored range is answered `409` and both
 anchors are flagged `conflict`.
