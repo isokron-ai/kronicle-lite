@@ -134,8 +134,8 @@ describe('receipts.actor_id (additive local column)', () => {
     a.docs.putDocument({ slug: 'ops', title: 'Ops', markdown: MD, actor_id: 't' });
     const old = a.recall.recall({ query: 'smoke' });
     expect(old.hits.length).toBeGreaterThan(0);
-    // Back to the 0.5.0 table shape.
-    a.db.exec('DROP INDEX receipts_actor_idx; ALTER TABLE receipts DROP COLUMN actor_id;');
+    // Back to the 0.5.0 table shape (no actor_id, none of its indexes; receipts_actor_rowid_idx is 0.8.1).
+    a.db.exec('DROP INDEX receipts_actor_idx; DROP INDEX receipts_actor_rowid_idx; ALTER TABLE receipts DROP COLUMN actor_id;');
     a.close();
     const b = new KronicleLite({ dataDir });
     const cols = (b.db.prepare(`SELECT name FROM pragma_table_info('receipts')`).all() as { name: string }[]).map((r) => r.name);

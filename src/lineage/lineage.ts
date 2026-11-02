@@ -463,13 +463,15 @@ export class Lineage {
   readCurrent(actor_id: string, block_id: string): boolean {
     const w = this.walk(block_id);
     if (!w) return false;
+    // 0.8.1: receipts up to the mark are folded into the read log (lineage/read-log.ts).
+    const mark = this.docs.readLog.receiptsMark();
     const readAt = this.q(
       `SELECT MAX(hs) AS hs FROM (
-         SELECT chain_seq AS hs FROM receipts WHERE actor_id = ? AND block_id = ?
+         SELECT chain_seq AS hs FROM receipts WHERE actor_id = ? AND rowid > ? AND block_id = ?
          UNION ALL SELECT head_seq AS hs FROM reads WHERE actor_id = ? AND block_id = ?
        )`,
     );
-    const seqOf = (id: string): number | null => (readAt.get(actor_id, id, actor_id, id) as { hs: number | null }).hs;
+    const seqOf = (id: string): number | null => (readAt.get(actor_id, mark, id, actor_id, id) as { hs: number | null }).hs;
     if (w.currentFrom >= 0) return w.blocks.slice(w.currentFrom).some((b) => seqOf(b.block_id) !== null);
     const tomb = this.retireSeq(w.head.block_id);
     if (tomb === null) return false;
@@ -483,14 +485,21 @@ export class Lineage {
   /** Record that `actor_id` read these blocks (recall hits). */
   recordBlockReads(actor_id: string, blocks: readonly { block_id: string; doc_id: string; content_hash: string }[], via: 'recall' | 'write'): void {
     if (blocks.length === 0) return;
-    const head = this.chain.head().seq;
-    const now = new Date().toISOString();
+    const head_seq = this.chain.head().seq;
+    const read_at = new Date().toISOString();
     const rev = this.q(`SELECT current_revision FROM documents WHERE doc_id = ?`);
-    const ins = this.q(`INSERT INTO reads (actor_id, doc_id, block_id, content_hash, doc_revision, head_seq, read_at, via) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
-    for (const b of blocks) {
-      const r = rev.get(b.doc_id) as { current_revision: number } | undefined;
-      ins.run(actor_id, b.doc_id, b.block_id, b.content_hash, r?.current_revision ?? 0, head, now, via);
-    }
+    this.docs.readLog.record(
+      blocks.map((b) => ({
+        actor_id,
+        doc_id: b.doc_id,
+        block_id: b.block_id,
+        content_hash: b.content_hash,
+        doc_revision: (rev.get(b.doc_id) as { current_revision: number } | undefined)?.current_revision ?? 0,
+        head_seq,
+        read_at,
+        via,
+      })),
+    );
   }
 
   /** Record a whole-document read (and one row per live block) of the current revision. */
@@ -498,14 +507,11 @@ export class Lineage {
     const doc = this.docs.getDocumentById(doc_id);
     if (!doc) return;
     const rev = this.docs.getRevision(doc_id, doc.current_revision);
-    const head = this.chain.head().seq;
-    const now = new Date().toISOString();
-    const ins = this.q(`INSERT INTO reads (actor_id, doc_id, block_id, content_hash, doc_revision, head_seq, read_at, via) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
-    const tx = this.db.transaction(() => {
-      ins.run(actor_id, doc_id, null, rev?.content_hash ?? '', doc.current_revision, head, now, via);
-      for (const b of this.docs.liveBlocks(doc_id)) ins.run(actor_id, doc_id, b.block_id, b.content_hash, doc.current_revision, head, now, via);
-    });
-    tx();
+    const base = { actor_id, doc_id, doc_revision: doc.current_revision, head_seq: this.chain.head().seq, read_at: new Date().toISOString(), via };
+    this.docs.readLog.record([
+      { ...base, block_id: null, content_hash: rev?.content_hash ?? '' },
+      ...this.docs.liveBlocks(doc_id).map((b) => ({ ...base, block_id: b.block_id, content_hash: b.content_hash })),
+    ]);
   }
 
   // ───────────────────────────── pending ─────────────────────────────
@@ -525,14 +531,16 @@ export class Lineage {
     };
 
     // Every block version this actor read (receipts + read log), with the latest head seq it was read at.
+    // 0.8.1: the log is bounded and receipts up to the mark are folded into it (lineage/read-log.ts).
+    const mark = this.docs.readLog.receiptsMark();
     const reads = new Map<string, number>();
     for (const r of this.q(
         `SELECT block_id, MAX(head_seq) AS hs FROM (
-           SELECT block_id, chain_seq AS head_seq FROM receipts WHERE actor_id = ?
+           SELECT block_id, chain_seq AS head_seq FROM receipts WHERE actor_id = ? AND rowid > ?
            UNION ALL SELECT block_id, head_seq FROM reads WHERE actor_id = ? AND block_id IS NOT NULL
          ) GROUP BY block_id`,
       )
-      .all(actor_id, actor_id) as { block_id: string; hs: number }[]) {
+      .all(actor_id, mark, actor_id) as { block_id: string; hs: number }[]) {
       reads.set(r.block_id, r.hs);
     }
     const docReads = new Map<string, number>();
@@ -554,10 +562,10 @@ export class Lineage {
     // Group retired read blocks by lineage head.
     const retired = this.q(
         `SELECT b.* FROM blocks b WHERE b.valid_to IS NOT NULL AND b.block_id IN (
-           SELECT block_id FROM receipts WHERE actor_id = ? UNION SELECT block_id FROM reads WHERE actor_id = ? AND block_id IS NOT NULL
+           SELECT block_id FROM receipts WHERE actor_id = ? AND rowid > ? UNION SELECT block_id FROM reads WHERE actor_id = ? AND block_id IS NOT NULL
          ) ORDER BY b.chain_seq ASC`,
       )
-      .all(actor_id, actor_id) as BlockRow[];
+      .all(actor_id, mark, actor_id) as BlockRow[];
     const groups = new Map<string, Walk>();
     const assigned = new Set<string>();
     for (const b of retired) {
@@ -591,11 +599,11 @@ export class Lineage {
     // Derived notes this actor read or wrote whose sources changed and whose current version it has not read.
     const noteDocs = this.q(
         `SELECT DISTINCT d.doc_id FROM doc_lineage d WHERE d.doc_id IN (
-           SELECT b.doc_id FROM receipts r JOIN blocks b ON b.block_id = r.block_id WHERE r.actor_id = ?
+           SELECT b.doc_id FROM receipts r JOIN blocks b ON b.block_id = r.block_id WHERE r.actor_id = ? AND r.rowid > ?
            UNION SELECT doc_id FROM reads WHERE actor_id = ?
          ) ORDER BY d.doc_id`,
       )
-      .all(actor_id, actor_id) as { doc_id: string }[];
+      .all(actor_id, mark, actor_id) as { doc_id: string }[];
     const memo = new Map<string, StaleSource[]>();
     for (const { doc_id } of noteDocs) {
       const note = this.docs.getDocumentById(doc_id);

@@ -261,12 +261,25 @@ describe('Orient.getSystemState', () => {
   it('retractions focus returns counts but no delta entries', () => {
     const { orient, docs } = fresh();
     const put = docs.putDocument({ slug: 'a', title: 'A', markdown: 'one\n\ntwo', actor_id: 'w' });
+    const c0 = orient.getSystemState({ actor_id: 'a', focus: 'pulse' }).cursor;
     docs.supersedeBlock({ block_id: put.blocks[0]!.block_id, new_content: 'uno', reason: 'es', actor_id: 'w' });
-    const s = orient.getSystemState({ actor_id: 'a', focus: 'retractions' });
+    const s = orient.getSystemState({ actor_id: 'a', since_cursor: c0, focus: 'retractions' });
     expect(s.delta?.entries).toEqual([]);
     expect(s.delta?.by_type['block.superseded']).toBe(1);
     expect(s.retractions).toHaveLength(1);
     expect(s.retractions![0]!.successor_block_id).toBeTruthy();
+  });
+
+  it('0.8.1: retractions focus at first contact (never oriented, never read) lists none, counts from the index', () => {
+    const { orient, docs } = fresh();
+    const put = docs.putDocument({ slug: 'a', title: 'A', markdown: 'one\n\ntwo', actor_id: 'w' });
+    docs.supersedeBlock({ block_id: put.blocks[0]!.block_id, new_content: 'uno', reason: 'es', actor_id: 'w' });
+    const s = orient.getSystemState({ actor_id: 'a', focus: 'retractions' });
+    expect(s.recovery.method).toBe('genesis');
+    expect(s.retractions).toEqual([]);
+    expect(s.delta?.entries).toEqual([]);
+    expect(s.delta?.by_type).toEqual({ 'document.put': 1, 'block.created': 3, 'block.superseded': 1 });
     expect(s.digest).not.toBeNull(); // genesis recovery still gets the digest
+    expect(s.integrity?.ok).toBe(true);
   });
 });

@@ -18,9 +18,11 @@
 import { randomUUID } from 'node:crypto';
 
 import type { Chain, ChainEvent, ChainHead } from '../chain/index.js';
+import { canonicalize } from '../crypto/canonical.js';
 import { blake3Hex } from '../crypto/hash.js';
 import { checkGitBinding, type DiffStat, type SourceState } from '../git/binding.js';
 import type { Db } from '../db/open.js';
+import { ReadLog, type ReadRow } from '../lineage/read-log.js';
 import { guardFields, type SecretFinding, type SecretPolicy } from '../secrets/guard.js';
 import { normalizeMarkdown, parseMarkdown, renderBlocks, type BlockKind, type ParsedBlock } from './parser.js';
 
@@ -221,11 +223,15 @@ type Pending = { event_type: string; payload: Record<string, unknown> };
 export class DocumentStore {
   /** Unreleased: set by KronicleLite; null = no automatic lineage inference. */
   lineageInference: LineageInference | null = null;
+  /** 0.8.1: the bounded local read log (shared with Lineage). */
+  readonly readLog: ReadLog;
 
   constructor(
     private readonly db: Db,
     private readonly chain: Chain,
-  ) {}
+  ) {
+    this.readLog = new ReadLog(db);
+  }
 
   /**
    * Unreleased: check explicit `derived_from` edges (the block exists and the
@@ -254,23 +260,23 @@ export class DocumentStore {
     return { refs: r.refs.filter((x) => !skip.has(x.block_id)), truncated: r.truncated };
   }
 
-  /** Unreleased: a write is a read of what was written (local read log, never chained). */
+  /** Unreleased: a write is a read of what was written (local read log, never chained; pruned, see lineage/read-log.ts). */
   private logWrite(actor_id: string, doc_id: string, block_ids: readonly string[] | 'document'): void {
     const doc = this.getDocumentById(doc_id);
     if (!doc) return;
-    const head = this.chain.head().seq;
-    const now = new Date().toISOString();
-    const ins = this.db.prepare(`INSERT INTO reads (actor_id, doc_id, block_id, content_hash, doc_revision, head_seq, read_at, via) VALUES (?, ?, ?, ?, ?, ?, ?, 'write')`);
+    const base = { actor_id, doc_id, doc_revision: doc.current_revision, head_seq: this.chain.head().seq, read_at: new Date().toISOString(), via: 'write' as const };
+    const rows: ReadRow[] = [];
     if (block_ids === 'document') {
       const rev = this.getRevision(doc_id, doc.current_revision);
-      ins.run(actor_id, doc_id, null, rev?.content_hash ?? '', doc.current_revision, head, now);
-      for (const b of this.liveBlocks(doc_id)) ins.run(actor_id, doc_id, b.block_id, b.content_hash, doc.current_revision, head, now);
-      return;
+      rows.push({ ...base, block_id: null, content_hash: rev?.content_hash ?? '' });
+      for (const b of this.liveBlocks(doc_id)) rows.push({ ...base, block_id: b.block_id, content_hash: b.content_hash });
+    } else {
+      for (const id of block_ids) {
+        const b = this.getBlock(id);
+        if (b) rows.push({ ...base, block_id: b.block_id, content_hash: b.content_hash });
+      }
     }
-    for (const id of block_ids) {
-      const b = this.getBlock(id);
-      if (b) ins.run(actor_id, doc_id, b.block_id, b.content_hash, doc.current_revision, head, now);
-    }
+    this.readLog.record(rows);
   }
 
   // ───────────────────────────── reads ─────────────────────────────
@@ -510,6 +516,18 @@ export class DocumentStore {
 
     const run = this.db.transaction((): PutDocumentResult => {
       const existing = this.getDocument(args.slug);
+      // 0.8.1: idempotent by content. Decided here, under the write lock, so
+      // concurrent identical puts (several instruction-import hooks firing on
+      // one edit) append one revision, not one each. Only a put that would
+      // record nothing new is a no-op: no lineage, no idempotency key, and the
+      // same markdown, title, source and project as the current revision's put.
+      if (existing && args.idempotency_key === undefined && explicit === undefined && inferred.length === 0 && !truncated) {
+        const same = this.unchangedPut(existing, { title: args.title, markdown_hash, source: args.source, project: args.project ?? null });
+        if (same) {
+          this.logWrite(args.actor_id, existing.doc_id, 'document');
+          return this.describePut(same); // events: 0, like an idempotent replay
+        }
+      }
       const doc_id = existing?.doc_id ?? randomUUID();
       const revision = (existing?.current_revision ?? 0) + 1;
       const oldLive = existing ? this.liveBlocks(doc_id) : [];
@@ -684,6 +702,33 @@ export class DocumentStore {
     });
     const result = run.immediate();
     return guarded.redactions.length > 0 ? { ...result, redactions: guarded.redactions } : result;
+  }
+
+  /**
+   * 0.8.1: the document.put behind `doc`'s current revision when a new put
+   * with these fields would record exactly what it already records (same
+   * markdown hash, title, source and project); null otherwise.
+   */
+  private unchangedPut(
+    doc: DocumentRow,
+    next: { title: string; markdown_hash: string; source: DocumentSource | undefined; project: { key: string; root: string } | null },
+  ): ChainEvent | null {
+    const rev = this.getRevision(doc.doc_id, doc.current_revision);
+    if (!rev || rev.content_hash !== next.markdown_hash) return null;
+    let ev: ChainEvent | null;
+    try {
+      ev = this.chain.get(rev.chain_seq);
+    } catch {
+      return null;
+    }
+    if (!ev || ev.event_type !== 'document.put') return null;
+    const p = ev.payload;
+    if (p['doc_id'] !== doc.doc_id || p['revision'] !== doc.current_revision || p['markdown_hash'] !== next.markdown_hash || p['title'] !== next.title) return null;
+    const canon = (v: unknown) => (v === undefined || v === null ? null : canonicalize(v as Record<string, unknown>));
+    if (canon(p['source']) !== canon(next.source)) return null;
+    const project = next.project && !next.source?.project ? { key: next.project.key, root: next.project.root } : undefined;
+    if (canon(p['project']) !== canon(project)) return null;
+    return ev;
   }
 
   private describePut(putEvent: ChainEvent): PutDocumentResult {
