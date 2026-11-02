@@ -10,8 +10,21 @@ import { join } from 'node:path';
 import { defaultDataDir } from '../db/open.js';
 import { VERSION } from '../version.js';
 import { DEFAULT_COMMANDS } from './rules.js';
-import { PULSE_UNAVAILABLE_EXIT, exitCodeFor, openForPulse, pulse, retractionLine, type PulseMode } from './pulse.js';
-import { ackShim, execShim, install, locateShimDir, shimLog, status, uninstall } from './install.js';
+import {
+  PULSE_UNAVAILABLE_EXIT,
+  corruptOutcome,
+  exitCodeFor,
+  isCorruptError,
+  openForPulse,
+  pulse,
+  resolveStore,
+  retractionLine,
+  storeExists,
+  storeOutcome,
+  targetFor,
+  type PulseMode,
+} from './pulse.js';
+import { ACTOR_ENV, AckRefusedError, ackShim, execShim, install, invokingActorFromEnv, locateShimDir, shimLog, status, uninstall, uninstallGitHooks } from './install.js';
 
 interface Parsed {
   positional: string[];
@@ -19,7 +32,7 @@ interface Parsed {
   rest: string[];
 }
 
-const BOOL = new Set(['json', 'all-projects', 'windows', 'no-windows', 'posix', 'no-posix']);
+const BOOL = new Set(['json', 'all-projects', 'windows', 'no-windows', 'posix', 'no-posix', 'git-hook', 'all-readers', 'operator']);
 
 function parse(argv: string[]): Parsed {
   const positional: string[] = [];
@@ -77,19 +90,27 @@ function cliPath(): string {
 export const SHIM_HELP = `kronicle-lite shim — exec-time pulse wrappers for world-changing commands (docs/PUSH.md)
 
   kronicle-lite shim install   [--dir D] [--commands ${DEFAULT_COMMANDS.join(',')}] [--world "make release,docker push"]
-                               [--data-dir DIR] [--mode deny|warn] [--pending-actor A[,B]] [--on-timeout allow|deny]
-                               [--windows] [--json]
+                               [--data-dir DIR] [--mode deny|warn] [--pending-actor A[,B] | --all-readers]
+                               [--on-timeout allow|deny] [--git-hook [--repo PATH]] [--windows] [--json]
         write tiny wrappers into D (default ~/.kronicle-lite/shims); put D FIRST on PATH.
-        A change stops blocking once the pending actor(s) re-read its current version
-        (default: whoever read the changed block). A check that times out
+        A change stops blocking once the pending actor(s) re-read its current version:
+        --pending-actor A, else the invoking actor ($${ACTOR_ENV} in the command's environment),
+        else (not set, or --all-readers) everyone who read the changed block. A check that times out
         (KRONICLE_SHIM_TIMEOUT, default 10 s) is reported every time and runs the command
-        (--on-timeout allow, default) or refuses it with exit 77 (--on-timeout deny)
+        (--on-timeout allow, default) or refuses it with exit 77 (--on-timeout deny).
+        --git-hook: also install a git pre-push hook in the repository at --repo (default: the
+        working directory) and its submodules, which runs the same check for EVERY push (absolute git path, sudo, aliases,
+        hooks, rebase -x, submodule foreach); an existing pre-push hook is chained, not replaced
   kronicle-lite shim status    [--dir D] [--cwd DIR] [--json]   what is installed, active on PATH, pending here
-  kronicle-lite shim ack       [--dir D] [--cwd DIR] [--through SEQ] [--json]
-        manual override: clear this project's gate up to SEQ (the seq a denial printed)
-  kronicle-lite shim uninstall [--dir D] [--json]               remove our wrappers (marker-checked) and state
-  kronicle-lite shim exec      --dir D --tool T -- ARGS…        what the Windows wrappers run
-  kronicle-lite pulse          [--data-dir DIR] [--cwd DIR] [--cursor C | --state D] [--mode deny|warn] [--pending-actor A[,B]] [--json] [-- CMD…]
+  kronicle-lite shim ack       [--dir D] [--cwd DIR] [--through SEQ] [--operator] [--actor A] [--json]
+        OPERATOR override: clear this project's gate up to SEQ without anyone re-reading. Needs an
+        interactive terminal or --operator; every ack (and every refused one) is logged in shim.log
+  kronicle-lite shim uninstall [--dir D] [--git-hook [--repo PATH]] [--json]
+        remove our wrappers (marker-checked), state and pre-push hooks (chained hooks are put back);
+        --git-hook: only the hooks (of the repository at --repo, or all)
+  kronicle-lite shim exec      --dir D --tool T [--project DIR] -- ARGS…   what the Windows wrappers run
+  kronicle-lite pulse          [--data-dir DIR] [--cwd DIR] [--cursor C | --state D] [--mode deny|warn]
+                               [--pending-actor A[,B] | --invoking-actor A | --all-readers] [--json] [-- CMD…]
         the check itself: exit 0 allow, 77 refused (reason on stderr), 3 store unavailable
 
 Without --dir, status/ack/uninstall use the first shim dir on PATH.
@@ -105,6 +126,26 @@ export async function runShimCli(cmd: 'pulse' | 'shim', argv: string[]): Promise
 
   if (cmd === 'pulse') {
     const stateDir = str(flags['state']);
+    let checkDir = dataDir;
+    if (stateDir !== undefined) {
+      // A shim / hook (P2-01): the store the server uses, found like the server finds it.
+      // Pinned with --data-dir; else $KRONICLE_LITE_DATA_DIR / --default-data-dir / ~ plus a
+      // project-local .kronicle-lite/ above the target. None, or two: refuse (deny mode).
+      const res = resolveStore({ pinned: dataDirFlag, targetDir: targetFor({ cwd, command: rest }).dir, defaultDir: str(flags['default-data-dir']) });
+      if (res.dataDir === null || !storeExists(res.dataDir)) {
+        const so = storeOutcome(res, modeOf(flags['mode']) ?? 'deny', rest);
+        shimLog(stateDir, rest[0] ?? 'pulse', `pulse(node) decision=${so.decision} reason=${so.reason}`);
+        try {
+          writeFileSync(join(stateDir, 'last-error'), `${new Date().toISOString()} ${so.error}\n`);
+        } catch {
+          // never block on logging
+        }
+        if (json) out({ format: 'kronicle-lite/1', decision: so.decision, reason: so.reason, error: so.error, candidates: res.candidates, message: so.message });
+        process.stderr.write(so.message + '\n');
+        return so.exit;
+      }
+      checkDir = res.dataDir;
+    }
     // Called by a shim (--state): stay quiet on failure (the shim notes it once
     // and logs it); the reason goes to <state>/last-error for `shim status`.
     const unavailable = (msg: string): number => {
@@ -118,18 +159,34 @@ export async function runShimCli(cmd: 'pulse' | 'shim', argv: string[]): Promise
       if (json) out({ error: msg });
       return PULSE_UNAVAILABLE_EXIT;
     };
+    // L2-03: a store that is there but damaged is an integrity failure, never "unavailable".
+    const corrupt = (err: unknown): number => {
+      const c = corruptOutcome(err, modeOf(flags['mode']) ?? 'deny', rest);
+      if (stateDir !== undefined) {
+        shimLog(stateDir, rest[0] ?? 'pulse', `pulse(node) decision=${c.decision} reason=${c.reason} error=${c.error.replace(/\s+/g, '_').slice(0, 160)}`);
+        try {
+          writeFileSync(join(stateDir, 'last-error'), `${new Date().toISOString()} ${c.reason.toUpperCase()} ${c.error}\n`);
+        } catch {
+          // never block on logging
+        }
+      }
+      if (json) out({ format: 'kronicle-lite/1', decision: c.decision, reason: c.reason, error: c.error, message: c.message });
+      process.stderr.write(c.message + '\n');
+      return c.exit;
+    };
     // Timing for the shim log (--state): node start-up to here, opening the store, the check.
     const tStart = performance.now();
     let store;
     try {
-      store = openForPulse(dataDir);
+      store = openForPulse(checkDir);
     } catch (err) {
+      if (isCorruptError(err)) return corrupt(err);
       return unavailable(err instanceof Error ? err.message : String(err));
     }
     const tOpen = performance.now();
     try {
       const r = pulse(store, {
-        dataDir,
+        dataDir: checkDir,
         cwd,
         actor: str(flags['actor']),
         cursor: str(flags['cursor']),
@@ -138,6 +195,9 @@ export async function runShimCli(cmd: 'pulse' | 'shim', argv: string[]): Promise
         mode: modeOf(flags['mode']),
         command: rest,
         allProjects: flags['all-projects'] === true,
+        // The shim (--state) runs in the agent's environment: its actor is the invoking actor.
+        invokingActor: str(flags['invoking-actor']) ?? (stateDir !== undefined ? invokingActorFromEnv() : undefined),
+        ...(flags['all-readers'] === true ? { allReaders: true } : {}),
       });
       if (stateDir !== undefined) {
         const t = performance.now();
@@ -147,6 +207,7 @@ export async function runShimCli(cmd: 'pulse' | 'shim', argv: string[]): Promise
       if (r.message) process.stderr.write(r.message + '\n');
       return exitCodeFor(r);
     } catch (err) {
+      if (isCorruptError(err)) return corrupt(err);
       if (stateDir === undefined) throw err;
       return unavailable(err instanceof Error ? err.message : String(err));
     } finally {
@@ -165,6 +226,8 @@ export async function runShimCli(cmd: 'pulse' | 'shim', argv: string[]): Promise
         mode: modeOf(flags['mode']),
         ...(str(flags['pending-actor']) !== undefined ? { pendingActors: list(flags['pending-actor']) } : {}),
         ...(onTimeoutOf(flags['on-timeout']) !== undefined ? { onTimeout: onTimeoutOf(flags['on-timeout']) } : {}),
+        ...(flags['all-readers'] === true ? { allReaders: true } : {}),
+        ...(flags['git-hook'] === true ? { gitHookRepo: str(flags['repo']) ?? cwd ?? process.cwd() } : {}),
         dataDir: dataDirFlag,
         effectiveDataDir: dataDir,
         node: process.execPath,
@@ -180,16 +243,32 @@ export async function runShimCli(cmd: 'pulse' | 'shim', argv: string[]): Promise
             `mode ${r.mode}; on timeout ${r.on_timeout}; data dir ${r.data_dir || `${dataDir} (default)`}; ${r.baseline_seq !== null ? `checks start at seq ${r.baseline_seq}` : 'no store yet'}\n` +
             (r.first_on_path ? 'the shim dir is first on PATH\n' : `put it FIRST on PATH (shell profile, and each agent's environment):\n  ${r.path_hint}\n`),
         );
+        for (const h of r.git_hooks) {
+          process.stdout.write(`git pre-push hook: ${h.file}${h.chained_now ? ` (the existing hook was moved to ${h.chained} and runs after the check)` : h.chained ? ` (chains ${h.chained})` : ''}\n`);
+        }
+        if (r.git_hooks.length > 0) process.stdout.write('every push from these repositories is checked, however git is started (`git push --no-verify` skips it)\n');
       }
       for (const w of r.warnings) process.stderr.write(`warning: ${w}\n`);
       return 0;
     }
     case 'uninstall': {
+      const hookLine = (h: { file: string; removed: boolean; restored: string | null; kept: string | null }) =>
+        `git pre-push hook ${h.file}: ${h.kept ? `kept (${h.kept})` : h.removed ? 'removed' : 'already gone'}${h.restored ? '; the chained hook is back in place' : ''}\n`;
+      if (flags['git-hook'] === true) {
+        const r = uninstallGitHooks(locateShimDir(str(flags['dir']), fallbackDir), str(flags['repo']));
+        if (json) out(r);
+        else {
+          if (r.hooks.length === 0) process.stdout.write(`no recorded pre-push hook${str(flags['repo']) ? ` for ${str(flags['repo'])}` : ''}\n`);
+          for (const h of r.hooks) process.stdout.write(hookLine(h));
+        }
+        return 0;
+      }
       const r = uninstall(locateShimDir(str(flags['dir']), fallbackDir));
       if (json) out(r);
       else {
         process.stdout.write(`removed ${r.removed.length} item(s) from ${r.dir}${r.dir_removed ? ' (and the empty dir)' : ''}\n`);
         if (r.kept.length > 0) process.stdout.write(`kept (not ours): ${r.kept.join(', ')}\n`);
+        for (const h of r.git_hooks) process.stdout.write(hookLine(h));
         process.stdout.write('remove the dir from PATH in your shell profile if you added it\n');
       }
       return 0;
@@ -205,13 +284,31 @@ export async function runShimCli(cmd: 'pulse' | 'shim', argv: string[]): Promise
         return 1;
       }
       const c = r.config!;
-      const lines = [`shims in ${r.dir}: mode ${c.mode}; on timeout ${c.on_timeout ?? 'allow'}; ${c.pending_actors && c.pending_actors.length > 0 ? `pending actor(s) ${c.pending_actors.join(', ')}` : 'pending actors: each change\'s readers'}; data dir ${r.store.data_dir}${r.store.exists ? ` (head seq ${r.store.head_seq ?? '?'})` : ' (no store: fail open)'}`];
+      const who =
+        c.pending_actors && c.pending_actors.length > 0
+          ? `pending actor(s) ${c.pending_actors.join(', ')}`
+          : c.all_readers
+            ? "pending actors: each change's readers (--all-readers)"
+            : r.invoking_actor
+              ? `pending actor: the invoking actor (${ACTOR_ENV}=${r.invoking_actor} here)`
+              : `pending actors: the invoking actor (${ACTOR_ENV}); not set here, so each change's readers`;
+      const lines = [`shims in ${r.dir}: mode ${c.mode}; on timeout ${c.on_timeout ?? 'allow'}; ${who}; data dir ${r.store.data_dir}${r.store.exists ? ` (head seq ${r.store.head_seq ?? '?'}${r.store.source === 'found' ? ', found' : r.store.source === 'pinned' ? ', pinned' : ''})` : r.store.source === 'ambiguous' ? ' (AMBIGUOUS: world-changing commands refused)' : ' (no store: world-changing commands refused in deny mode)'}`];
       for (const t of r.tools) {
         lines.push(
           `  ${t.tool.padEnd(10)} ${t.active ? 'active ' : 'INACTIVE'} real: ${t.real ?? 'NOT FOUND'}${t.active ? '' : `; PATH runs ${t.first_on_path ?? 'nothing'} first`}`,
         );
       }
       if (c.world.length > 0) lines.push(`  user rules: ${c.world.join(', ')}`);
+      for (const h of r.git_hooks) {
+        lines.push(
+          `  git hook   ${h.active ? 'active ' : 'INACTIVE'} ${h.file}${h.chained ? ` (chains ${h.chained})` : ''}${
+            !h.present ? '; MISSING or replaced (re-run shim install --git-hook)' : !h.active ? `; git now uses hooks dir ${h.hooks_dir_now ?? '?'}` : ''
+          }`,
+        );
+      }
+      if (r.repo_hook && !r.repo_hook.present) {
+        lines.push(`  this repository has no kronicle-lite pre-push hook: pushes git starts itself (aliases, hooks, rebase -x, submodule foreach), sudo and absolute paths are not checked (shim install --git-hook)`);
+      }
       if (r.project) {
         const p = r.project.pending;
         if (!p) lines.push(`project ${r.project.key}: no check yet (the first world-changing command records the head)`);
@@ -219,7 +316,9 @@ export async function runShimCli(cmd: 'pulse' | 'shim', argv: string[]): Promise
           lines.push(
             p.reason === 'integrity'
               ? `project ${r.project.key}: BLOCKED — store integrity failure`
-              : `project ${r.project.key}: BLOCKED — ${p.blocking.length} unreconciled change(s); re-read the current version (or override: kronicle-lite shim ack --through ${p.ack_through})`,
+              : p.reason === 'target'
+                ? `project ${r.project.key}: BLOCKED — ${p.message ?? 'target unknown'}`
+                : `project ${r.project.key}: BLOCKED — ${p.blocking.length} unreconciled change(s) through seq ${p.ack_through}; re-read the current version (operator override: see docs/PUSH.md)`,
           );
           for (const b of p.blocking.slice(0, 6)) lines.push('  ' + retractionLine(b));
         } else lines.push(`project ${r.project.key}: clear (checked from seq ${p.from_seq}, head ${p.head.seq})`);
@@ -232,10 +331,19 @@ export async function runShimCli(cmd: 'pulse' | 'shim', argv: string[]): Promise
     case 'ack': {
       const t = str(flags['through']);
       if (t !== undefined && !/^\d+$/.test(t)) throw new Error('--through must be a chain seq');
-      const r = ackShim(locateShimDir(str(flags['dir']), fallbackDir), { defaultDataDir: dataDir, cwd, through: t === undefined ? undefined : Number(t) });
+      // H2-12: an operator action. An agent's shell has no TTY on stdin; --operator is the explicit confirmation.
+      const confirmed = flags['operator'] === true ? '--operator' : process.stdin.isTTY === true ? 'tty' : null;
+      let r;
+      try {
+        r = ackShim(locateShimDir(str(flags['dir']), fallbackDir), { defaultDataDir: dataDir, cwd, through: t === undefined ? undefined : Number(t), confirmed, actor: str(flags['actor']) });
+      } catch (err) {
+        if (!(err instanceof AckRefusedError)) throw err;
+        process.stderr.write(err.message + '\n');
+        return 2;
+      }
       if (json) out(r);
       else {
-        process.stdout.write(`acknowledged through seq ${r.through} for project ${r.project_key} (${r.acknowledged.length} blocking change(s))\n`);
+        process.stdout.write(`acknowledged through seq ${r.through} for project ${r.project_key} (${r.acknowledged.length} blocking change(s)); logged as ${r.actor} (${r.confirmed})\n`);
         for (const a of r.acknowledged.slice(0, 6)) process.stdout.write(retractionLine(a) + '\n');
       }
       return 0;
@@ -243,8 +351,8 @@ export async function runShimCli(cmd: 'pulse' | 'shim', argv: string[]): Promise
     case 'exec': {
       const dir = str(flags['dir']);
       const tool = str(flags['tool']);
-      if (!dir || !tool) throw new Error('usage: kronicle-lite shim exec --dir D --tool T -- ARGS…');
-      return execShim(dir, tool, rest, { defaultDataDir: dataDir, cwd: cwd ?? process.cwd() });
+      if (!dir || !tool) throw new Error('usage: kronicle-lite shim exec --dir D --tool T [--project DIR] -- ARGS…');
+      return execShim(dir, tool, rest, { defaultDataDir: dataDir, cwd: cwd ?? process.cwd(), project: str(flags['project']) });
     }
     case undefined:
     case 'help':

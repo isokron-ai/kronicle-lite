@@ -178,9 +178,28 @@ if [ -z "$kl_real" ]; then
   exit 127
 fi
 
-kl_unavailable() {
+${pulseFunctionsSh()}
+
+kl_ok=0
+if [ $kl_world = 1 ]; then
+  if [ "$kl_prev" = 1 ]; then kl_ok=1; else kl_pulse "$@"; kl_ok=1; fi
+fi
+KRONICLE_SHIM_EXEC="$$:$kl_ok:$kl_extra$kl_found:"; export KRONICLE_SHIM_EXEC
+exec "$kl_real" "$@"
+`;
+}
+
+/**
+ * The sh functions that run the check (shared by the PATH wrappers and the git
+ * pre-push hook): kl_pulse "$@" returns 0 to go ahead, or exits 77 (refused,
+ * or timed out under --on-timeout deny). Needs kl_t, kl_state, kl_node,
+ * kl_cli, kl_data ('' = find the store), kl_mode, kl_onto, kl_skip and kl_ifs
+ * (kl_defdata optional: the default store when $KRONICLE_LITE_DATA_DIR is unset).
+ */
+function pulseFunctionsSh(): string {
+  return `kl_unavailable() {
   kl_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
-  printf '%s %s fail-open: %s\\n' "$kl_ts" "$kl_t" "$1" >> "$kl_state/shim.log" 2>/dev/null
+  printf '%s %s fail-open: %s\\n' "$kl_ts" "\${kl_lt-$kl_t}" "$1" >> "$kl_state/shim.log" 2>/dev/null
   if [ ! -e "$kl_state/unavailable" ]; then
     printf '%s\\n' "kronicle-lite shim: $1; running $kl_t unchecked (fail open; noted once, see $kl_state/shim.log)" >&2
     : > "$kl_state/unavailable" 2>/dev/null
@@ -195,7 +214,7 @@ kl_now_ms() {
 
 kl_log() {
   kl_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
-  printf '%s %s %s\\n' "$kl_ts" "$kl_t" "$1" >> "$kl_state/shim.log" 2>/dev/null
+  printf '%s %s %s\\n' "$kl_ts" "\${kl_lt-$kl_t}" "$1" >> "$kl_state/shim.log" 2>/dev/null
 }
 
 kl_pulse() {
@@ -210,14 +229,14 @@ kl_pulse() {
     kl_p=\${kl_p:+$kl_p:}$kl_d
   done
   IFS=$kl_ifs; set +f
-  [ -n "$kl_data" ] || kl_data=\${KRONICLE_LITE_DATA_DIR:-$HOME/.kronicle-lite}
+  # kl_data '' = not pinned: pulse finds the store the way the server does (P2-01).
   case \${KRONICLE_SHIM_TIMEOUT-} in ''|*[!0-9]*) kl_to=10;; *) kl_to=$KRONICLE_SHIM_TIMEOUT;; esac
   if [ -x "$kl_node" ] && [ -f "$kl_cli" ]; then
-    set -- "$kl_node" "$kl_cli" pulse --state "$kl_state" --data-dir "$kl_data" --mode "$kl_mode" --cwd "$PWD" -- "$kl_t" "$@"
+    set -- "$kl_node" "$kl_cli" pulse --state "$kl_state" --data-dir "$kl_data" --default-data-dir "\${kl_defdata-}" --mode "$kl_mode" --cwd "$PWD" -- "$kl_t" "$@"
   else
     kl_kb=$(PATH=$kl_p command -v kronicle-lite 2>/dev/null)
     if [ -z "$kl_kb" ]; then kl_unavailable "kronicle-lite not found"; return 0; fi
-    set -- "$kl_kb" pulse --state "$kl_state" --data-dir "$kl_data" --mode "$kl_mode" --cwd "$PWD" -- "$kl_t" "$@"
+    set -- "$kl_kb" pulse --state "$kl_state" --data-dir "$kl_data" --default-data-dir "\${kl_defdata-}" --mode "$kl_mode" --cwd "$PWD" -- "$kl_t" "$@"
   fi
   kl_tb=$(command -v timeout 2>/dev/null)
   if [ -n "$kl_tb" ]; then
@@ -233,7 +252,13 @@ kl_pulse() {
   case $kl_rc in
     0) kl_log "check \${kl_ms}ms outcome=allow rc=0"; [ ! -e "$kl_state/unavailable" ] || rm -f "$kl_state/unavailable"; return 0;;
     77) kl_log "check \${kl_ms}ms outcome=deny rc=77"; [ ! -e "$kl_state/unavailable" ] || rm -f "$kl_state/unavailable"; exit 77;;
-    3) kl_log "check \${kl_ms}ms outcome=unavailable rc=3"; kl_unavailable "kronicle-lite store unavailable (see $kl_state/last-error)"; return 0;;
+    3)
+      if [ "$kl_onto" = deny ]; then
+        kl_log "check \${kl_ms}ms outcome=unavailable-deny rc=3"
+        printf '%s\\n' "kronicle-lite store UNAVAILABLE (missing or locked; see $kl_state/last-error) — \\\`$kl_cmd\\\` was NOT checked and NOT run (--on-timeout deny)" >&2
+        exit 77
+      fi
+      kl_log "check \${kl_ms}ms outcome=unavailable rc=3"; kl_unavailable "kronicle-lite store unavailable (see $kl_state/last-error)"; return 0;;
     124|137|142)
       if [ "$kl_onto" = deny ]; then
         kl_log "check \${kl_ms}ms outcome=timeout-deny rc=$kl_rc timeout=\${kl_to}s"
@@ -245,14 +270,64 @@ kl_pulse() {
       return 0;;
     *) kl_log "check \${kl_ms}ms outcome=failed rc=$kl_rc"; kl_unavailable "kronicle-lite pulse failed (exit $kl_rc)"; return 0;;
   esac
+}`;
 }
 
-kl_ok=0
-if [ $kl_world = 1 ]; then
-  if [ "$kl_prev" = 1 ]; then kl_ok=1; else kl_pulse "$@"; kl_ok=1; fi
-fi
-KRONICLE_SHIM_EXEC="$$:$kl_ok:$kl_extra$kl_found:"; export KRONICLE_SHIM_EXEC
-exec "$kl_real" "$@"
+export interface HookParams {
+  /** Absolute physical shim dir (removed from PATH for the check). */
+  dir: string;
+  stateDir: string;
+  node: string;
+  cli: string;
+  /** Pinned data dir, or '' (found at run time, like the PATH shims). */
+  dataDir: string;
+  /** The default store when not pinned, absolute (a hook may run under sudo or `env -i`, with another HOME). */
+  defaultDataDir: string;
+  mode: 'deny' | 'warn';
+  onTimeout: 'allow' | 'deny';
+  /** The pre-push hook this one replaced and runs afterwards (absolute; may not exist). */
+  chained: string;
+  version: string;
+}
+
+export const HOOK_MARKER = `${SHIM_MARKER} hook=pre-push`;
+
+/**
+ * Git pre-push hook (H2-13): the same check as the git shim, run by git itself
+ * before every push from the repository, however git was started (absolute
+ * path, sudo, env -i, `git -C`, an alias, a hook, `rebase -x`, `submodule
+ * foreach`: git's exec-path comes first on PATH there, so the PATH shim is
+ * skipped). `git push --no-verify` skips every pre-push hook, this one too.
+ */
+export function gitHookScript(p: HookParams): string {
+  return `#!/bin/sh
+# ${HOOK_MARKER}
+# Generated by \`kronicle-lite shim install --git-hook\` (kronicle-lite ${p.version}); re-run install instead of editing,
+# \`kronicle-lite shim uninstall --git-hook\` to remove it (the hook it replaced is put back).
+# Runs \`kronicle-lite pulse\` before every push from this repository: exit 77 = refused
+# (unreconciled changes or a store integrity failure; the reason is on stderr). kronicle-lite
+# unavailable = fail open (noted once). Then runs the pre-push hook it replaced, if any.
+kl_t=git
+kl_lt='git(pre-push)'
+kl_state=${shq(p.stateDir)}
+kl_node=${shq(p.node)}
+kl_cli=${shq(p.cli)}
+kl_data=${shq(p.dataDir)}
+kl_defdata=${shq(p.defaultDataDir)}
+kl_mode=${shq(p.mode)}
+kl_onto=${shq(p.onTimeout)}
+kl_chain=${shq(p.chained)}
+kl_skip=:${shq(p.dir.replace(/:/g, ''))}:
+kl_ifs=$IFS
+
+${pulseFunctionsSh()}
+
+# pre-push gets <remote name> <remote url>: never print the URL (it can carry a token).
+kl_remote=\${1-}
+[ "$kl_remote" != "\${2-}" ] || kl_remote='<url>'
+kl_pulse push "$kl_remote" </dev/null
+if [ -f "$kl_chain" ] && [ -x "$kl_chain" ]; then exec "$kl_chain" "$@"; fi
+exit 0
 `;
 }
 

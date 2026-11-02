@@ -24,8 +24,12 @@
  * when something is unreconciled); a miss costs a stale deploy.
  */
 
-/** Script / make-target words that mean "this changes the world" (= cc-anchor's default pulse_match words). */
-export const WORLD_WORDS = ['deploy', 'migrate', 'publish', 'release'] as const;
+/**
+ * Script / make-target words that mean "this changes the world" (cc-anchor's
+ * default pulse_match words, plus `ship`: 0.8.1, live-agent finding L2-08,
+ * `npm run ship` / `make ship` were not checked).
+ */
+export const WORLD_WORDS = ['deploy', 'migrate', 'publish', 'release', 'ship'] as const;
 
 export interface ToolSpec {
   /** Options before the verb that take the NEXT argument as their value (`-C dir`). `--opt=value` never needs listing. */
@@ -48,7 +52,7 @@ export interface ToolSpec {
   all?: boolean;
 }
 
-const GIT_GLOBAL = ['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix', '--config-env'];
+export const GIT_GLOBAL = ['-C','-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix', '--config-env'];
 const KUBE_GLOBAL = [
   '-n',
   '--namespace',
@@ -135,8 +139,15 @@ export function parsePatterns(patterns: string[]): Map<string, string[]> {
   return out;
 }
 
+/** `make`, `/usr/bin/make`, `C:\…\make.exe` → `make` (0.8.1, L2-08: a path names the same tool). */
+export function toolBasename(tool: string): string {
+  const b = tool.split(/[\\/]/).pop() ?? tool;
+  return b.replace(/\.(exe|cmd|bat|ps1)$/i, '');
+}
+
 /** The rule set for one shimmed tool: built-in rules plus the user's patterns for it. */
-export function specFor(tool: string, userPatterns: string[] = []): ToolSpec {
+export function specFor(toolIn: string, userPatterns: string[] = []): ToolSpec {
+  const tool = toolBasename(toolIn);
   const base = BUILTIN_TOOLS[tool];
   const all = userPatterns.includes('*ALL*');
   const extra = userPatterns.filter((p) => p !== '*ALL*');

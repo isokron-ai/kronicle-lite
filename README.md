@@ -131,11 +131,20 @@ Cursor reads `.cursor/mcp.json` (project) or `~/.cursor/mcp.json`
   "mcpServers": {
     "kronicle-lite": {
       "command": "npx",
-      "args": ["-y", "kronicle-lite", "serve", "--data-dir", "${workspaceFolder}/.kronicle-lite", "--actor", "cursor"]
+      "args": ["-y", "kronicle-lite", "serve", "--actor", "cursor"]
     }
   }
 }
 ```
+
+This uses the default store (`~/.kronicle-lite`, shared with your other
+clients; documents are scoped per project since 0.5.0), which is also the
+one the [exec-time shims](#exec-time-pulse-shims) check. To keep a store per
+workspace instead, add `"--data-dir", "${workspaceFolder}/.kronicle-lite"`:
+the shims (0.8.1) find a project-local `.kronicle-lite/` by walking up from
+the repository a command acts on, but when `~/.kronicle-lite` holds a store
+too they cannot tell which one the agent uses and refuse world-changing
+commands until you pin one (`kronicle-lite shim install --data-dir DIR`).
 
 For the HTTP mode below use `{ "url": "http://127.0.0.1:7417/mcp", "headers": { "Authorization": "Bearer ${env:KRONICLE_LITE_BEARER}" } }`
 instead of `command`/`args`. Since 0.5.0 a 2025-era HTTP client such as
@@ -187,6 +196,11 @@ Copilot code review:
   }
 }
 ```
+
+The store lives in the checkout (`./.kronicle-lite`): exec-time shims
+installed in the same environment find it by walking up from the
+repository (0.8.1), or pin it with `kronicle-lite shim install --data-dir
+"$PWD/.kronicle-lite"`.
 
 `tools` is required; GitHub recommends allowlisting read-only tools because
 the agent calls them without asking. The six above are the ones
@@ -463,6 +477,7 @@ Shims check at the moment the real binary is executed, for any client
 kronicle-lite shim install                      # git terraform tofu kubectl helm npm pnpm yarn → ~/.kronicle-lite/shims
 export PATH="$HOME/.kronicle-lite/shims:$PATH"  # FIRST on PATH: shell profile and each agent's environment
 kronicle-lite shim status                       # active on PATH? real binaries? anything blocking here?
+kronicle-lite shim install --git-hook           # git: also a pre-push hook in this repo (catches every push)
 ```
 
 Each shim is a small POSIX sh wrapper (plus `.cmd`/`.ps1` on Windows). A
@@ -479,18 +494,32 @@ is **refused** with the diff (exit 77):
 $ terraform apply
 kronicle-lite shim: did NOT run `terraform apply` — kronicle-lite has 1 change(s) you have not reconciled (head seq 7):
 - runbook › Runbook › Deploy (seq 7, supersession/behavioral): relied on "Target: prod-a" → now "Target: prod-b"; diff: Target: [-prod-a-]{+prod-b+} [not yet re-read at the current version by: agent-a]
-Re-read the affected document(s) … reading the current version clears the gate by itself. Then run the command again. To override without re-reading: `kronicle-lite shim ack --through 7` (in this directory).
+Re-read the pending item(s) above … reading the current version clears the gate by itself. Then run the command again.
+Still to re-read the current version: agent-a (the invoking actor, agent-a).
+If you cannot re-read them yourself, stop and ask the operator.
 ```
 
 The gate is version-bound, like `pending`: once the agent recalls the
 runbook again (or reads `kronicle://docs/runbook`) and gets the current
 version, the same command runs, no acknowledgement needed. Who has to
-re-read: `shim install --pending-actor <agent>`, else everyone who read the
-changed block. `kronicle-lite shim ack --through SEQ` stays as a manual
-override. `--mode warn` prints the same and runs the command. A store that fails its
+re-read: `shim install --pending-actor <agent>`, else the invoking actor
+(`KRONICLE_LITE_ACTOR` in the agent's environment), else (or with
+`--all-readers`) everyone who read the changed block. The project is the
+one the command acts on (`git -C`, `--git-dir`, `terraform -chdir=`, …).
+`kronicle-lite shim ack --through SEQ` is an operator override: it needs
+a terminal or `--operator`, is logged, and the refusal never mentions it.
+The PATH shim only sees commands found through PATH; `shim install
+--git-hook` adds a git pre-push hook that checks every push (absolute
+paths, `sudo`, aliases, hooks, `rebase -x`; `--no-verify` aside).
+`--mode warn` prints the same and runs the command. A store that fails its
 integrity check refuses world-changing commands in both modes (fail
-closed); a missing or broken kronicle-lite lets them run (fail open, noted
-once on stderr, logged in `.kronicle-shim/shim.log`). A check that times out
+closed), and so does a store file that is damaged (0.8.1). The shims check
+the store the server uses: `shim install --data-dir DIR` pins it; else
+`$KRONICLE_LITE_DATA_DIR` or `~/.kronicle-lite`, plus a project-local
+`.kronicle-lite/` above the repository (0.8.1). No store, or two different
+ones, refuses world-changing commands in deny mode; a missing kronicle-lite
+CLI or a crash lets them run (fail open, noted once on stderr, logged in
+`.kronicle-shim/shim.log`). A check that times out
 (`KRONICLE_SHIM_TIMEOUT`, default 10 s) prints `kronicle-lite check TIMED
 OUT … was NOT checked` on every occurrence and runs the command, or refuses
 it with exit 77 under `shim install --on-timeout deny`. Every world-changing

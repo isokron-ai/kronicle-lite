@@ -45,7 +45,7 @@ function fakeBin(dir: string, name: string, log: string): string {
 }
 
 function kl(args: string[], env: Record<string, string> = {}, cwd?: string) {
-  const r = spawnSync(process.execPath, [CLI, ...args], { env: cleanEnv(env), encoding: 'utf8', ...(cwd ? { cwd } : {}) });
+  const r = spawnSync(process.execPath, [CLI, ...args], { env: cleanEnv({ KRONICLE_LITE_ACTOR: '', ...env }), encoding: 'utf8', ...(cwd ? { cwd } : {}) });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 }
 
@@ -80,7 +80,7 @@ function rig(opts: { tools?: string[]; mode?: 'deny' | 'warn'; store?: boolean; 
 function run(r: Rig, argv: string[], env: Record<string, string> = {}, cwd?: string) {
   const res = spawnSync(argv[0]!, argv.slice(1), {
     cwd: cwd ?? r.proj,
-    env: cleanEnv({ PATH: `${r.shims}:${r.bin}:${SYS_PATH}`, HOME: r.root, ...env }),
+    env: cleanEnv({ PATH: `${r.shims}:${r.bin}:${SYS_PATH}`, HOME: r.root, KRONICLE_LITE_ACTOR: '', ...env }),
     encoding: 'utf8',
   });
   return { status: res.status, stdout: res.stdout, stderr: res.stderr };
@@ -211,7 +211,8 @@ describe.skipIf(!POSIX)('shim wrapper: PATH resolution and recursion guard', () 
     expect(res.status, res.stderr).toBe(0);
     expect(res.stdout).toBe('REAL kubectl ran\n');
     const apply = spawnSync('kubectl', ['apply'], { cwd: root, env: cleanEnv({ PATH: `${shims}:${bin}:${SYS_PATH}` }), encoding: 'utf8', timeout: 20_000 });
-    expect(apply.status, apply.stderr).toBe(0); // no store: fail open, note written under the quoted dir
+    expect(apply.status, apply.stderr).toBe(77); // 0.8.1: no store = refused in deny mode (P2-01); logged under the quoted dir
+    expect(apply.stderr).toMatch(/found no kronicle-lite store/);
     expect(existsSync(join(shims, '.kronicle-shim', 'shim.log'))).toBe(true);
   });
 
@@ -236,7 +237,7 @@ describe.skipIf(!POSIX)('shim wrapper: PATH resolution and recursion guard', () 
     const res = spawnSync('terraform', ['apply'], { cwd: r.proj, env: cleanEnv(env), encoding: 'utf8', timeout: 20_000 });
     expect(res.status).toBe(77); // checked before the wrapper ran
     expect(readFileSync(r.log, 'utf8')).toBe('');
-    expect(kl(['shim', 'ack', '--dir', r.shims, '--data-dir', r.data], {}, r.proj).status).toBe(0);
+    expect(kl(['shim', 'ack', '--operator', '--dir', r.shims, '--data-dir', r.data], {}, r.proj).status).toBe(0);
     const ok = spawnSync('terraform', ['apply'], { cwd: r.proj, env: cleanEnv(env), encoding: 'utf8', timeout: 20_000 });
     expect(ok.status, ok.stderr).toBe(0);
     expect(readFileSync(r.log, 'utf8')).toBe('wrapper\nterraform\0apply\n');
@@ -271,16 +272,18 @@ describe.skipIf(!POSIX)('shim wrapper: world-changing path (real CLI)', () => {
     putRunbook(r, 'prod-b');
     const plan = run(r, ['terraform', 'plan']);
     expect(plan.status).toBe(0);
+    mkdirSync(join(r.proj, 'infra')); // 0.8.1: a -chdir that does not resolve is refused for that reason instead (H2-14)
     const res = run(r, ['terraform', '-chdir=infra', 'apply', '-auto-approve']);
     expect(res.status).toBe(77);
     expect(res.stdout).toBe('');
     expect(res.stderr).toContain('did NOT run `terraform -chdir=infra apply -auto-approve`');
     expect(res.stderr).toContain('[-prod-a-]{+prod-b+}');
-    expect(res.stderr).toMatch(/kronicle-lite shim ack --through \d+/);
+    expect(res.stderr).not.toMatch(/shim ack|override/); // H2-12: the agent is never told how to skip the re-read
+    expect(res.stderr).toMatch(/ask the operator/);
     expect(run(r, ['terraform', 'apply']).status).toBe(77); // a plain retry is refused again
     expect(calls(r).map((c) => c.join(' '))).toEqual(['terraform apply', 'terraform plan']);
-    const seq = /ack --through (\d+)/.exec(res.stderr)![1]!;
-    const a = kl(['shim', 'ack', '--through', seq], { PATH: `${r.shims}:${r.bin}:${SYS_PATH}` }, r.proj); // dir found on PATH
+    const seq = String(JSON.parse(kl(['shim', 'status', '--dir', r.shims, '--json'], {}, r.proj).stdout).project.pending.ack_through);
+    const a = kl(['shim', 'ack', '--operator', '--through', seq], { PATH: `${r.shims}:${r.bin}:${SYS_PATH}` }, r.proj); // dir found on PATH
     expect(a.status, a.stderr).toBe(0);
     expect(a.stdout).toMatch(new RegExp(`acknowledged through seq ${seq} .*\\(1 blocking change`));
     expect(run(r, ['terraform', 'apply']).status).toBe(0);
@@ -298,7 +301,7 @@ describe.skipIf(!POSIX)('shim wrapper: world-changing path (real CLI)', () => {
     putRunbook(r, 'prod-b');
     expect(run(r, ['terraform', 'apply']).status).toBe(77);
     expect(run(r, ['terraform', 'apply'], {}, other).status).toBe(77);
-    expect(kl(['shim', 'ack', '--dir', r.shims], {}, r.proj).status).toBe(0);
+    expect(kl(['shim', 'ack', '--operator', '--dir', r.shims], {}, r.proj).status).toBe(0);
     expect(run(r, ['terraform', 'apply']).status).toBe(0);
     expect(run(r, ['terraform', 'apply'], {}, other).status).toBe(77);
   });
@@ -340,25 +343,29 @@ describe.skipIf(!POSIX)('shim wrapper: world-changing path (real CLI)', () => {
     expect(res.stderr).toMatch(/STORE INTEGRITY FAILURE/);
   });
 
-  it('fail-open when kronicle-lite is unavailable: no store, noted once on stderr, logged every time', () => {
+  it('no store: refused in deny mode (0.8.1, P2-01), every time and logged; runs loudly in warn mode', () => {
     const r = rig({ tools: ['terraform'], store: false });
-    const a = run(r, ['terraform', 'apply']);
-    expect(a.status).toBe(0);
-    expect(a.stderr).toMatch(/^kronicle-lite shim: kronicle-lite store unavailable \(see .*last-error\); running terraform unchecked \(fail open; noted once/);
-    expect(readFileSync(join(r.shims, '.kronicle-shim', 'last-error'), 'utf8')).toMatch(/no kronicle-lite store in /);
-    const b = run(r, ['terraform', 'apply']);
-    expect(b.status).toBe(0);
-    expect(b.stderr).toBe('');
+    for (let i = 0; i < 2; i++) {
+      const a = run(r, ['terraform', 'apply']);
+      expect(a.status).toBe(77);
+      expect(a.stderr).toMatch(/^kronicle-lite shim: did NOT run `terraform apply` — the shim found no kronicle-lite store \(looked in .*\), so it could not be checked\./);
+    }
+    expect(readFileSync(join(r.shims, '.kronicle-shim', 'last-error'), 'utf8')).toMatch(/found no kronicle-lite store/);
     const log = readFileSync(join(r.shims, '.kronicle-shim', 'shim.log'), 'utf8').trim().split('\n');
-    expect(log.filter((l) => l.includes('fail-open:'))).toHaveLength(2);
-    expect(log.filter((l) => / terraform check \d+ms outcome=unavailable rc=3$/.test(l))).toHaveLength(2);
-    expect(calls(r)).toHaveLength(2);
-    // once a store exists the note is re-armed and the check works
+    expect(log.filter((l) => / terraform pulse\(node\) decision=deny reason=no-store$/.test(l))).toHaveLength(2);
+    expect(log.filter((l) => / terraform check \d+ms outcome=deny rc=77$/.test(l))).toHaveLength(2);
+    expect(calls(r)).toHaveLength(0);
+    // once a store exists the check works
     putRunbook(r, 'prod-a');
     expect(run(r, ['terraform', 'apply']).status).toBe(0); // first check: seeds at the head
-    expect(existsSync(join(r.shims, '.kronicle-shim', 'unavailable'))).toBe(false);
     putRunbook(r, 'prod-b');
     expect(run(r, ['terraform', 'apply']).status).toBe(77);
+    // warn mode: runs, says so every time
+    const w = rig({ tools: ['terraform'], store: false, mode: 'warn' });
+    const a = run(w, ['terraform', 'apply']);
+    expect(a.status).toBe(0);
+    expect(a.stderr).toMatch(/\(warn\): `terraform apply` is running UNCHECKED — the shim found no kronicle-lite store/);
+    expect(calls(w)).toHaveLength(1);
   });
 
   it('fail-open when the kronicle-lite CLI is gone and not on PATH; timeout bounds a hung check', () => {
@@ -463,7 +470,7 @@ describe.skipIf(!POSIX)('shim wrapper: world-changing path (real CLI)', () => {
     expect(deny.status).toBe(77);
     expect(deny.stderr).toBe('fake says no\n');
     const pulseArgs = JSON.parse(readFileSync(argsLog, 'utf8').split('\n')[0]!);
-    expect(pulseArgs).toEqual(['pulse', '--state', join(shims, '.kronicle-shim'), '--data-dir', join(root, 'd'), '--mode', 'deny', '--cwd', root, '--', 'terraform', 'apply', '-var', 'x=a b']);
+    expect(pulseArgs).toEqual(['pulse', '--state', join(shims, '.kronicle-shim'), '--data-dir', join(root, 'd'), '--default-data-dir', '', '--mode', 'deny', '--cwd', root, '--', 'terraform', 'apply', '-var', 'x=a b']);
     expect(spawnSync('terraform', ['apply'], { cwd: root, env: { ...env, FAKE_PULSE_EXIT: '1' }, encoding: 'utf8' }).status).toBe(0);
     expect(spawnSync('terraform', ['apply'], { cwd: root, env: { ...env, FAKE_PULSE_EXIT: '0' }, encoding: 'utf8' }).status).toBe(0);
     expect(readFileSync(log, 'utf8').split('\n').filter(Boolean)).toHaveLength(2);
@@ -527,7 +534,7 @@ describe.skipIf(!POSIX)('kronicle-lite shim exec (Windows wrappers / portable pa
     expect(deny.status).toBe(77);
     expect(deny.stderr).toContain('[-prod-a-]{+prod-b+}');
     expect(calls(r)).toEqual([['terraform', 'plan', '-out', 'a b']]);
-    expect(kl(['shim', 'ack', '--dir', r.shims], {}, r.proj).status).toBe(0);
+    expect(kl(['shim', 'ack', '--operator', '--dir', r.shims], {}, r.proj).status).toBe(0);
     expect(x(['apply']).status).toBe(0);
   });
 });
@@ -555,7 +562,8 @@ describe('version-bound reconciliation: the gate clears when the reader re-reads
     expect(d1.status).toBe(77);
     expect(d1.stderr).toContain('[-prod-a-]{+prod-b+}');
     expect(d1.stderr).toContain('[not yet re-read at the current version by: agent-a]');
-    expect(d1.stderr).toMatch(/To override without re-reading: `kronicle-lite shim ack --through \d+`/);
+    expect(d1.stderr).toContain('Still to re-read the current version: agent-a (every reader of the changed text is checked: no invoking actor is set');
+    expect(d1.stderr).not.toMatch(/shim ack|override/);
     putRunbook(r, 'prod-c');
     read(r, 'agent-a', ['--block', blockWith(r, 'prod-b')]); // v2: not the current version
     expect(run(r, ['terraform', 'apply']).status).toBe(77);
@@ -590,14 +598,15 @@ describe('version-bound reconciliation: the gate clears when the reader re-reads
     expect(dc.stderr).toContain('by: deployer]');
     const st = kl(['shim', 'status', '--dir', c.shims], {}, c.proj);
     expect(st.stdout).toContain('pending actor(s) deployer');
-    const seq = /ack --through (\d+)/.exec(dc.stderr)![1]!;
-    expect(kl(['shim', 'ack', '--dir', c.shims, '--through', seq], {}, c.proj).status).toBe(0); // manual override
+    expect(dc.stderr).toContain('Still to re-read the current version: deployer (the configured pending actor(s)).');
+    const seq = String(JSON.parse(kl(['shim', 'status', '--dir', c.shims, '--json'], {}, c.proj).stdout).project.pending.ack_through);
+    expect(kl(['shim', 'ack', '--operator', '--dir', c.shims, '--through', seq], {}, c.proj).status).toBe(0); // operator override
     expect(run(c, ['terraform', 'apply']).status).toBe(0);
     putRunbook(c, 'prod-c');
     expect(run(c, ['terraform', 'apply']).status).toBe(77);
     read(c, 'deployer'); // the configured actor reads the current version
     expect(run(c, ['terraform', 'apply']).status).toBe(0);
-  });
+  }, 60_000);
 
   it.skipIf(!POSIX)('a removal clears on a read of the document after it; a derived note clears when its source is re-read; integrity still fails closed', () => {
     const r = rig({ tools: ['terraform'] });
@@ -668,8 +677,8 @@ describe.skipIf(!POSIX)('shim status', () => {
     const s = kl(['shim', 'status', '--dir', r.shims], { PATH: `${r.shims}:${r.bin}:${SYS_PATH}` }, r.proj);
     expect(s.status, s.stderr).toBe(0);
     expect(s.stdout).toMatch(/terraform\s+active\s+real: .*\/bin\/terraform/);
-    expect(s.stdout).toMatch(/BLOCKED — 1 unreconciled change\(s\); re-read the current version \(or override: kronicle-lite shim ack --through \d+\)/);
-    expect(s.stdout).toContain("pending actors: each change's readers");
+    expect(s.stdout).toMatch(/BLOCKED — 1 unreconciled change\(s\) through seq \d+; re-read the current version \(operator override: see docs\/PUSH.md\)/);
+    expect(s.stdout).toContain('pending actors: the invoking actor (KRONICLE_LITE_ACTOR); not set here, so each change\'s readers');
     const j = JSON.parse(kl(['shim', 'status', '--dir', r.shims, '--json'], { PATH: `${r.bin}:${SYS_PATH}` }, r.proj).stdout);
     expect(j.tools[0]).toMatchObject({ tool: 'terraform', active: false, real: join(r.bin, 'terraform') });
     // status is read-only: still blocked afterwards
