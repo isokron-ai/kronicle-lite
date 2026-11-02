@@ -1,9 +1,10 @@
 /**
  * Mutation tests for the format-only classifier: each heuristic that was
  * REMOVED (hyphen stripping, lowercasing, the typo rule, date masking,
- * NFKC) and "the gate trusts the likely_typo label" is re-introduced behind
- * the test-only `__mutants` switch, and the classifier suite (must-alarm
- * cases, the stress corpus, the single-character property) must catch it.
+ * NFKC; 0.8.1: emphasis-marker folding and list renumbering) and "the gate
+ * trusts the likely_typo label" is re-introduced behind the test-only
+ * `__mutants` switch, and the classifier suite (must-alarm cases, both
+ * stress corpora, the single-character property) must catch it.
  * A mutant that survives means the tests no longer guard that regression.
  */
 
@@ -12,10 +13,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { __mutants, classifyEdit } from '../src/orient/cosmetic.js';
 import { KronicleLite } from '../src/store.js';
 import { CORPUS, MUST_ALARM, RUNBOOKS } from './fixtures/format-only-cases.js';
+import { R2_CORPUS } from './fixtures/r2-classifier-cases.js';
 import { mutate, reported } from './helpers/format-only.js';
 
 type Mutant = Parameters<typeof __mutants.add>[0];
-const MUTANTS: Mutant[] = ['hyphen_strip', 'lowercase', 'typo', 'date_mask', 'nfkc', 'gate_trusts_label'];
+const MUTANTS: Mutant[] = ['hyphen_strip', 'lowercase', 'typo', 'date_mask', 'nfkc', 'gate_trusts_label', 'emphasis_fold', 'list_renumber'];
 
 /** Run the suite's checks in-process; return the failures it would report. */
 function suiteFailures(): string[] {
@@ -30,6 +32,18 @@ function suiteFailures(): string[] {
     kl.docs.putDocument({ slug: 'r', title: 'R', markdown: md(b), actor_id: 'w' });
     const s = kl.orient.getSystemState({ actor_id: 'a', since_cursor: c0, focus: 'retractions' });
     if (s.retractions!.length === 0) failures.push(`corpus: ${id}`);
+    kl.close();
+  }
+  {
+    const S = R2_CORPUS.filter(([, l]) => l === 'S');
+    const kl = new KronicleLite({ memory: true });
+    S.forEach(([, , a], i) => kl.docs.putDocument({ slug: `r2-${i}`, title: 'R', markdown: `# Runbook\n\n${a}\n`, actor_id: 'w' }));
+    const c0 = kl.orient.getSystemState({ actor_id: 'a', focus: 'pulse' }).cursor;
+    S.forEach(([, , , b], i) => kl.docs.putDocument({ slug: `r2-${i}`, title: 'R', markdown: `# Runbook\n\n${b}\n`, actor_id: 'w' }));
+    const s = kl.orient.getSystemState({ actor_id: 'a', since_cursor: c0, focus: 'retractions' });
+    S.forEach(([id], i) => {
+      if (!s.retractions!.some((r) => r.doc_slug === `r2-${i}`)) failures.push(`r2 corpus: ${id}`);
+    });
     kl.close();
   }
   let seed = 7;

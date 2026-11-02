@@ -34,6 +34,7 @@ const NOTES_PRE = [
   'Silence alerts only with a ticket',
   'Send an e-mail summary after each drill.',
   'Last reviewed: 2026-10-01',
+  'Escalations follow the paging\npolicy.',
 ];
 const NOTES_POST = [
   'Operators receive alerts via the dispatcher.',
@@ -45,6 +46,7 @@ const NOTES_POST = [
   'Silence alerts only with a ticket.',
   'Send an email summary after each drill.',
   'Last reviewed: 2026-11-01',
+  'Escalations follow the paging policy.',
 ];
 const runbook = (cluster: string, notes: string[]) => `# api deploy runbook\n\n## Deploy target\n\nDeploys go to the cluster \`${cluster}\` first.\n\n## Notes\n\n${notes.join('\n\n')}\n`;
 
@@ -57,7 +59,9 @@ function repo() {
 }
 
 // Bench benign-edit Notes lines (index → format-only under Markdown-AST equivalence?)
-const FORMAT_ONLY_NOTES = new Set([1, 4, 5]); // double space, 1) → 1., *x* → _x_
+// 0.8.1 raw-text equivalence (strict): only the reflow (index 9) is format-only — the double space, `1)` → `1.`
+// and `*x*` → `_x_` all change raw text an agent may copy.
+const FORMAT_ONLY_NOTES = new Set([9]);
 
 describe('S7: format-only edits are recorded, everything else is a retraction', () => {
   it('each benign edit alone: format-only ones quiet, the rest delivered; a cluster change alarms with its diff', () => {
@@ -281,8 +285,8 @@ describe('push contract: orient --cursor C --focus retractions --json', () => {
     writeFileSync(file, runbook('stg-west-3', NOTES_POST));
     await put();
     const o1 = await orient(['--cursor', o0.cursor, '--focus', 'retractions']);
-    expect(o1.retractions.length).toBe(NOTES_PRE.length - 3); // only the 3 format-only notes stay quiet
-    expect(o1.format_only_edits.length).toBe(3);
+    expect(o1.retractions.length).toBe(NOTES_PRE.length - 1); // 0.8.1 strict raw text: only the reflow note stays quiet
+    expect(o1.format_only_edits.length).toBe(1);
     expect(o1.source_drift).toBeNull();
     writeFileSync(file, runbook('qa-east-7', NOTES_POST));
     await put();

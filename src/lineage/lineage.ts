@@ -32,9 +32,9 @@ import type BetterSqlite3 from 'better-sqlite3';
 import type { Chain } from '../chain/index.js';
 import type { Db } from '../db/open.js';
 type Statement = BetterSqlite3.Statement<unknown[]>;
-import { isInstructionSlug, splitHeadingPath, type BlockRow, type DocumentStore } from '../docs/documents.js';
+import { isInstructionSlug, REORDERED_RE, splitHeadingPath, type BlockRow, type DocumentStore } from '../docs/documents.js';
 import { classifyEdit } from '../orient/cosmetic.js';
-import { snippet, wordDiff } from '../orient/textdiff.js';
+import { changeSnippets, snippet, wordDiff } from '../orient/textdiff.js';
 
 /** One lineage edge as written on the chain. */
 export interface LineageRef {
@@ -147,12 +147,17 @@ export class Lineage {
 
   // ───────────────────────────── versions ─────────────────────────────
 
-  /** True when `a → b` is a format-only edit in the same section (the same version for every purpose here). */
+  /**
+   * True when `a → b` is a format-only edit in the same section (the same
+   * version for every purpose here). Identical text in the same section
+   * retired by a reorder (0.8.1, planRevision 1a) is never the same version:
+   * order is meaning.
+   */
   hopFormatOnly(a: BlockRow, b: BlockRow): boolean {
     const key = `${a.block_id}>${b.block_id}`;
     let v = this.hopMemo.get(key);
     if (v === undefined) {
-      v = a.heading_path === b.heading_path && a.kind === b.kind && classifyEdit(a.content, b.content, a.kind).format_only;
+      v = a.heading_path === b.heading_path && a.kind === b.kind && classifyEdit(a.content, b.content, a.kind).format_only && !(a.content === b.content && this.reordered(a.block_id));
       this.hopMemo.set(key, v);
     }
     return v;
@@ -177,6 +182,16 @@ export class Lineage {
       while (currentFrom > 0 && this.hopFormatOnly(blocks[currentFrom - 1]!, blocks[currentFrom]!)) currentFrom--;
     }
     return { blocks, head, currentFrom };
+  }
+
+  /** True when the block was retired by a reorder within its section (planRevision 1a, reason "reordered in revision N"). */
+  private reordered(block_id: string): boolean {
+    const r = this.q(
+      `SELECT CASE WHEN json_valid(payload_canonical) THEN json_extract(payload_canonical, '$.reason') END AS reason FROM events
+        WHERE event_type = 'block.superseded' AND CASE WHEN json_valid(payload_canonical) THEN json_extract(payload_canonical, '$.block_id') END = ?
+        ORDER BY seq LIMIT 1`,
+    ).get(block_id) as { reason: unknown } | undefined;
+    return typeof r?.reason === 'string' && REORDERED_RE.test(r.reason);
   }
 
   /** Seq of the event that retired a block (block.superseded / block.tombstoned), or null. */
@@ -227,14 +242,27 @@ export class Lineage {
    * source is current. `memo` is shared across one read (recall / orient).
    */
   staleness(doc_id: string, memo: Map<string, StaleSource[]> = new Map(), depth = 0, seen: Set<string> = new Set()): StaleSource[] {
+    return this.stalenessOf(doc_id, memo, depth, seen).out;
+  }
+
+  /**
+   * `complete` is false when the result was cut short: by the depth bound
+   * (a stale note more than MAX_DERIVED_DEPTH hops below was not looked at)
+   * or by a cycle (a note already on the path was skipped). 0.8.1: such a
+   * result is the right answer for the note the read started from, never for
+   * this note on its own, so it is not memoized; before, a note evaluated
+   * after its descendant or cycle partner in the same read could show fresh.
+   */
+  private stalenessOf(doc_id: string, memo: Map<string, StaleSource[]>, depth: number, seen: Set<string>): { out: StaleSource[]; complete: boolean } {
     const cached = memo.get(doc_id);
-    if (cached) return cached;
-    if (seen.has(doc_id)) return [];
+    if (cached) return { out: cached, complete: true };
+    if (seen.has(doc_id)) return { out: [], complete: false };
     const edges = this.edges(doc_id);
     if (edges.length === 0) {
       memo.set(doc_id, []);
-      return [];
+      return { out: [], complete: true };
     }
+    let complete = true;
     seen.add(doc_id);
     const ids = new Set(edges.map((e) => e.source_block_id));
     const bySource = new Map<string, { hash: string; inferred: boolean }>();
@@ -273,8 +301,8 @@ export class Lineage {
         seq: ch.seq,
         current_block_id: live ? w.head.block_id : null,
         current_content_hash: live ? w.head.content_hash : null,
-        old_text: snippet(src.content),
-        new_text: live ? snippet(w.head.content) : null,
+        old_text: live ? changeSnippets(src.content, w.head.content)[0] : snippet(src.content),
+        new_text: live ? changeSnippets(src.content, w.head.content)[1] : null,
         inferred: prev ? inferred && out[prev.at]!.inferred : inferred,
       };
       if (prev) out[prev.at] = entry;
@@ -288,17 +316,21 @@ export class Lineage {
     if (depth < MAX_DERIVED_DEPTH) {
       for (const d of transitiveDocs) {
         if (d === doc_id) continue;
-        const inner = this.staleness(d, memo, depth + 1, seen);
+        const r = this.stalenessOf(d, memo, depth + 1, seen);
+        if (!r.complete) complete = false;
+        const inner = r.out;
         if (inner.length > 0) {
           const slug = this.slugOf(d) ?? d;
           for (const s of inner) if (!out.some((o) => o.source_block_id === s.source_block_id)) out.push({ ...s, via: s.via ?? slug });
         }
       }
+    } else if ([...transitiveDocs].some((d) => d !== doc_id && this.hasLineage(d))) {
+      complete = false; // depth bound: notes below were not looked at
     }
     seen.delete(doc_id);
     out.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0) || a.source_block_id.localeCompare(b.source_block_id));
-    memo.set(doc_id, out);
-    return out;
+    if (complete || depth === 0) memo.set(doc_id, out);
+    return { out, complete };
   }
 
   /**
@@ -626,9 +658,15 @@ export class Lineage {
       heading_path: splitHeadingPath(w.head.heading_path),
       read: { block_id: read.block_id, content_hash: read.content_hash, head_seq },
       current: live ? { block_id: w.head.block_id, content_hash: w.head.content_hash } : null,
-      old_text: snippet(read.content),
-      new_text: live ? snippet(w.head.content) : null,
-      diff: live ? (read.heading_path !== w.head.heading_path ? `section: ${wordDiff(read.heading_path.replaceAll(' > ', ' › '), w.head.heading_path.replaceAll(' > ', ' › '))}${read.content === w.head.content ? '' : `; ${wordDiff(read.content, w.head.content)}`}` : wordDiff(read.content, w.head.content)) : null,
+      old_text: live ? changeSnippets(read.content, w.head.content)[0] : snippet(read.content),
+      new_text: live ? changeSnippets(read.content, w.head.content)[1] : null,
+      diff: live
+        ? read.heading_path !== w.head.heading_path
+          ? `section: ${wordDiff(read.heading_path.replaceAll(' > ', ' › '), w.head.heading_path.replaceAll(' > ', ' › '))}${read.content === w.head.content ? '' : `; ${wordDiff(read.content, w.head.content)}`}`
+          : read.content === w.head.content
+            ? `order: same text, new position within ${w.head.heading_path.replaceAll(' > ', ' › ') || '(top)'}`
+            : wordDiff(read.content, w.head.content)
+        : null,
       resolve: live ? `recall it again or read ${uri}` : `read ${uri} (or recall with include_tombstoned) to acknowledge the removal`,
     };
   }

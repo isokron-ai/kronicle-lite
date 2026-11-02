@@ -4,7 +4,133 @@ All notable changes to kronicle-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
-## Unreleased (0.8.1)
+## [0.8.1] — 2026-11-01
+
+Safety patch from agent-memory-bench hardening round 2 (branch
+`hardening-retractions`, findings R2-01..03, R2-06, R2-12, R2-13, R2-16;
+the last four were first filed as leads L2, L5, L1, L6 below), two more
+leads from the same review (L3, L4) and one live-agent finding (L2-09),
+each reproduced on 0.8.0 before it was fixed, plus the anchor-client
+hardening (track 6, A2-*) and the exec-time shim hardening (track 3,
+H2-*) below. No hash recipe,
+receipt, cursor or event layout changed; stores written by 0.8.0 open and
+verify unchanged.
+
+### Fixed — format-only is now RAW-TEXT equivalence (R2-01, R2-02, R2-03)
+
+- **R2-01 (S1).** The format-only parser read a `N.` / `N)` line after a
+  paragraph line as a list item, treated a `.` → `)` switch as the same
+  list and dropped nested ordered starts — then discarded every number
+  after the first. So `Open these ports:\n8080. web\n9090. admin` →
+  `…9091. admin` was format-only: no retraction, `pending_count` 0, `pulse`
+  exit 0. Port, back-off, year and list-start changes are retractions now.
+- **R2-02 (S1, design).** Edits CommonMark renders the same but that change
+  the raw text an agent copies into a command were format-only: `*` ↔ `_`
+  in unfenced globs and identifiers (`/tmp/*/cache/*` → `/tmp/_/cache/_`,
+  `__init__.py` → `**init**.py`, `PATTERN=*.log*`), and contradictory raw
+  list numbering. **Format-only now means the raw Markdown is
+  byte-identical after only: CRLF/CR → LF, trailing whitespace per line,
+  reflow inside a paragraph (a whitespace run that contains a line break,
+  between two non-space characters → one space; not inside inline
+  code, link destinations, HTML or quoted strings, never across a hard
+  break or before a line that could start a block construct), and
+  blank-line runs.** No whitespace-run (two spaces → one, tab → space
+  inside a line), emphasis-marker, list-marker, renumbering,
+  heading-style, escape or Unicode normalization. Code blocks, front
+  matter, HTML blocks and blocks with an unclosed code span, quote, tag or
+  link destination are opaque (docs/FORMAT.md §3.8).
+- **R2-03 (S3).** A backslash hard break (`deploy\` + newline + `--force`)
+  vs a literal backslash (`deploy\ --force`) was format-only. The line break
+  after a backslash is kept.
+- **Honest cost:** a double space or a tab changed inside a line, list
+  renumbering, ordered-list delimiter (`1)` ↔ `1.`), bullet style (`-` ↔
+  `*`) and emphasis-marker (`*x*` ↔ `_x_`) edits now produce retractions
+  (and `pending`, and a refusing pulse) where 0.7.0–0.8.0 stayed quiet.
+  Deliberate: agents copy commands out of unfenced prose, where a double
+  space or a tab can matter, and a false format-only is far worse than a
+  false alarm. Bench S7 (benign-edit quiet rate): see "Bench" below.
+- `format_rules` only ever holds `whitespace` now (`markup` stays in the type).
+
+### Fixed — a reorder inside a section made no event (R2-06, S2; lead L2)
+
+- `planRevision` carried blocks by content hash and heading path regardless
+  of order, so swapping two runbook steps made no event at all. Inside a
+  section, the fewest blocks that changed order are now superseded by an
+  identical-text block (reason `reordered in revision N`): a retraction
+  "MOVED within …" with diff `order: same text, new position within …`, the
+  old receipt verifies `SUPERSEDED`, readers have it `pending`, and notes
+  derived from it go stale. Insertions and removals are not reorders;
+  reordering whole sections still carries (docs/FORMAT.md §3.2 step 1a).
+  Two swapped `kubectl` code blocks: 0.8.0 `pulse -- git push` exit 0,
+  0.8.1 exit 77.
+
+### Fixed — a section moved AND renamed, with an edit, read as a removal (live L2-09, S4)
+
+- A block whose section was renamed and whose text also changed was
+  tombstoned ("REMOVED", no successor, no new value) while its new version
+  was "created" elsewhere. A leftover block that closely matches a new block
+  of the same kind under another heading path (word-multiset Dice ≥ 0.6) is
+  now superseded by it: a retraction with `new_heading_path`, the new text
+  and a `section: …; …` diff (docs/FORMAT.md §3.2 step 3b). Renamed
+  headings themselves are still a removal plus an addition.
+
+### Fixed — `## Use C#` was stored as "Use C" (R2-13, S3; lead L1)
+
+- The ATX heading pattern stripped any trailing `#`, so `C#` → `C` (or
+  `F#`, `#` in a channel name at the end of a heading) made no event. A
+  closing sequence is now stripped only when a space precedes it, as in
+  CommonMark. A stored heading that lost its `#` gets one retraction the
+  next time its file is put.
+
+### Fixed — lineage
+
+- **L3.** `Lineage.staleness` memoized results cut short by the depth bound
+  (4) or by a cycle, so in one read (recall, orient, pending) a note
+  evaluated after its descendant or cycle partner could show fresh while
+  derived from a stale note. Cut-short results are no longer reused.
+- **L4.** Lineage inference began at the actor's LATEST orient, so recall →
+  orient → write — what the wake contract tells agents to do — inferred no
+  lineage. It now begins at the first briefing of the cursor chain (each
+  orient that presented the actor's previous cursor continues the session;
+  one without a usable cursor starts a new one). Recall's attention rerank
+  keeps using the latest briefing.
+
+### Fixed — robustness
+
+- **R2-12 (S3; lead L5).** The `likely_typo` hint ran an O(m·n) edit distance on the one
+  differing word: a 6,000-letter word made `orient` take 13 s (past the
+  10 s shim timeout, so the shim failed open) and 10,000 letters ran out of
+  memory. Words over 64 letters are not "ordinary words" for the hint.
+- **R2-16 (S3; lead L6).** For blocks over 400 tokens the word diff fell
+  back to snippets of both whole texts, which for a change near the end
+  were identical prefixes, and `old_text` / `new_text` (and so the reason
+  line) were the same first 160 characters. The diff now trims the common
+  head and tail first and, when the changed region is still too long,
+  shows that region with context; `old_text` / `new_text` (retractions,
+  pending, `stale_derived`) start just before the first changed character
+  when the change lies beyond the first 160. A whitespace-only change is
+  shown visibly (`[-··-]{+·+}`, `→` tab, `⏎` newline), never as an empty
+  marker.
+
+### Tests
+
+- Both bench corpora are permanent tests (`test/stress-corpus.test.ts`):
+  round 1 false format-only 0/38; round 2 (69 cases) every real change a
+  retraction, 0/61 hidden (W01 two spaces → one and W06 tab → space
+  included). The
+  R2-01..03 and L2 repros run through the CLI (orient / pending / pulse
+  exit 77) with a temp HOME and data dir (`test/fix-081.test.ts`), with
+  L1–L6. Two new mutants (emphasis-marker folding, list renumbering) join
+  the six; all eight are killed.
+
+### Bench (agent-memory-bench Track A, branch `kl-0.8.1`, 20 seeds)
+
+- S7 benign-edit quiet rate **10/20 (0.8.0) → 4/20 (0.8.1)**, by design:
+  only `whitespace_trim` and `line_ending_norm` stay quiet;
+  `whitespace_double`, `numbered_list_renumber` and `markdown_emphasis` are
+  now delivered as retractions (the typo, comma, quote, period and hyphen
+  templates already were). S1, S5, S8 and S11: grades and flags identical
+  on every seed.
 
 ### Security — anchor client trusts only countersigned, pinned receipts (hardening track 6)
 
@@ -69,6 +195,7 @@ data dir prints `note: pinned 1 anchor service key(s) … on first use`;
 `verify --remote --offline` on a data dir anchored with ≤ 0.8.0 reports
 `unverified` until one online call pins the key; a non-loopback `http://`
 `anchor_url` exits 2 without `--insecure-http`.
+
 
 ### Fixed — exec-time shims (hardening round 2, track 3: H2-12 … H2-16)
 

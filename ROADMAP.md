@@ -38,6 +38,12 @@ to land. Open an issue if one matters to you.
   re-reads the current version; `kronicle-lite shim install` wrappers check
   `git push` / `terraform apply` / `kubectl apply` / `npm publish` at exec
   time in any client, cleared by that re-read (`shim ack` as override).
+- **0.8.1 — raw text is what agents copy.** Format-only = raw-text
+  equivalence (line endings, trailing whitespace, reflow, blank lines); glob
+  `*`↔`_`, renumbered ports and hard breaks retract (hardening round 2,
+  R2-01..03); block reorders within a section retract; `## Use C#` keeps its
+  `#`; lineage inference spans the cursor chain; staleness memo, typo-hint
+  and long-diff fixes.
 
 ## Next
 

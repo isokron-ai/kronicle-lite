@@ -3,16 +3,20 @@
  * property and mutation tests).
  */
 
+/**
+ * 0.8.1 raw-text equivalence (docs/FORMAT.md §3.8): only line endings,
+ * trailing whitespace, reflow (a line break) inside a paragraph and
+ * blank-line runs.
+ */
 export const FORMAT_ONLY: [string, string, string][] = [
-  ['double space (bench whitespace_double)', 'Status updates go to the  incident channel.', 'Status updates go to the incident channel.'],
   ['reflow', 'Deploys go to the canary first and\nthen to every region in order.', 'Deploys go to the canary first\nand then to every region in order.'],
-  ['emphasis * ↔ _ (bench markdown_emphasis)', 'Never *skip* the canary stage.', 'Never _skip_ the canary stage.'],
-  ['strong ** ↔ __', 'Run the **full** suite.', 'Run the __full__ suite.'],
-  ['bullet - ↔ *', '- Page the on-call.\n- Open a bridge.', '* Page the on-call.\n* Open a bridge.'],
-  ['ordered delimiter ) ↔ . (bench numbered_list_renumber)', '1) Open the runbook.\n2) Follow the checklist.\n3) Acknowledge the page.', '1. Open the runbook.\n2. Follow the checklist.\n3. Acknowledge the page.'],
-  ['renumbering after the first item', '1. Open the runbook.\n2. Follow the checklist.', '1. Open the runbook.\n1. Follow the checklist.'],
-  ['whitespace around inline code', 'Run `make deploy`  now.', 'Run `make deploy` now.'],
+  ['reflow next to inline code', 'Run `make deploy`\nnow.', 'Run `make deploy` now.'],
+  ['reflow with continuation indent', 'Restart the web\n   tier.', 'Restart the web tier.'],
   ['link text reflow', 'See [the deploy\nguide](https://x.example/deploy) first.', 'See [the deploy guide](https://x.example/deploy) first.'],
+  ['CRLF → LF (bench line_ending_norm)', 'Postmortems are blameless.\r\nOwners file follow-ups.', 'Postmortems are blameless.\nOwners file follow-ups.'],
+  ['trailing whitespace (bench whitespace_trim)', 'Escalations follow the paging policy.   ', 'Escalations follow the paging policy.'],
+  ['list item continuation reflow', '- Page the on-call\n  before a deploy.', '- Page the on-call before a deploy.'],
+  ['blank-line runs', 'One.\n\n\n\nTwo.', 'One.\n\nTwo.'],
 ];
 
 export const MUST_ALARM: [string, string, string][] = [
@@ -51,6 +55,33 @@ export const MUST_ALARM: [string, string, string][] = [
   ['table (opaque)', '| a | b |\n|---|---|\n| 1 | 2 |', '| a | b |\n|---|---|\n| 1 |  2 |'],
   ['block quote (opaque)', '> Do not deploy  on Fridays.', '> Do not deploy on Fridays.'],
   ['paragraph → list', 'Page the on-call.', '- Page the on-call.'],
+  // 0.8.1: Markdown-equivalent but different raw text (R2-01 / R2-02 / R2-03) — was format-only in 0.7.0–0.8.0
+  ['emphasis * ↔ _ (bench markdown_emphasis)', 'Never *skip* the canary stage.', 'Never _skip_ the canary stage.'],
+  ['strong ** ↔ __', 'Run the **full** suite.', 'Run the __full__ suite.'],
+  ['bullet - ↔ *', '- Page the on-call.\n- Open a bridge.', '* Page the on-call.\n* Open a bridge.'],
+  ['ordered delimiter ) ↔ . (bench numbered_list_renumber)', '1) Open the runbook.\n2) Follow the checklist.', '1. Open the runbook.\n2. Follow the checklist.'],
+  ['renumbering after the first item', '1. Open the runbook.\n2. Follow the checklist.', '1. Open the runbook.\n1. Follow the checklist.'],
+  ['glob * → _ (R2-02)', 'Delete /tmp/*/cache/* nightly.', 'Delete /tmp/_/cache/_ nightly.'],
+  ['dunder → strong (R2-02)', 'Never edit __init__.py by hand.', 'Never edit **init**.py by hand.'],
+  ['numbered line after a paragraph line (R2-01)', 'Open these ports:\n8080. web\n9090. admin', 'Open these ports:\n8080. web\n9091. admin'],
+  ['backslash hard break vs literal backslash (R2-03)', 'Run deploy\\\n--force after review', 'Run deploy\\ --force after review'],
+  ['reflow across a list marker', 'Page the on-call\n- then open a bridge.', 'Page the on-call - then open a bridge.'],
+  ['reflow before a numbered line', 'Back off\n5. seconds', 'Back off 5. seconds'],
+  ['whitespace inside a double-quoted string', 'Use the key "a  b" here.', 'Use the key "a b" here.'],
+  ['whitespace inside a single-quoted string', "Set SEP to 'a  b' first.", "Set SEP to 'a b' first."],
+  ['whitespace inside inline code', 'Run `make  deploy` now.', 'Run `make deploy` now.'],
+  ['whitespace inside a link destination/title', 'See [x](https://x.example/a "v  1").', 'See [x](https://x.example/a "v 1").'],
+  ['indented line joined', 'Run this:\n    make deploy', 'Run this: make deploy'],
+  ['table row whitespace', 'host | port\n--- | ---\nweb |  80', 'host | port\n--- | ---\nweb | 80'],
+  ['front matter whitespace', '---\nenv:  prod\n---', '---\nenv: prod\n---'],
+  ['heading style closing #', 'Use C#', 'Use C'],
+  // 0.8.1 strict decision: a whitespace run inside one line is not reflow
+  ['double space (bench whitespace_double)', 'Status updates go to the  incident channel.', 'Status updates go to the incident channel.'],
+  ['tab in prose → space (R2 W06)', 'Indent\twith a tab in Makefiles.', 'Indent with a tab in Makefiles.'],
+  ['two spaces in prose → one (R2 W01)', 'Separator is two spaces:  between fields', 'Separator is two spaces: between fields'],
+  ['double space after inline code', 'Run `make deploy`  now.', 'Run `make deploy` now.'],
+  ['heading text double space', 'Deploy  target', 'Deploy target'],
+  ['line break vs double space', 'Restart the\nweb tier.', 'Restart the  web tier.'],
 ];
 
 // [id, label, old, new, note]   label: S = semantic (must retract), C = cosmetic (should stay quiet)

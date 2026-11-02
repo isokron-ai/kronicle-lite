@@ -100,7 +100,7 @@ export function renderSystemStateMarkdown(s: SystemState): string {
   const cosmetic = s.format_only_edits ?? [];
   if (cosmetic.length > 0) {
     const rules = [...new Set(cosmetic.flatMap((c) => c.rules))].join(', ');
-    lines.push(`_${cosmetic.length} format-only edit(s) recorded (${rules}; same Markdown structure, identical text): nothing to reconcile (include_format_only: true lists them)._`);
+    lines.push(`_${cosmetic.length} format-only edit(s) recorded (${rules}; identical raw text up to whitespace): nothing to reconcile (include_format_only: true lists them)._`);
   }
   if (s.scope && s.scope.hidden_retractions > 0) {
     lines.push(`_${s.scope.hidden_retractions} retraction(s) from other projects hidden and not reviewed (all_projects: true shows them)._`);

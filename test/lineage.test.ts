@@ -104,10 +104,10 @@ describe('derived_from (explicit)', () => {
   it('format-only source edits keep the note fresh; a moved section makes it stale', () => {
     const { store, target } = setup();
     store.docs.putDocument({ slug: 'note', title: 'Note', markdown: '# Note\n\nDeploy target note: blue-7.\n', actor_id: 'agent', derived_from: [target], infer_lineage: false });
-    store.docs.supersedeBlock({ block_id: target.block_id, new_content: 'Deploys go to the   cluster `blue-7`\nfirst.', reason: 'reflow', actor_id: 'human' });
+    store.docs.supersedeBlock({ block_id: target.block_id, new_content: 'Deploys go to the cluster `blue-7`\nfirst.', reason: 'reflow', actor_id: 'human' });
     expect(noteHit(store).authority_reason).toBe('no_source');
     // Move the paragraph under another heading (same text): a change of meaning.
-    store.docs.putDocument({ slug: 'deploy', title: 'Deploy', markdown: '# Deploy\n\n## Target\n\n## Notes\n\nDeploys go to the   cluster `blue-7`\nfirst.\n\nPage the on-call before a deploy.\n', actor_id: 'human' });
+    store.docs.putDocument({ slug: 'deploy', title: 'Deploy', markdown: '# Deploy\n\n## Target\n\n## Notes\n\nDeploys go to the cluster `blue-7`\nfirst.\n\nPage the on-call before a deploy.\n', actor_id: 'human' });
     const hit = noteHit(store);
     expect(hit.authority_reason).toBe('stale_derived');
     expect(hit.stale_derived![0]!.change).toBe('moved');
@@ -378,7 +378,7 @@ describe('pending: version-bound reconciliation', () => {
   it('format-only edits are never pending; the author of a change has nothing pending for it', () => {
     const { store, target } = setup();
     store.recall.recall({ query: 'deploys cluster', actor_id: 'agent' });
-    store.docs.supersedeBlock({ block_id: target.block_id, new_content: 'Deploys go to the  cluster `blue-7` first.', reason: 'ws', actor_id: 'human' });
+    store.docs.supersedeBlock({ block_id: target.block_id, new_content: 'Deploys go to the\ncluster `blue-7` first.', reason: 'reflow', actor_id: 'human' });
     expect(store.lineage.pending('agent').count).toBe(0);
     store.recall.recall({ query: 'deploys cluster', actor_id: 'writer' });
     const live = store.docs.liveBlocks(store.docs.getDocument('deploy')!.doc_id).find((b) => b.content.includes('blue-7'))!;

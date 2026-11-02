@@ -20,6 +20,36 @@ export function snippet(s: string, max = 160): string {
   return one.length <= max ? one : one.slice(0, max - 1).trimEnd() + '…';
 }
 
+/**
+ * 0.8.1 (R2-16): bounded snippets of an old and a new text that show the
+ * change. When both fit, they are `snippet()`s; when the change lies beyond
+ * the first `max` characters (a long block), both windows start shortly
+ * before the first changed character, so `old_text` and `new_text` never
+ * read the same for a real change of visible text.
+ */
+export function changeSnippets(oldText: string, newText: string, max = 160): [string, string] {
+  const a = snippet(oldText, max);
+  const b = snippet(newText, max);
+  if (a !== b || oldText === newText) return [a, b];
+  const x = oldText.replace(/\s+/g, ' ').trim();
+  const y = newText.replace(/\s+/g, ' ').trim();
+  if (x === y) return [a, b]; // whitespace-only change: the diff shows it
+  let i = 0;
+  while (i < x.length && i < y.length && x[i] === y[i]) i++;
+  const start = Math.max(0, i - 40);
+  const win = (t: string) => {
+    const body = t.slice(start, start + max - 2);
+    return `${start > 0 ? '…' : ''}${body}${start + max - 2 < t.length ? '…' : ''}`;
+  };
+  return [win(x), win(y)];
+}
+
+/** A removed or added run that is only whitespace is shown visibly (· space, → tab, ⏎ newline), never as an empty marker. */
+function visible(t: string): string {
+  const flat = t.replace(/\s+/g, ' ').trim();
+  return flat.length > 0 ? flat : t.replace(/ /g, '·').replace(/\t/g, '→').replace(/\r?\n/g, '⏎');
+}
+
 type Op = { op: '=' | '-' | '+'; text: string };
 
 function lcsOps(a: string[], b: string[]): Op[] {
@@ -82,20 +112,46 @@ function elide(text: string, where: 'start' | 'middle' | 'end'): string {
 /**
  * `old → new` as one line: unchanged words kept around each change, removed
  * words in `[-…-]`, added in `{+…+}`, at most `max` characters.
+ *
+ * The common head and tail are matched first (linear), so the LCS only runs
+ * on the changed region. 0.8.1: when that region is still too long for the
+ * O(n·m) LCS, the fallback shows the changed region with a few words of
+ * context — before, it showed `[-…-]{+…+}` snippets of the two WHOLE texts,
+ * which for a long block were identical prefixes with no visible change.
  */
 export function wordDiff(oldText: string, newText: string, max = 400): string {
   const a = tokens(oldText);
   const b = tokens(newText);
+  let pre = 0;
+  while (pre < a.length && pre < b.length && a[pre] === b[pre]) pre++;
+  let suf = 0;
+  while (suf < a.length - pre && suf < b.length - pre && a[a.length - 1 - suf] === b[b.length - 1 - suf]) suf++;
+  const midA = a.slice(pre, a.length - suf);
+  const midB = b.slice(pre, b.length - suf);
   let s: string;
-  if (a.length > MAX_TOKENS || b.length > MAX_TOKENS) {
-    s = `[-${snippet(oldText, Math.floor(max / 2) - 6)}-]{+${snippet(newText, Math.floor(max / 2) - 6)}+}`;
+  if (midA.length > MAX_TOKENS || midB.length > MAX_TOKENS) {
+    const head = pre > 0 ? elide(a.slice(0, pre).join(''), 'start') : '';
+    const tail = suf > 0 ? elide(a.slice(a.length - suf).join(''), 'end') : '';
+    const room = Math.max(40, Math.floor((max - head.length - tail.length) / 2) - 6);
+    s = `${head}[-${snippet(midA.join(''), room)}-]{+${snippet(midB.join(''), room)}+}${tail}`.replace(/\s+/g, ' ').trim();
   } else {
-    const ops = lcsOps(a, b);
+    const ops: Op[] = [];
+    if (pre > 0) ops.push({ op: '=', text: a.slice(0, pre).join('') });
+    for (const o of lcsOps(midA, midB)) {
+      const last = ops[ops.length - 1];
+      if (last && last.op === o.op) last.text += o.text;
+      else ops.push({ ...o });
+    }
+    if (suf > 0) {
+      const t = a.slice(a.length - suf).join('');
+      const last = ops[ops.length - 1];
+      if (last && last.op === '=') last.text += t;
+      else ops.push({ op: '=', text: t });
+    }
     s = ops
       .map((o, k) => {
-        const flat = o.text.replace(/\s+/g, ' ');
-        if (o.op === '-') return `[-${flat.trim()}-]`;
-        if (o.op === '+') return `{+${flat.trim()}+}`;
+        if (o.op === '-') return `[-${visible(o.text)}-]`;
+        if (o.op === '+') return `{+${visible(o.text)}+}`;
         return elide(o.text, k === 0 ? 'start' : k === ops.length - 1 ? 'end' : 'middle');
       })
       .join('')

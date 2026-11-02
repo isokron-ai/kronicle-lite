@@ -27,7 +27,7 @@ import {
   type StaleWriteAdvisory,
 } from './drift.js';
 import { scrubDeep } from '../secrets/guard.js';
-import { FlightRecorder } from './flight-recorder.js';
+import { FlightRecorder, type FlightRecord } from './flight-recorder.js';
 import { __mutants, type FormatRule } from './cosmetic.js';
 import { computeRetractions, type Retraction } from './retraction.js';
 import { snippet, wordDiff } from './textdiff.js';
@@ -68,8 +68,8 @@ export interface OrientInput {
    */
   project?: ProjectScope | null | undefined;
   /**
-   * Unreleased: also list format-only edits (same Markdown tree, identical
-   * text) in `retractions`. Default false: they are recorded and listed under
+   * Unreleased: also list format-only edits (identical raw text up to
+   * whitespace and reflow, docs/FORMAT.md §3.8) in `retractions`. Default false: they are recorded and listed under
    * `format_only_edits` only. `include_cosmetic` is the earlier name.
    */
   include_format_only?: boolean | undefined;
@@ -295,6 +295,59 @@ export class Orient {
       }
     }
     return this.recorder.latestForActor(actor_id)?.issued_at ?? null;
+  }
+
+  /**
+   * 0.8.1: where the actor's current SESSION began, for lineage inference:
+   * the first briefing of the cursor chain that leads to the briefing behind
+   * `cursor` (else to the actor's latest briefing). A briefing continues the
+   * session when it was served from a cursor the actor presented (recovery
+   * `presented` / `presented_compact`); one served without a usable cursor
+   * (flight recorder, genesis, a stale cursor) starts a new session. Before,
+   * inference started at the LATEST orient, so recall → orient → write (the
+   * wake contract: re-orient before writing) inferred no lineage. null when
+   * the actor never oriented.
+   */
+  sessionOrigin(actor_id: string, cursor?: string | undefined): string | null {
+    let b: FlightRecord | null = null;
+    if (cursor) {
+      try {
+        const parsed = parseAnyCursor(cursor, actor_id, this.secret);
+        if (parsed.form === 'full') {
+          if (parsed.body.actor_id === actor_id) {
+            b = this.recorder.briefingIssuedAt(actor_id, parsed.body.issued_at);
+            // A cursor whose briefing was not recorded (focus=pulse): its issue time is all we know.
+            if (!b) return parsed.body.issued_at;
+          }
+        } else {
+          b = this.recorder.briefingAt(actor_id, parsed.chain_seq);
+        }
+      } catch {
+        // fall through to the flight recorder
+      }
+    }
+    b ??= this.recorder.latestForActor(actor_id);
+    if (!b) return null;
+    let origin = b.issued_at;
+    const seen = new Set<string>([b.briefing_id]);
+    for (let hops = 0; hops < 10_000; hops++) {
+      const rec = b.record['recovery'] as Partial<Recovery> | undefined;
+      if (!rec || (rec.method !== 'presented' && rec.method !== 'presented_compact')) break;
+      const prev: FlightRecord | null =
+        typeof rec.cursor_issued_at === 'string'
+          ? this.recorder.briefingIssuedAt(actor_id, rec.cursor_issued_at)
+          : typeof rec.from_seq === 'number'
+            ? this.recorder.briefingAtBefore(actor_id, rec.from_seq, b.issued_at, b.briefing_id)
+            : null;
+      if (!prev || seen.has(prev.briefing_id)) {
+        if (typeof rec.cursor_issued_at === 'string' && rec.cursor_issued_at < origin) origin = rec.cursor_issued_at;
+        break;
+      }
+      seen.add(prev.briefing_id);
+      b = prev;
+      if (b.issued_at < origin) origin = b.issued_at;
+    }
+    return origin;
   }
 
   recover(actor_id: string, since_cursor: string | undefined, head: ChainHead): Recovery {

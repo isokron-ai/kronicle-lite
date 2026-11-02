@@ -383,12 +383,14 @@ directories with a debounce (150 ms; `--debounce`) plus a polling pass
 A file moved inside the project with its content intact is a **rename**,
 not a removal: the document follows it (`document.renamed`, same blocks and
 receipts, no retraction), whichever of the two paths is synced first. Edits
-that are **format-only** — the same Markdown tree with byte-identical text
-(reflow, whitespace runs, `*`↔`_` emphasis, bullet or list-delimiter style)
-— are chained like any other but reported under `format_only_edits`, not as
-retractions. Every other change is a retraction with its diff: a changed
-character, quote, date, case or hyphen, and a paragraph moved to another
-section. A typo-shaped one carries `hint: likely_typo`, a label only.
+that are **format-only** — the same raw text up to line endings, trailing
+whitespace, reflow inside a paragraph and blank lines (not inside code,
+quotes or link targets) — are chained like any other but reported under
+`format_only_edits`, not as retractions. Every other change is a retraction
+with its diff: a changed character, quote, date, case or hyphen, a
+double space or tab inside a line, an emphasis or list marker (`*`↔`_`, `1)`↔`1.`, renumbering: agents copy raw
+text into commands), a paragraph moved to another section, and blocks
+reordered within a section. A typo-shaped one carries `hint: likely_typo`, a label only.
 
 **Inside Claude Code: hooks, not a watcher.** Claude Code already watches
 files: a `SessionStart` hook can return `watchPaths`, and a `FileChanged`

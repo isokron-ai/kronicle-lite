@@ -24,8 +24,8 @@ import { rng } from './helpers/format-only.js';
 type Rand = () => number;
 const pick = <T>(r: Rand, xs: readonly T[]): T => xs[Math.floor(r() * xs.length)]!;
 
-/** Same text, one space doubled: format-only (whitespace) under FORMAT §3.8. */
-const formatOnly = (t: string) => t.replace(' ', '  ');
+/** Same text, reflowed (the first space ↔ a line break): format-only (whitespace) under FORMAT §3.8 (0.8.1: only a line break is reflow). */
+const formatOnly = (t: string) => (t.includes('\n') ? t.replace('\n', ' ') : t.replace(' ', '\n'));
 let realN = 0;
 const realChange = (t: string) => `${t.replace(/ rev\d+\.$/, '.').replace(/\.$/, '')} rev${++realN}.`;
 

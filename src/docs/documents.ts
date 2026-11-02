@@ -528,6 +528,7 @@ export class DocumentStore {
         old_block_id: r.old.block_id,
         new_block_id: randomUUID(),
         parsed: r.next,
+        reordered: r.reordered === true,
       }));
 
       const liveBlockIds: string[] = [];
@@ -586,7 +587,7 @@ export class DocumentStore {
             doc_id,
             doc_slug: args.slug,
             revision,
-            reason: `replaced in revision ${revision}`,
+            reason: `${r.reordered ? 'reordered' : 'replaced'} in revision ${revision}`,
           },
         });
       }
@@ -988,9 +989,13 @@ function headingLevelOf(b: BlockRow): number {
   return Math.max(1, Math.min(6, b.level || 1));
 }
 
+/** The supersession reason planRevision writes for a reorder within a section (0.8.1, step 1a). */
+export const REORDERED_RE = /^reordered in revision \d+$/;
+
 interface RevisionPlan {
   carried: { old: BlockRow; next: ParsedBlock }[];
-  replaced: { old: BlockRow; next: ParsedBlock }[];
+  /** `reordered` (0.8.1): same text, same section, new position relative to its neighbours. */
+  replaced: { old: BlockRow; next: ParsedBlock; reordered?: true }[];
   created: ParsedBlock[];
   tombstoned: BlockRow[];
 }
@@ -1000,13 +1005,23 @@ interface RevisionPlan {
  *   1. Same content_hash, kind AND heading_path → carried (block id
  *      preserved, position updated). A reorder of whole sections keeps
  *      every heading path, so it carries.
+ *   1a. 0.8.1: inside one section (same heading_path) carried blocks must
+ *      keep their relative order: order is meaning (runbook steps). The
+ *      fewest blocks that changed order (those outside a longest increasing
+ *      run of old positions) are superseded by an identical-text block
+ *      (`reordered`), so receipts for them verify SUPERSEDED and orient
+ *      lists "MOVED within …".
  *   1b. Unreleased: same content_hash and kind under a DIFFERENT heading
  *      path (the paragraph moved to another section, or an ancestor heading
  *      was renamed or re-levelled) → superseded by a block with the same
  *      text: "Allowed › X" → "Forbidden › X" is a change of meaning, so
  *      receipts for the old block verify as SUPERSEDED and orient lists it.
  *   2. Remaining old/new paired in order within the same (kind, heading_path).
- *   3. Leftover old → tombstoned; leftover new → created.
+ *   3. Leftover old → tombstoned; leftover new → created, except:
+ *   3b. 0.8.1: a leftover non-heading old block closely matching a leftover
+ *      new block of the same kind under another heading path (word-multiset
+ *      Dice ≥ 0.6) is superseded by it: moved and edited, reported with
+ *      `new_heading_path` and a diff instead of "REMOVED".
  */
 export function planRevision(oldLive: readonly BlockRow[], next: readonly ParsedBlock[]): RevisionPlan {
   const plan: RevisionPlan = { carried: [], replaced: [], created: [], tombstoned: [] };
@@ -1023,6 +1038,31 @@ export function planRevision(oldLive: readonly BlockRow[], next: readonly Parsed
       pending.push(n);
     }
   }
+  // 1a. Order within a section.
+  const bySection = new Map<string, number[]>();
+  plan.carried.forEach((c, k) => {
+    const key = `${c.next.kind === 'heading' ? 'h' : 'b'}\u0000${c.old.heading_path}`;
+    const list = bySection.get(key);
+    if (list) list.push(k);
+    else bySection.set(key, [k]);
+  });
+  const moved = new Set<number>();
+  for (const ks of bySection.values()) {
+    if (ks.length < 2) continue;
+    const keep = longestIncreasing(ks.map((k) => plan.carried[k]!.old.ordinal));
+    ks.forEach((k, idx) => {
+      if (!keep.has(idx)) moved.add(k);
+    });
+  }
+  if (moved.size > 0) {
+    const stay: RevisionPlan['carried'] = [];
+    plan.carried.forEach((c, k) => {
+      if (moved.has(k)) plan.replaced.push({ old: c.old, next: c.next, reordered: true });
+      else stay.push(c);
+    });
+    plan.carried = stay;
+  }
+
   const newUnmatched: ParsedBlock[] = [];
   for (const n of pending) {
     const i = oldUnmatched.findIndex((o) => o.content_hash === n.content_hash && o.kind === n.kind);
@@ -1044,6 +1084,79 @@ export function planRevision(oldLive: readonly BlockRow[], next: readonly Parsed
       plan.created.push(n);
     }
   }
+  // 3b. (0.8.1) Moved AND edited: a leftover old block whose text reappears, closely, as a leftover
+  //     new block of the same kind under another heading path is superseded by it (a move with a
+  //     diff), not tombstoned with no successor. Headings are not paired (a renamed heading is a
+  //     removal plus an addition). Close = word-multiset Dice ≥ MOVE_MIN_SIMILARITY, best match first.
+  if (plan.created.length > 0 && oldUnmatched.length > 0 && plan.created.length * oldUnmatched.length <= 10_000) {
+    const bags = new Map<string, Map<string, number>>();
+    const bag = (key: string, text: string) => {
+      let b = bags.get(key);
+      if (!b) {
+        b = new Map();
+        for (const w of text.split(/\s+/)) if (w) b.set(w, (b.get(w) ?? 0) + 1);
+        bags.set(key, b);
+      }
+      return b;
+    };
+    const dice = (a: Map<string, number>, b: Map<string, number>) => {
+      let na = 0;
+      let nb = 0;
+      let both = 0;
+      for (const v of a.values()) na += v;
+      for (const v of b.values()) nb += v;
+      for (const [w, v] of a) both += Math.min(v, b.get(w) ?? 0);
+      return na + nb === 0 ? 0 : (2 * both) / (na + nb);
+    };
+    const stillCreated: ParsedBlock[] = [];
+    for (const n of plan.created) {
+      if (n.kind === 'heading') {
+        stillCreated.push(n);
+        continue;
+      }
+      const nb = bag(`n${n.ordinal}`, n.content);
+      let best = -1;
+      let bestScore = MOVE_MIN_SIMILARITY;
+      oldUnmatched.forEach((o, i) => {
+        if (o.kind !== n.kind || o.heading_path === joinHeadingPath(n.heading_path)) return;
+        const sc = dice(bag(`o${o.block_id}`, o.content), nb);
+        if (sc >= bestScore && (best < 0 || sc > bestScore)) {
+          best = i;
+          bestScore = sc;
+        }
+      });
+      if (best >= 0) {
+        plan.replaced.push({ old: oldUnmatched[best]!, next: n });
+        oldUnmatched.splice(best, 1);
+      } else {
+        stillCreated.push(n);
+      }
+    }
+    plan.created = stillCreated;
+  }
   plan.tombstoned = oldUnmatched;
   return plan;
+}
+
+/** 0.8.1: how close (word-multiset Dice) a block under a new heading path must be to count as the same block moved and edited. */
+export const MOVE_MIN_SIMILARITY = 0.6;
+
+/** Indices (into `xs`) of one longest strictly increasing subsequence; ties keep the earliest. O(n log n). */
+function longestIncreasing(xs: readonly number[]): Set<number> {
+  const tails: number[] = []; // index into xs of the smallest tail of a run of each length
+  const prev: number[] = new Array<number>(xs.length).fill(-1);
+  for (let i = 0; i < xs.length; i++) {
+    let lo = 0;
+    let hi = tails.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (xs[tails[mid]!]! < xs[i]!) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo > 0) prev[i] = tails[lo - 1]!;
+    tails[lo] = i;
+  }
+  const out = new Set<number>();
+  for (let k = tails.length > 0 ? tails[tails.length - 1]! : -1; k >= 0; k = prev[k]!) out.add(k);
+  return out;
 }
