@@ -586,8 +586,8 @@ export class Orient {
   }
 
   /**
-   * 0.8.1 (C2-09): focus=retractions for an actor that never oriented and
-   * never read anything. A retraction tells an agent that something it relied
+   * 0.8.1 (C2-09): focus=retractions for an actor that presents no cursor,
+   * never oriented and never read anything. A retraction tells an agent that something it relied
    * on changed; it relied on nothing, so there is nothing to retract (what it
    * reads from now on is current, and `pending` still covers pending_actor).
    * The delta is the counts a retractions briefing carries, from the
@@ -652,7 +652,9 @@ export class Orient {
     let carried_notes: CarriedNote[] | null = null;
 
     // 0.8.1 (C2-09): focus=retractions at first contact answers from indexes.
-    const firstContact = focus === 'retractions' && recovery.method === 'genesis' && !this.hasReadAnything(input.actor_id);
+    // A presented cursor that was rejected is not first contact: the caller believes it has a
+    // position, so it gets the full replay as before.
+    const firstContact = focus === 'retractions' && recovery.method === 'genesis' && !input.since_cursor && !this.hasReadAnything(input.actor_id);
     if (firstContact) {
       const keys = input.project && input.project.keys.length > 0 ? input.project.keys : null;
       const fc = this.firstContactRetractions(head, keys);

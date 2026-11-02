@@ -255,6 +255,15 @@ describe('C2-09: first-contact orient with focus=retractions answers from indexe
     expect(slow.scope!.hidden_events).toBeGreaterThan(0);
   });
 
+  it('a presented cursor that is rejected (another actor\'s) is not first contact: full listing', () => {
+    const kl = bigStore();
+    const other = kl.orient.getSystemState({ actor_id: 'agent', focus: 'pulse' }).cursor;
+    const s = kl.orient.getSystemState({ actor_id: 'agent2', since_cursor: other, focus: 'retractions' });
+    expect(s.recovery).toMatchObject({ method: 'genesis' });
+    expect(s.recovery.cursor_error).toMatch(/issued to actor "agent"/);
+    expect(s.retractions!.length).toBeGreaterThan(0);
+  });
+
   it('the unscoped counts come from the (event_type, seq) index, not a table scan', () => {
     const kl = bigStore();
     const sql = preparedDuring(kl, () => kl.orient.getSystemState({ actor_id: 'newcomer', focus: 'retractions' }));

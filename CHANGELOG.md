@@ -328,7 +328,8 @@ data dir prints `note: pinned 1 anchor service key(s) … on first use`;
   the store; it recreates the dropped index and writes unpruned rows, which
   the next 0.8.1 write prunes.
 - **C2-09 — a first-contact `orient --focus retractions` answers from
-  indexes.** An actor with no briefing and no reads or receipts has relied
+  indexes.** An actor that presents no cursor and has no briefing and no
+  reads or receipts has relied
   on nothing, so there is nothing to retract: `retractions` is `[]`, the
   delta counts come from the `(event_type, seq)` index (identical to the
   full fold; with a project scope one SQL pass counts `hidden_events`), and
@@ -336,8 +337,8 @@ data dir prints `note: pinned 1 anchor service key(s) … on first use`;
   instead of the whole chain. 10k docs (60k events), same loaded host, 0.8.0
   → 0.8.1: in-process 4.7 s → 0.67 s (scoped 7.1 s → 1.1 s); CLI
   `orient --focus retractions --all-projects` 2.2–10.1 s (six runs) → 0.39–1.5 s
-  (four runs). An actor that read anything before its first orient still gets
-  the full listing. The shims' genesis path (which re-seeds) benefits most.
+  (four runs). An actor that read anything before its first orient, or that
+  presents a cursor that is rejected, still gets the full listing.
   In the track's 400-loop server soak the pulse p95 no longer climbs with
   the read log (0.8.0: 98 → 184 and 49 → 176 ms; 0.8.1: 30 → 51 and
   56 → 28 ms).
