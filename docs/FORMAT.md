@@ -206,7 +206,11 @@ On a re-put, live blocks are compared to the freshly parsed set:
 2. remaining old/new paired in order within the same `(kind, heading_path)` →
    old is **superseded** by new;
 3. leftover old → **tombstoned** (`removed in revision N`); leftover new →
-   **created**.
+   **created**, except:
+3b. (0.8.1) a leftover non-heading old block that closely matches a leftover
+   new block of the same kind under another heading path (word-multiset
+   Dice ≥ 0.6, best match first) is **superseded** by it: moved and edited,
+   reported with `new_heading_path`, the new text and a diff, not "REMOVED".
 
 `supersede_block` and `tombstone_block` act on one live block and append a
 `document.revised` event carrying the re-rendered markdown.

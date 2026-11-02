@@ -14,6 +14,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { classifyEdit, editDistance, formatCanon } from '../src/orient/cosmetic.js';
+import { KronicleLite } from '../src/store.js';
 import { FORMAT_ONLY, MUST_ALARM } from './fixtures/format-only-cases.js';
 
 describe('classifyEdit: raw-text equivalence', () => {
@@ -72,6 +73,26 @@ describe('classifyEdit: raw-text equivalence', () => {
       classifyEdit(t, `${t}z`);
       expect(Date.now() - t0, JSON.stringify(unit)).toBeLessThan(3_000);
     }
+  });
+
+  it('R2-12 probe: orient and pending stay fast with an 8,000-letter word changed by one letter', () => {
+    let w = '';
+    let x = 1;
+    for (let i = 0; i < 8000; i++) {
+      x = (x * 1103515245 + 12345) >>> 0;
+      w += String.fromCharCode(97 + (x % 26));
+    }
+    const w2 = w.slice(0, -1) + (w.at(-1) === 'a' ? 'b' : 'a');
+    const kl = new KronicleLite({ memory: true });
+    kl.docs.putDocument({ slug: 'k', title: 'K', markdown: `# K\n\nFingerprint ${w} is trusted.\n`, actor_id: 'w' });
+    kl.recall.recall({ query: 'fingerprint trusted', actor_id: 'agent' });
+    const c = kl.orient.getSystemState({ actor_id: 'hook', focus: 'pulse' }).cursor;
+    kl.docs.putDocument({ slug: 'k', title: 'K', markdown: `# K\n\nFingerprint ${w2} is trusted.\n`, actor_id: 'w' });
+    const t0 = Date.now();
+    expect(kl.orient.getSystemState({ actor_id: 'hook', since_cursor: c, focus: 'retractions' }).retractions).toHaveLength(1);
+    expect(kl.lineage.pending('agent').count).toBe(1);
+    expect(Date.now() - t0).toBeLessThan(5_000);
+    kl.close();
   });
 
   it('L5: one huge letters-only word cannot stall the typo hint (bounded at 64 letters)', () => {

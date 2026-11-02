@@ -20,6 +20,36 @@ export function snippet(s: string, max = 160): string {
   return one.length <= max ? one : one.slice(0, max - 1).trimEnd() + '…';
 }
 
+/**
+ * 0.8.1 (R2-16): bounded snippets of an old and a new text that show the
+ * change. When both fit, they are `snippet()`s; when the change lies beyond
+ * the first `max` characters (a long block), both windows start shortly
+ * before the first changed character, so `old_text` and `new_text` never
+ * read the same for a real change of visible text.
+ */
+export function changeSnippets(oldText: string, newText: string, max = 160): [string, string] {
+  const a = snippet(oldText, max);
+  const b = snippet(newText, max);
+  if (a !== b || oldText === newText) return [a, b];
+  const x = oldText.replace(/\s+/g, ' ').trim();
+  const y = newText.replace(/\s+/g, ' ').trim();
+  if (x === y) return [a, b]; // whitespace-only change: the diff shows it
+  let i = 0;
+  while (i < x.length && i < y.length && x[i] === y[i]) i++;
+  const start = Math.max(0, i - 40);
+  const win = (t: string) => {
+    const body = t.slice(start, start + max - 2);
+    return `${start > 0 ? '…' : ''}${body}${start + max - 2 < t.length ? '…' : ''}`;
+  };
+  return [win(x), win(y)];
+}
+
+/** A removed or added run that is only whitespace is shown visibly (· space, → tab, ⏎ newline), never as an empty marker. */
+function visible(t: string): string {
+  const flat = t.replace(/\s+/g, ' ').trim();
+  return flat.length > 0 ? flat : t.replace(/ /g, '·').replace(/\t/g, '→').replace(/\r?\n/g, '⏎');
+}
+
 type Op = { op: '=' | '-' | '+'; text: string };
 
 function lcsOps(a: string[], b: string[]): Op[] {
@@ -120,9 +150,8 @@ export function wordDiff(oldText: string, newText: string, max = 400): string {
     }
     s = ops
       .map((o, k) => {
-        const flat = o.text.replace(/\s+/g, ' ');
-        if (o.op === '-') return `[-${flat.trim()}-]`;
-        if (o.op === '+') return `{+${flat.trim()}+}`;
+        if (o.op === '-') return `[-${visible(o.text)}-]`;
+        if (o.op === '+') return `{+${visible(o.text)}+}`;
         return elide(o.text, k === 0 ? 'start' : k === ops.length - 1 ? 'end' : 'middle');
       })
       .join('')

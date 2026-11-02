@@ -34,7 +34,7 @@ import type { Db } from '../db/open.js';
 type Statement = BetterSqlite3.Statement<unknown[]>;
 import { isInstructionSlug, REORDERED_RE, splitHeadingPath, type BlockRow, type DocumentStore } from '../docs/documents.js';
 import { classifyEdit } from '../orient/cosmetic.js';
-import { snippet, wordDiff } from '../orient/textdiff.js';
+import { changeSnippets, snippet, wordDiff } from '../orient/textdiff.js';
 
 /** One lineage edge as written on the chain. */
 export interface LineageRef {
@@ -301,8 +301,8 @@ export class Lineage {
         seq: ch.seq,
         current_block_id: live ? w.head.block_id : null,
         current_content_hash: live ? w.head.content_hash : null,
-        old_text: snippet(src.content),
-        new_text: live ? snippet(w.head.content) : null,
+        old_text: live ? changeSnippets(src.content, w.head.content)[0] : snippet(src.content),
+        new_text: live ? changeSnippets(src.content, w.head.content)[1] : null,
         inferred: prev ? inferred && out[prev.at]!.inferred : inferred,
       };
       if (prev) out[prev.at] = entry;
@@ -658,8 +658,8 @@ export class Lineage {
       heading_path: splitHeadingPath(w.head.heading_path),
       read: { block_id: read.block_id, content_hash: read.content_hash, head_seq },
       current: live ? { block_id: w.head.block_id, content_hash: w.head.content_hash } : null,
-      old_text: snippet(read.content),
-      new_text: live ? snippet(w.head.content) : null,
+      old_text: live ? changeSnippets(read.content, w.head.content)[0] : snippet(read.content),
+      new_text: live ? changeSnippets(read.content, w.head.content)[1] : null,
       diff: live
         ? read.heading_path !== w.head.heading_path
           ? `section: ${wordDiff(read.heading_path.replaceAll(' > ', ' › '), w.head.heading_path.replaceAll(' > ', ' › '))}${read.content === w.head.content ? '' : `; ${wordDiff(read.content, w.head.content)}`}`

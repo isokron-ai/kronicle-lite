@@ -7,8 +7,10 @@ uses semantic versioning once past 0.x.
 ## [0.8.1] — 2026-11-01
 
 Safety patch from agent-memory-bench hardening round 2 (branch
-`hardening-retractions`, findings R2-01..03) and six leads from the same
-review, each reproduced on 0.8.0 before it was fixed, plus the anchor-client
+`hardening-retractions`, findings R2-01..03, R2-06, R2-12, R2-13, R2-16;
+the last four were first filed as leads L2, L5, L1, L6 below), two more
+leads from the same review (L3, L4) and one live-agent finding (L2-09),
+each reproduced on 0.8.0 before it was fixed, plus the anchor-client
 hardening (track 6, A2-*) and the exec-time shim hardening (track 3,
 H2-*) below. No hash recipe,
 receipt, cursor or event layout changed; stores written by 0.8.0 open and
@@ -48,7 +50,7 @@ verify unchanged.
   quiet rate): see below.
 - `format_rules` only ever holds `whitespace` now (`markup` stays in the type).
 
-### Fixed — a reorder inside a section made no event (L2)
+### Fixed — a reorder inside a section made no event (R2-06, S2; lead L2)
 
 - `planRevision` carried blocks by content hash and heading path regardless
   of order, so swapping two runbook steps made no event at all. Inside a
@@ -58,8 +60,20 @@ verify unchanged.
   old receipt verifies `SUPERSEDED`, readers have it `pending`, and notes
   derived from it go stale. Insertions and removals are not reorders;
   reordering whole sections still carries (docs/FORMAT.md §3.2 step 1a).
+  Two swapped `kubectl` code blocks: 0.8.0 `pulse -- git push` exit 0,
+  0.8.1 exit 77.
 
-### Fixed — `## Use C#` was stored as "Use C" (L1)
+### Fixed — a section moved AND renamed, with an edit, read as a removal (live L2-09, S4)
+
+- A block whose section was renamed and whose text also changed was
+  tombstoned ("REMOVED", no successor, no new value) while its new version
+  was "created" elsewhere. A leftover block that closely matches a new block
+  of the same kind under another heading path (word-multiset Dice ≥ 0.6) is
+  now superseded by it: a retraction with `new_heading_path`, the new text
+  and a `section: …; …` diff (docs/FORMAT.md §3.2 step 3b). Renamed
+  headings themselves are still a removal plus an addition.
+
+### Fixed — `## Use C#` was stored as "Use C" (R2-13, S3; lead L1)
 
 - The ATX heading pattern stripped any trailing `#`, so `C#` → `C` (or
   `F#`, `#` in a channel name at the end of a heading) made no event. A
@@ -82,14 +96,20 @@ verify unchanged.
 
 ### Fixed — robustness
 
-- **L5.** The `likely_typo` hint ran an O(m·n) edit distance on the one
+- **R2-12 (S3; lead L5).** The `likely_typo` hint ran an O(m·n) edit distance on the one
   differing word: a 6,000-letter word made `orient` take 13 s (past the
   10 s shim timeout, so the shim failed open) and 10,000 letters ran out of
   memory. Words over 64 letters are not "ordinary words" for the hint.
-- **L6.** For blocks over 400 tokens the word diff fell back to snippets of
-  both whole texts, which for a change near the end were identical
-  prefixes. The diff now trims the common head and tail first and, when
-  the changed region is still too long, shows that region with context.
+- **R2-16 (S3; lead L6).** For blocks over 400 tokens the word diff fell
+  back to snippets of both whole texts, which for a change near the end
+  were identical prefixes, and `old_text` / `new_text` (and so the reason
+  line) were the same first 160 characters. The diff now trims the common
+  head and tail first and, when the changed region is still too long,
+  shows that region with context; `old_text` / `new_text` (retractions,
+  pending, `stale_derived`) start just before the first changed character
+  when the change lies beyond the first 160. A whitespace-only change is
+  shown visibly (`[-··-]{+·+}`, `→` tab, `⏎` newline), never as an empty
+  marker.
 
 ### Tests
 

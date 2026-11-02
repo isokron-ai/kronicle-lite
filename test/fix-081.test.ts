@@ -11,6 +11,7 @@
  *       chain), so recall → orient → write still infers what was read;
  *   L5  (test/cosmetic.test.ts) the typo hint is bounded;
  *   L6  the word diff of a long block shows the changed words.
+ * Round-2 ids for the same leads: L1 = R2-13, L2 = R2-06, L5 = R2-12, L6 = R2-16.
  * CLI runs pin HOME and the data dir to temp paths.
  */
 
@@ -19,7 +20,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { parseMarkdown } from '../src/docs/parser.js';
-import { wordDiff } from '../src/orient/textdiff.js';
+import { changeSnippets, wordDiff } from '../src/orient/textdiff.js';
 import { KronicleLite } from '../src/store.js';
 import { cleanEnv, runCli, tempDir, write } from './helpers/fs.js';
 
@@ -39,6 +40,7 @@ describe('R2-01..03 through the CLI: retraction, pending, pulse refuses', () => 
     ['R2-02 glob * → _', 'Delete /tmp/*/cache/* nightly.', 'Delete /tmp/_/cache/_ nightly.'],
     ['R2-03 backslash hard break → literal backslash', 'Run deploy\\\n--force after review', 'Run deploy\\ --force after review'],
     ['L2 steps reordered', 'Drain the node.\n\nUpgrade the kernel.', 'Upgrade the kernel.\n\nDrain the node.'],
+    ['R2-06 two code blocks swapped', '## Steps\n\n```sh\nkubectl drain node-1\n```\n\n```sh\nkubectl delete node node-1\n```', '## Steps\n\n```sh\nkubectl delete node node-1\n```\n\n```sh\nkubectl drain node-1\n```'],
   ];
   it.each(cases)('%s', { timeout: 60_000 }, async (_name, a, b) => {
     const root = tempDir('kl-081-gate-');
@@ -72,6 +74,19 @@ describe('R2-01..03 through the CLI: retraction, pending, pulse refuses', () => 
 describe('L1: an ATX closing sequence needs a space before it', () => {
   it('parses `## Use C#` as "Use C#" and still strips a real closing sequence', () => {
     expect(parseMarkdown('## Use C#\n## Title ##\n## Title \\#\n## #hashtag\n### ###\n').map((b) => b.content)).toEqual(['Use C#', 'Title', 'Title \\#', '#hashtag', '']);
+  });
+
+  it('R2-13 probes: `C#` → `C` and `Never` → `Never#` are retractions; `Port #` → `Port` is not', () => {
+    for (const [a, b, real] of [
+      ['## Build with C#', '## Build with C', true],
+      ['## Never', '## Never#', true],
+      ['## Port #', '## Port', false],
+      ['## Steps', '## Steps ##', false],
+    ] as const) {
+      const { kl, s } = edit(`# Ops\n\n${a}\n\nRun the build.\n`, `# Ops\n\n${b}\n\nRun the build.\n`);
+      expect(s.retractions!.length > 0, `${a} → ${b}`).toBe(real);
+      kl.close();
+    }
   });
 
   it('`## Use C#` → `## Use C` is a retraction', () => {
@@ -136,6 +151,37 @@ describe('L2: order inside a section is meaning', () => {
     const s = kl.orient.getSystemState({ actor_id: 'x', since_cursor: c, focus: 'retractions' });
     expect(s.retractions).toEqual([]);
     expect(s.format_only_edits).toHaveLength(1);
+    kl.close();
+  });
+});
+
+describe('live L2-09: a section moved AND renamed, with a value changed, is a move with a diff, not a removal', () => {
+  const v1 = '# Deploy runbook — orders-svc\n\nOwner: platform team. Last reviewed: 2026-10-01.\n\n## Steps\n1. Preflight: `./bin/preflight`\n2. Build: `./bin/build`\n3. Migrations: `./bin/migrate --mode online`\n4. Deploy target: deploys go to the staging cluster `stg-west-3`: `./bin/deploy --target stg-west-3`\n5. Announce: `./bin/notify --channel #deploys --message "<what you deployed and where>"`\n';
+  const v2 = '# Deploy runbook — orders-svc\n\nOwner: platform team. Last reviewed: 2026-10-31.\n\n## Release procedure\n1. Preflight: `./bin/preflight`\n2. Build: `./bin/build`\n3. Migrations: `./bin/migrate --mode online`\n4. Deploy: `./bin/deploy --target <staging cluster>` — the staging cluster is listed under "Environments" below.\n5. Announce: `./bin/notify --channel #deploys --message "<what you deployed and where>"`\n\n## Environments\n- staging cluster: `qa-east-7`\n';
+
+  it('the steps block is superseded with new_heading_path, new text and a diff; only the renamed heading is removed', () => {
+    const kl = new KronicleLite({ memory: true });
+    kl.docs.putDocument({ slug: 'runbook', title: 'R', markdown: v1, actor_id: 'w' });
+    const c = kl.orient.getSystemState({ actor_id: 'a', focus: 'pulse' }).cursor;
+    kl.docs.putDocument({ slug: 'runbook', title: 'R', markdown: v2, actor_id: 'w' });
+    const s = kl.orient.getSystemState({ actor_id: 'a', since_cursor: c, focus: 'retractions' });
+    const steps = s.retractions!.find((r) => r.old_text?.includes('Preflight'))!;
+    expect(steps).toMatchObject({ kind: 'supersession', new_heading_path: ['Deploy runbook — orders-svc', 'Release procedure'] });
+    expect(steps.new_text).toContain('--target <staging cluster>');
+    expect(steps.diff).toContain('section: Deploy runbook — orders-svc › [-Steps-]{+Release procedure+}');
+    expect(steps.diff).toContain('stg-west-3');
+    expect(steps.reason_line).toMatch(/MOVED to runbook › Deploy runbook — orders-svc › Release procedure/);
+    expect(s.retractions!.filter((r) => r.kind === 'tombstone').map((r) => r.old_text)).toEqual(['Steps']);
+    kl.close();
+  });
+
+  it('an unrelated block under another section is not paired', () => {
+    const kl = new KronicleLite({ memory: true });
+    kl.docs.putDocument({ slug: 'r', title: 'R', markdown: '# R\n\n## A\n\nDrop the staging database nightly.\n', actor_id: 'w' });
+    const c = kl.orient.getSystemState({ actor_id: 'a', focus: 'pulse' }).cursor;
+    kl.docs.putDocument({ slug: 'r', title: 'R', markdown: '# R\n\n## B\n\nPage the on-call before a deploy.\n', actor_id: 'w' });
+    const s = kl.orient.getSystemState({ actor_id: 'a', since_cursor: c, focus: 'retractions' });
+    expect(s.retractions!.map((r) => `${r.kind}:${r.old_text}`).sort()).toEqual(['tombstone:A', 'tombstone:Drop the staging database nightly.']);
     kl.close();
   });
 });
@@ -209,8 +255,39 @@ describe('L4: lineage inference starts at the session\'s first orient', () => {
   });
 });
 
-describe('L6: the word diff of a long block shows what changed', () => {
+describe('L6 / R2-16: a retraction of a long block shows what changed', () => {
+  it('r2-diff probe: a 45-line script, change on the last line — diff, old/new text, reason line and pending all show it', () => {
+    const kl = new KronicleLite({ memory: true });
+    const lines = Array.from({ length: 45 }, (_, i) => `step_${i}: run check --id ${i} --verbose`);
+    const v1 = '# Deploy\n\n```sh\n' + lines.join('\n') + '\n./bin/deploy --target staging-a\n```\n';
+    kl.docs.putDocument({ slug: 'deploy', title: 'Deploy', markdown: v1, actor_id: 'ops' });
+    kl.recall.recall({ query: 'deploy target', actor_id: 'agent' });
+    const c = kl.orient.getSystemState({ actor_id: 'hook', focus: 'pulse' }).cursor;
+    kl.docs.putDocument({ slug: 'deploy', title: 'Deploy', markdown: v1.replace('--target staging-a', '--target prod-eu'), actor_id: 'ops' });
+    const r = kl.orient.getSystemState({ actor_id: 'hook', since_cursor: c, focus: 'retractions' }).retractions![0]!;
+    expect(r.diff).toContain('[-staging-a-]{+prod-eu+}');
+    expect(r.old_text).not.toBe(r.new_text);
+    expect(r.old_text).toContain('staging-a');
+    expect(r.new_text).toContain('prod-eu');
+    expect(r.reason_line).toContain('prod-eu');
+    const p = kl.lineage.pending('agent').items[0]!;
+    expect(p.diff).toContain('prod-eu');
+    expect(p.new_text).toContain('prod-eu');
+    kl.close();
+  });
+
+  it('a whitespace-only change is never an empty diff', () => {
+    expect(wordDiff('Use "a  b" here.', 'Use "a b" here.')).toBe('Use "a[-··-]{+·+}b" here.');
+    expect(wordDiff('x\ty', 'x y')).toBe('x[-→-]{+·+}y');
+    expect(changeSnippets('a b', 'a b')).toEqual(['a b', 'a b']);
+  });
+
   it('a change at the end of a 600-word block', () => {
+    const w = Array.from({ length: 600 }, (_, i) => `w${i}`).join(' ');
+    const [o, n] = changeSnippets(`${w} target=a`, `${w} target=b`);
+    expect(o.endsWith('target=a')).toBe(true);
+    expect(n.endsWith('target=b')).toBe(true);
+    expect(o.length).toBeLessThanOrEqual(160);
     const long = Array.from({ length: 600 }, (_, i) => `w${i}`).join(' ');
     expect(wordDiff(`${long} target=a`, `${long} target=b`)).toBe('…w596 w597 w598 w599 [-target=a-]{+target=b+}');
   });

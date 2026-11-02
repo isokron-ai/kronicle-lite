@@ -15,7 +15,7 @@ import type { ChainEvent } from '../chain/index.js';
 import type { StaleSource } from '../lineage/lineage.js';
 import { isInstructionSlug, REORDERED_RE } from '../docs/documents.js';
 import { classifyEdit, type FormatRule } from './cosmetic.js';
-import { snippet, wordDiff } from './textdiff.js';
+import { changeSnippets, snippet, wordDiff } from './textdiff.js';
 
 export type RetractionSeverity = 'safety' | 'behavioral' | 'informational';
 /**
@@ -135,10 +135,11 @@ export function classifyRetraction(ev: ChainEvent, lookup?: BlockTextLookup): Re
   const contentDiff = oldB && newB ? wordDiff(oldB.content, newB.content) : null;
   const sectionDiff = moved ? `section: ${wordDiff(oldB!.heading_path.join(' › '), moved.join(' › '))}` : null;
   const orderDiff = reordered ? `order: same text, new position within ${oldB!.heading_path.join(' › ') || '(top)'}` : null;
+  const [oldSnip, newSnip] = oldB && newB ? changeSnippets(oldB.content, newB.content) : [oldB ? snippet(oldB.content) : null, null];
   const text = {
     heading_path: oldB?.heading_path ?? newB?.heading_path ?? null,
-    old_text: oldB ? snippet(oldB.content) : null,
-    new_text: oldB && newB ? snippet(newB.content) : null,
+    old_text: oldSnip,
+    new_text: newSnip,
     diff: orderDiff ?? (sectionDiff && oldB!.content === newB!.content ? sectionDiff : sectionDiff ? `${sectionDiff}; ${contentDiff}` : contentDiff),
   };
   const edit = rule.kind === 'supersession' && oldB && newB && !moved && !reordered ? classifyEdit(oldB.content, newB.content, oldB.kind ?? newB.kind) : null;

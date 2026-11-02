@@ -1017,7 +1017,11 @@ interface RevisionPlan {
  *      text: "Allowed › X" → "Forbidden › X" is a change of meaning, so
  *      receipts for the old block verify as SUPERSEDED and orient lists it.
  *   2. Remaining old/new paired in order within the same (kind, heading_path).
- *   3. Leftover old → tombstoned; leftover new → created.
+ *   3. Leftover old → tombstoned; leftover new → created, except:
+ *   3b. 0.8.1: a leftover non-heading old block closely matching a leftover
+ *      new block of the same kind under another heading path (word-multiset
+ *      Dice ≥ 0.6) is superseded by it: moved and edited, reported with
+ *      `new_heading_path` and a diff instead of "REMOVED".
  */
 export function planRevision(oldLive: readonly BlockRow[], next: readonly ParsedBlock[]): RevisionPlan {
   const plan: RevisionPlan = { carried: [], replaced: [], created: [], tombstoned: [] };
@@ -1080,9 +1084,62 @@ export function planRevision(oldLive: readonly BlockRow[], next: readonly Parsed
       plan.created.push(n);
     }
   }
+  // 3b. (0.8.1) Moved AND edited: a leftover old block whose text reappears, closely, as a leftover
+  //     new block of the same kind under another heading path is superseded by it (a move with a
+  //     diff), not tombstoned with no successor. Headings are not paired (a renamed heading is a
+  //     removal plus an addition). Close = word-multiset Dice ≥ MOVE_MIN_SIMILARITY, best match first.
+  if (plan.created.length > 0 && oldUnmatched.length > 0 && plan.created.length * oldUnmatched.length <= 10_000) {
+    const bags = new Map<string, Map<string, number>>();
+    const bag = (key: string, text: string) => {
+      let b = bags.get(key);
+      if (!b) {
+        b = new Map();
+        for (const w of text.split(/\s+/)) if (w) b.set(w, (b.get(w) ?? 0) + 1);
+        bags.set(key, b);
+      }
+      return b;
+    };
+    const dice = (a: Map<string, number>, b: Map<string, number>) => {
+      let na = 0;
+      let nb = 0;
+      let both = 0;
+      for (const v of a.values()) na += v;
+      for (const v of b.values()) nb += v;
+      for (const [w, v] of a) both += Math.min(v, b.get(w) ?? 0);
+      return na + nb === 0 ? 0 : (2 * both) / (na + nb);
+    };
+    const stillCreated: ParsedBlock[] = [];
+    for (const n of plan.created) {
+      if (n.kind === 'heading') {
+        stillCreated.push(n);
+        continue;
+      }
+      const nb = bag(`n${n.ordinal}`, n.content);
+      let best = -1;
+      let bestScore = MOVE_MIN_SIMILARITY;
+      oldUnmatched.forEach((o, i) => {
+        if (o.kind !== n.kind || o.heading_path === joinHeadingPath(n.heading_path)) return;
+        const sc = dice(bag(`o${o.block_id}`, o.content), nb);
+        if (sc >= bestScore && (best < 0 || sc > bestScore)) {
+          best = i;
+          bestScore = sc;
+        }
+      });
+      if (best >= 0) {
+        plan.replaced.push({ old: oldUnmatched[best]!, next: n });
+        oldUnmatched.splice(best, 1);
+      } else {
+        stillCreated.push(n);
+      }
+    }
+    plan.created = stillCreated;
+  }
   plan.tombstoned = oldUnmatched;
   return plan;
 }
+
+/** 0.8.1: how close (word-multiset Dice) a block under a new heading path must be to count as the same block moved and edited. */
+export const MOVE_MIN_SIMILARITY = 0.6;
 
 /** Indices (into `xs`) of one longest strictly increasing subsequence; ties keep the earliest. O(n log n). */
 function longestIncreasing(xs: readonly number[]): Set<number> {
