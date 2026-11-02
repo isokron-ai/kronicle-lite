@@ -10,13 +10,14 @@
 import { randomUUID } from 'node:crypto';
 
 import type { Chain, ChainEvent, ChainHead } from '../chain/index.js';
+import type { Db } from '../db/open.js';
 import { GENESIS_HASH } from '../chain/genesis.js';
 import { canonicalize } from '../crypto/canonical.js';
 import { sha256Hex } from '../crypto/hash.js';
 import { isInstructionSlug, splitHeadingPath, type DocumentStore, type SourceDrift } from '../docs/documents.js';
 import { checkBlockRow } from '../docs/integrity.js';
 import { CursorTokenError, parseAnyCursor, serializeCompactCursor, serializeCursor } from './cursor.js';
-import { foldDelta, type PolicyOptions, type TypedDelta } from './delta.js';
+import { foldDelta, rollupDelta, type PolicyOptions, type TypeGroup, type TypedDelta } from './delta.js';
 import {
   composeDriftBanner,
   composeStaleWriteAdvisory,
@@ -221,7 +222,7 @@ export class Orient {
   private readonly policy: PolicyOptions;
 
   constructor(
-    db: ConstructorParameters<typeof FlightRecorder>[0],
+    private readonly db: Db,
     private readonly chain: Chain,
     private readonly docs: DocumentStore,
     private readonly secret: string,
@@ -523,6 +524,48 @@ export class Orient {
     return { ok: problem === null, events_checked, blocks_checked: blocks.length, problem, seq };
   }
 
+  /** True when the actor has any read or receipt on record (it may have relied on something). */
+  private hasReadAnything(actor_id: string): boolean {
+    return (
+      this.db.prepare(`SELECT 1 FROM reads WHERE actor_id = ? LIMIT 1`).get(actor_id) !== undefined ||
+      this.db.prepare(`SELECT 1 FROM receipts WHERE actor_id = ? LIMIT 1`).get(actor_id) !== undefined
+    );
+  }
+
+  /**
+   * 0.8.1 (C2-09): focus=retractions for an actor that never oriented and
+   * never read anything. A retraction tells an agent that something it relied
+   * on changed; it relied on nothing, so there is nothing to retract (what it
+   * reads from now on is current, and `pending` still covers pending_actor).
+   * The delta is the counts a retractions briefing carries, from the
+   * (event_type, seq) index instead of folding every event since genesis;
+   * with a project scope, one SQL pass decides which events are about other
+   * projects' documents (counted in hidden_events, as the full path does).
+   */
+  private firstContactRetractions(head: ChainHead, keys: readonly string[] | null): { delta: TypedDelta; hidden_events: number } {
+    const counts = (keys
+      ? this.db
+          .prepare(
+            `SELECT e.event_type, COUNT(*) AS count, MIN(e.seq) AS first_seq, MAX(e.seq) AS last_seq
+               FROM events e LEFT JOIN documents d
+                 ON d.doc_id = (CASE WHEN json_valid(e.payload_canonical) THEN json_extract(e.payload_canonical, '$.doc_id') END)
+              WHERE e.seq <= ? AND (d.project_key IS NULL OR d.project_key IN (${keys.map(() => '?').join(', ')}))
+              GROUP BY e.event_type`,
+          )
+          .all(head.seq, ...keys)
+      : this.db
+          .prepare(`SELECT event_type, COUNT(*) AS count, MIN(seq) AS first_seq, MAX(seq) AS last_seq FROM events WHERE seq <= ? GROUP BY event_type`)
+          .all(head.seq)) as Omit<TypeGroup, 'last'>[];
+    const groups: TypeGroup[] = [];
+    for (const c of counts) {
+      const last = this.chain.get(c.last_seq);
+      if (last) groups.push({ ...c, last });
+    }
+    const delta = rollupDelta(groups, 0, head.seq, this.policy);
+    const total = keys ? (this.db.prepare(`SELECT COUNT(*) AS n FROM events WHERE seq <= ?`).get(head.seq) as { n: number }).n : delta.events_since;
+    return { delta: { ...delta, entries: [] }, hidden_events: total - delta.events_since };
+  }
+
   getSystemState(input: OrientInput, now = new Date()): SystemState {
     const focus: Focus = input.focus ?? 'orientation';
     const budget = input.budget_tokens ?? 3000;
@@ -555,7 +598,20 @@ export class Orient {
     let format_only_edits: FormatOnlyEdit[] | null = null;
     let carried_notes: CarriedNote[] | null = null;
 
-    if (focus !== 'pulse') {
+    // 0.8.1 (C2-09): focus=retractions at first contact answers from indexes.
+    const firstContact = focus === 'retractions' && recovery.method === 'genesis' && !this.hasReadAnything(input.actor_id);
+    if (firstContact) {
+      const keys = input.project && input.project.keys.length > 0 ? input.project.keys : null;
+      const fc = this.firstContactRetractions(head, keys);
+      delta = fc.delta;
+      retractions = [];
+      format_only_edits = [];
+      if (keys && input.project) scope = { project_keys: input.project.keys, hidden_retractions: 0, verdict: 'complete', hidden_events: fc.hidden_events };
+      digest = scrubDeep(this.digest(keys)).value;
+      // Not windowOnly: there is no window. The briefing serves no event text, so the bounded
+      // pass of a full briefing (the last 1000 events and the newest live blocks) is the check.
+      integrity = this.quickIntegrity(Math.max(0, head.seq - 1000), head);
+    } else if (focus !== 'pulse') {
       const allEvents = this.chain.since(recovery.from_seq);
       // Project scope (0.5.0 instruction retractions; unreleased/next: every
       // event about a document of another project). Unscoped documents and

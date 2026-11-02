@@ -167,6 +167,8 @@ export function syncInstructionFile(store: KronicleLite, entry: InstructionEntry
       // A file import is the file's text, not something the importing actor derived from its reads.
       infer_lineage: false,
     });
+    // 0.8.1: another import committed this exact content first (the check above ran outside the write lock).
+    if (r.events === 0) return { ...base, action: 'unchanged', revision: r.revision, head: r.head };
     let created = 0;
     let superseded = 0;
     let tombstoned = 0;

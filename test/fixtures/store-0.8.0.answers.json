@@ -1,0 +1,168 @@
+{
+  "version": "0.8.0",
+  "pending": {
+    "agent": {
+      "actor_id": "agent",
+      "count": 3,
+      "items": [
+        {
+          "kind": "tombstone",
+          "change": "tombstoned",
+          "severity": "safety",
+          "seq": 32,
+          "doc_slug": "db",
+          "heading_path": [
+            "DB",
+            "Backups"
+          ],
+          "read": {
+            "block_id": "1bcb459e-3051-4d01-a7de-d3a4667a59a0",
+            "content_hash": "6cf989f1433ff4cd9e3b05efcb64a265562ecf3f352e4576cd5df960979917de",
+            "head_seq": 15
+          },
+          "current": null,
+          "old_text": "Nightly at 02:00.",
+          "new_text": null,
+          "diff": null,
+          "resolve": "read kronicle://docs/db (or recall with include_tombstoned) to acknowledge the removal"
+        },
+        {
+          "kind": "supersession",
+          "change": "superseded",
+          "severity": "behavioral",
+          "seq": 27,
+          "doc_slug": "deploy",
+          "heading_path": [
+            "Deploy"
+          ],
+          "read": {
+            "block_id": "4005e327-2969-4a72-bd29-666fc03e8772",
+            "content_hash": "3d6cb623404a0a83ebe43de40aed82d972167d6be001a880d7a167e51ec8dc57",
+            "head_seq": 15
+          },
+          "current": {
+            "block_id": "cc7d733f-c123-4a88-aab2-182db4e0225d",
+            "content_hash": "dd1813b7f68d2a29d9ac3f54874a772f9a04f57869939707db8ff25c0548fd38"
+          },
+          "old_text": "Deploy with port 8080.",
+          "new_text": "Deploy with port 9090.",
+          "diff": "Deploy with port [-8080.-]{+9090.+}",
+          "resolve": "recall it again or read kronicle://docs/deploy"
+        },
+        {
+          "kind": "supersession",
+          "change": "superseded",
+          "severity": "behavioral",
+          "seq": 30,
+          "doc_slug": "db",
+          "heading_path": [
+            "DB"
+          ],
+          "read": {
+            "block_id": "42b02714-fb3e-4ad8-ae2b-124b4361974b",
+            "content_hash": "5cc4012826e2da63afd694f3696964477edc2d9075dbd8ac6c604f94ffb659eb",
+            "head_seq": 15
+          },
+          "current": {
+            "block_id": "90b67e89-8a57-454f-a397-2eba0d83d77b",
+            "content_hash": "dcd77a395c1b7b65135949c83d03cbe45bbbec04c48b6d331b7d66da3ea7c0a5"
+          },
+          "old_text": "Primary is db-1.",
+          "new_text": "Primary is db-2.",
+          "diff": "Primary is [-db-1.-]{+db-2.+}",
+          "resolve": "recall it again or read kronicle://docs/db"
+        }
+      ],
+      "hidden": 0
+    },
+    "old": {
+      "actor_id": "old",
+      "count": 1,
+      "items": [
+        {
+          "kind": "supersession",
+          "change": "superseded",
+          "severity": "behavioral",
+          "seq": 30,
+          "doc_slug": "db",
+          "heading_path": [
+            "DB"
+          ],
+          "read": {
+            "block_id": "42b02714-fb3e-4ad8-ae2b-124b4361974b",
+            "content_hash": "5cc4012826e2da63afd694f3696964477edc2d9075dbd8ac6c604f94ffb659eb",
+            "head_seq": 15
+          },
+          "current": {
+            "block_id": "90b67e89-8a57-454f-a397-2eba0d83d77b",
+            "content_hash": "dcd77a395c1b7b65135949c83d03cbe45bbbec04c48b6d331b7d66da3ea7c0a5"
+          },
+          "old_text": "Primary is db-1.",
+          "new_text": "Primary is db-2.",
+          "diff": "Primary is [-db-1.-]{+db-2.+}",
+          "resolve": "recall it again or read kronicle://docs/db"
+        }
+      ],
+      "hidden": 0
+    },
+    "w": {
+      "actor_id": "w",
+      "count": 0,
+      "items": [],
+      "hidden": 0
+    },
+    "fresh": {
+      "actor_id": "fresh",
+      "count": 0,
+      "items": [],
+      "hidden": 0
+    }
+  },
+  "reads_rows": 129,
+  "receipts_rows": 70,
+  "infer_agent": {
+    "refs": [
+      {
+        "block_id": "0ce96c05-c116-443d-80f3-4a303238c883",
+        "content_hash": "159c8c2b0fe56a2eae6bec999bdba9c876bb95cd422a8afd49cc801bc4c9682a"
+      },
+      {
+        "block_id": "15f83558-36c9-4ad5-b6f7-2e4f3f9a8b0b",
+        "content_hash": "715931e5e02aff88a370a42f6385d72896e7efe0a639c5b77e602a0248781160"
+      },
+      {
+        "block_id": "1bcb459e-3051-4d01-a7de-d3a4667a59a0",
+        "content_hash": "6cf989f1433ff4cd9e3b05efcb64a265562ecf3f352e4576cd5df960979917de"
+      },
+      {
+        "block_id": "4005e327-2969-4a72-bd29-666fc03e8772",
+        "content_hash": "3d6cb623404a0a83ebe43de40aed82d972167d6be001a880d7a167e51ec8dc57"
+      },
+      {
+        "block_id": "42b02714-fb3e-4ad8-ae2b-124b4361974b",
+        "content_hash": "5cc4012826e2da63afd694f3696964477edc2d9075dbd8ac6c604f94ffb659eb"
+      },
+      {
+        "block_id": "63f9f9ea-29ff-4d25-bcf1-d3c0734e1fa9",
+        "content_hash": "4c7a5cb4cf65a6283d8947661bb1e6db30a298374213181a14553e37d1df78ad"
+      },
+      {
+        "block_id": "6af9591b-1461-4a13-ba02-7a51dca53129",
+        "content_hash": "9ddfe389fba2702bb3eed6b3f5da62bfe6691d52ee43b2ac8bd2b4aaa16aa1d1"
+      },
+      {
+        "block_id": "ac586b17-b9e1-482c-a8ff-9b6e42752635",
+        "content_hash": "5b5aae8dd0e80512b86c97d7c191ddd600599641a352367b19fac6e42290cc1d"
+      },
+      {
+        "block_id": "e5767b05-b877-46ec-a6e4-dcae44df1ffd",
+        "content_hash": "855b84e7039d24c12bef5c412ce5aeadaa7b89cfc50b594a325f6b0a411ee224"
+      }
+    ],
+    "truncated": false
+  },
+  "readers": [
+    "agent",
+    "old"
+  ]
+}
