@@ -15,7 +15,7 @@ import { createPublicKey } from 'node:crypto';
 import type { Checkpoint } from '../chain/chain.js';
 import { chainIdFromPublicKeyPem, keyIdFromPublicKey } from '../crypto/keys.js';
 import type { KronicleLite } from '../store.js';
-import { AnchorApiError, AnchorClient, AnchorUnreachableError, type RemoteAnchor, type RemoteChain } from './client.js';
+import { AnchorApiError, AnchorClient, AnchorListingError, AnchorUnreachableError, type RemoteAnchor, type RemoteChain } from './client.js';
 import { AnchorConfigError, assertAnchorTransport, loadConfig, type AnchorConfig } from './config.js';
 import { anchorReceiptJcs, type AnchorReceipt } from './receipt.js';
 import {
@@ -334,7 +334,15 @@ export async function verifyRemote(store: KronicleLite, opts: AnchorCallOptions 
     }
   } else {
     const api = clientFor(cfg, opts);
-    const remote: RemoteChain | null = await api.chain(chain_id);
+    let remote: RemoteChain | null = null;
+    try {
+      remote = await api.chain(chain_id);
+    } catch (e) {
+      // A listing that breaks pagination is never a complete list: report it
+      // (verification fails) and still check every receipt held locally.
+      if (!(e instanceof AnchorListingError)) throw e;
+      problems.push(e.message);
+    }
     const rec = await refreshPins(store, cfg, api);
     keys = rec.keys;
     problems.push(...rec.violations);
@@ -512,8 +520,8 @@ export interface LastAnchorVerification {
   /** Local root over the range in the last anchor's countersigned receipt vs that receipt's root; `none` when never anchored; `unverified` when the receipt is not trusted. */
   result: RangeResult | 'none';
   countersignature: 'ok' | 'failed' | 'unchecked';
-  /** remote: checked against the service; skipped: local pins only; unreachable: the service did not answer. */
-  remote: 'checked' | 'skipped' | 'unreachable';
+  /** remote: checked against the service; skipped: local pins only; unreachable: the service did not answer; invalid: its listing broke the pagination protocol (never a complete check). */
+  remote: 'checked' | 'skipped' | 'unreachable' | 'invalid';
   remote_conflict: boolean | null;
   detail: string | null;
 }
@@ -555,6 +563,9 @@ export async function verifyLastAnchor(store: KronicleLite, opts: AnchorCallOpti
         extra.push(err.message);
         violations = true;
         remoteState = 'checked';
+      } else if (err instanceof AnchorListingError) {
+        extra.push(err.message);
+        remoteState = 'invalid';
       } else {
         remoteState = 'unreachable';
         extra.push(err instanceof Error ? err.message : String(err));
@@ -630,6 +641,22 @@ export async function tryPushCheckpoint(store: KronicleLite, opts: AnchorCallOpt
       key_notes: r.key_notes,
     };
   } catch (err) {
+    if (err instanceof AnchorApiError && err.status === 410 && err.code === 'chain_erased') {
+      return {
+        ok: false,
+        anchor_id: null,
+        duplicate: null,
+        conflict: null,
+        conflicting_anchor_ids: [],
+        received_at: null,
+        verify_url: null,
+        public_status: null,
+        error: 'anchor_refused',
+        message:
+          'anchor service refused (410 chain_erased): this chain was erased on the anchor service and accepts no further anchors; receipts already issued stay valid and verifiable. Not retried.',
+        key_notes: [],
+      };
+    }
     const error: PushOutcome['error'] =
       err instanceof AnchorUnreachableError
         ? 'anchor_unreachable'

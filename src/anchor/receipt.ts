@@ -22,7 +22,7 @@
 
 import { canonicalize } from '../crypto/canonical.js';
 import { sha256Hex } from '../crypto/hash.js';
-import { verifyEd25519 } from '../crypto/keys.js';
+import { verifyEd25519Strict } from './ed25519-strict.js';
 import { checkpointForReceipt, isJsonObject, parseWireCheckpoint, type WireCheckpoint } from './wire.js';
 
 export const ANCHOR_RECEIPT_VERSION = 1 as const;
@@ -69,8 +69,9 @@ export function anchorReceiptHash(receipt: AnchorReceipt): string {
   return sha256Hex(anchorReceiptJcs(receipt));
 }
 
+/** Strict Ed25519 (no small-order key or R, S < L), as the service verifies since hardening A2-09. */
 export function verifyAnchorReceiptSignature(receipt: AnchorReceipt, service_public_key_pem: string): boolean {
-  return verifyEd25519(service_public_key_pem, anchorReceiptSigningPayload(receipt), receipt.signature);
+  return verifyEd25519Strict(service_public_key_pem, anchorReceiptSigningPayload(receipt), receipt.signature);
 }
 
 export type AnchorReceiptParseError = 'not_an_object' | 'bad_version' | 'bad_field' | 'bad_checkpoint';

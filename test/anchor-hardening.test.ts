@@ -7,18 +7,20 @@
  */
 
 import { spawn } from 'node:child_process';
-import { createHash, generateKeyPairSync, sign, type KeyObject } from 'node:crypto';
+import { createHash, createPublicKey, generateKeyPairSync, sign, verify as nodeVerify, type KeyObject } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { pushCheckpoint, verifyLastAnchor, verifyRemote } from '../src/anchor/anchor.js';
-import { AnchorClient } from '../src/anchor/client.js';
+import { pushCheckpoint, tryPushCheckpoint, verifyLastAnchor, verifyRemote } from '../src/anchor/anchor.js';
+import { AnchorClient, AnchorListingError } from '../src/anchor/client.js';
+import { isUsableEd25519Point, verifyEd25519Strict } from '../src/anchor/ed25519-strict.js';
 import { AnchorConfigError, assertAnchorTransport } from '../src/anchor/config.js';
 import { anchorReceiptJcs, anchorReceiptSigningPayload, type AnchorReceipt } from '../src/anchor/receipt.js';
 import {
+  checkPublishedServiceKey,
   PINS_FILE,
   readPinFile,
   reconcileServiceKeys,
@@ -68,6 +70,35 @@ function rewriting(transform: (path: string, body: Json) => Json): typeof fetch 
     }
     return new Response(out, { status: res.status, headers: { 'content-type': 'application/json' } });
   };
+}
+
+/**
+ * Serve the stub's full chain listing the way the paginated service does
+ * (isokron-anchor A2-13: `page`, `next_cursor`, null on the last page), with
+ * hooks to break the protocol.
+ */
+function paginated(
+  size: number,
+  hook: (pageNo: number, body: Json) => Json = (_n, j) => j,
+): typeof fetch & { calls: string[] } {
+  const calls: string[] = [];
+  const f = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const href = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    const u = new URL(href);
+    calls.push(u.pathname + u.search);
+    if (!u.pathname.startsWith('/v1/chains/')) return globalThis.fetch(input, init);
+    const res = await globalThis.fetch(`${u.origin}${u.pathname}`, init);
+    if (res.status !== 200) return res;
+    const full = (await res.json()) as Json;
+    const all = full.anchors ?? [];
+    const start = u.searchParams.has('cursor') ? Number(u.searchParams.get('cursor')!.slice(1)) : 0;
+    const pageNo = start / size;
+    const next = start + size < all.length ? `c${start + size}` : null;
+    const body = hook(pageNo, { ...full, anchors: all.slice(start, start + size), page: { limit: size, returned: Math.min(size, all.length - start) }, next_cursor: next });
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch & { calls: string[] };
+  f.calls = calls;
+  return f;
 }
 
 function ed25519(): { priv: KeyObject; pem: string; id: string } {
@@ -225,10 +256,23 @@ describe('anchor client hardening (0.8.1, track 6)', { timeout: 60_000 }, () => 
     store.docs.putDocument({ slug: 'x', title: 'X', markdown: '# X\n\nx.\n', actor_id: 't' });
     store.chain.checkpoint();
     const second = await pushCheckpoint(store, opts());
+    // A careful MITM also lowers anchor_count, so the listing looks complete.
     const drop = rewriting((path, j) => {
+      if (path.startsWith('/v1/chains/')) {
+        j.anchors = (j.anchors ?? []).filter((x) => x['anchor_id'] !== second.anchor_id);
+        j['anchor_count'] = j.anchors.length;
+      }
+      return j;
+    });
+    // A careless one leaves anchor_count: the listing itself is rejected.
+    const sloppy = rewriting((path, j) => {
       if (path.startsWith('/v1/chains/')) j.anchors = (j.anchors ?? []).filter((x) => x['anchor_id'] !== second.anchor_id);
       return j;
     });
+    const s1 = await verifyRemote(store, { ...opts(), fetch: sloppy });
+    expect(s1.ok).toBe(false);
+    expect(s1.problems.join('\n')).toMatch(/ended after 1 of 2 anchors/);
+    expect(s1.checks.every((c) => c.source === 'local' && c.result === 'match')).toBe(true);
     // Intact chain: still ok, but the omission is reported.
     const intact = await verifyRemote(store, { ...opts(), fetch: drop });
     expect(intact.ok).toBe(true);
@@ -382,7 +426,11 @@ describe('anchor client hardening (0.8.1, track 6)', { timeout: 60_000 }, () => 
     const k4 = ed25519();
     const bad = reconcileServiceKeys(fresh.store, b.url, { v: 1, keys: [entry(k1), entry(k2, { signed_by: k1.id, successor_signature: succSig(k4.priv, k2) })] });
     expect(bad.keys.map((k) => k.key_id)).toEqual([k1.id]);
-    expect(bad.notes.join('\n')).toMatch(new RegExp(`${k2.id} .* not pinned`));
+    expect(bad.violations.join('\n')).toMatch(new RegExp(`${k2.id}: successor_signature by ${k1.id} does not verify`));
+    // No successor signature at all: not pinned, only a note.
+    const unsigned = reconcileServiceKeys(fresh.store, b.url, { v: 1, keys: [entry(k1), entry(k2)] });
+    expect(unsigned.keys.map((k) => k.key_id)).toEqual([k1.id]);
+    expect(unsigned.notes.join('\n')).toMatch(new RegExp(`${k2.id} .* not pinned`));
 
     // Tighten-only: a later document cannot un-revoke or extend a pin.
     reconcileServiceKeys(fresh.store, b.url, { v: 1, keys: [entry(k1, { status: 'revoked' })] });
@@ -430,10 +478,14 @@ describe('anchor client hardening (0.8.1, track 6)', { timeout: 60_000 }, () => 
     expect(serviceKeyRefusal({ key_id: 'k', status: 'active', valid_from: '2026-11-01T00:00:00.000Z', valid_to: null }, t)).toBeNull();
     expect(serviceKeyRefusal({ key_id: 'k', status: 'retired', valid_from: '2026-10-01T00:00:00.000Z', valid_to: '2026-11-02T00:00:00.000Z' }, t)).toBeNull();
     expect(serviceKeyRefusal({ key_id: 'k', status: 'retired', valid_from: null, valid_to: '2026-11-01T06:00:00.000Z' }, t)).toMatch(/after .* valid_to/);
-    expect(serviceKeyRefusal({ key_id: 'k', status: 'active', valid_from: '2026-11-02T00:00:00.000Z', valid_to: null }, t)).toMatch(/before .* valid_from/);
-    expect(serviceKeyRefusal({ key_id: 'k', status: 'compromised' }, t)).toMatch(/status compromised/);
-    expect(serviceKeyRefusal({ key_id: 'k', status: 'revoked' }, t)).toMatch(/status revoked/);
-    expect(serviceKeyRefusal({ key_id: 'k' }, t)).toMatch(/status unknown/);
+    expect(serviceKeyRefusal({ key_id: 'k', status: 'retired', valid_from: null, valid_to: t }, t)).toMatch(/after .* valid_to/); // valid_to is exclusive
+    expect(serviceKeyRefusal({ key_id: 'k', status: 'active', valid_from: t, valid_to: null }, t)).toBeNull(); // valid_from is inclusive
+    expect(serviceKeyRefusal({ key_id: 'k', status: 'active', valid_from: '2026-11-02T00:00:00.000Z', valid_to: null }, t)).toMatch(/precedes .* valid_from/);
+    expect(serviceKeyRefusal({ key_id: 'k', status: 'retired', valid_from: null, valid_to: null }, t)).toMatch(/retired without valid_to/);
+    expect(serviceKeyRefusal({ key_id: 'k', status: 'active', valid_from: 'yesterday', valid_to: null }, t)).toMatch(/unparseable/);
+    expect(serviceKeyRefusal({ key_id: 'k', status: 'compromised' }, t)).toMatch(/is compromised/);
+    expect(serviceKeyRefusal({ key_id: 'k', status: 'revoked' }, t)).toMatch(/is revoked/);
+    expect(serviceKeyRefusal({ key_id: 'k' }, t)).toBeNull(); // absent status = active, as the service reads it
 
     const { store } = makeStore(1);
     await pushCheckpoint(store, opts());
@@ -444,7 +496,8 @@ describe('anchor client hardening (0.8.1, track 6)', { timeout: 60_000 }, () => 
     expect(verifyReceiptWithPins(receipt, [{ ...p!, valid_to: '2020-01-01T00:00:00.000Z' }]).ok).toBe(false);
     // The unpinned client check applies the same rules.
     const doc = (await (await fetch(`${b.url}/.well-known/anchor-keys.json`)).json()) as { v: 1; issuer: string; keys: { key_id: string; public_key_pem: string; status: string; valid_from: string; valid_to: string | null }[] };
-    await expect(new AnchorClient(b.url, { preloadedKeys: { ...doc, keys: [{ ...doc.keys[0]!, status: 'compromised' }] } }).verifyReceipt(receipt)).rejects.toThrow(/not published \(or not usable\)/);
+    await expect(new AnchorClient(b.url, { preloadedKeys: { ...doc, keys: [{ ...doc.keys[0]!, status: 'compromised' }] } }).verifyReceipt(receipt)).rejects.toThrow(/is compromised/);
+    await expect(new AnchorClient(b.url, { preloadedKeys: { ...doc, keys: [doc.keys[0]!, doc.keys[0]!] } }).verifyReceipt(receipt)).rejects.toThrow(/listed more than once/);
     await expect(new AnchorClient(b.url, { preloadedKeys: { ...doc, keys: [{ ...doc.keys[0]!, status: 'retired', valid_to: '2020-01-01T00:00:00.000Z' }] } }).verifyReceipt(receipt)).rejects.toThrow(/valid_to/);
     // A served status change is pinned (tighten-only) and fails the next verify.
     const revoke = rewriting((path, j) => {
@@ -526,5 +579,128 @@ describe('anchor client hardening (0.8.1, track 6)', { timeout: 60_000 }, () => 
     const envPush = await cli(['checkpoint', '--push', '--data-dir', dataDir], { KRONICLE_ANCHOR_URL: b.url, KRONICLE_ANCHOR_KEY: b.license });
     expect(envPush.status, envPush.stderr).toBe(0);
     expect(envPush.stderr).not.toMatch(/warning: --key/);
+  });
+  // ─────────────── isokron-anchor hardening A2 compatibility ───────────────
+
+  it('pagination: verify --remote and anchor_status follow next_cursor to the end; held receipts on later pages are not "withheld"', async () => {
+    const { store } = makeStore(1);
+    const ids: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      store.docs.putDocument({ slug: `p${i}`, title: `P${i}`, markdown: `# P${i}\n\np.\n`, actor_id: 't' });
+      store.chain.checkpoint();
+      ids.push((await pushCheckpoint(store, opts())).anchor_id);
+    }
+    const f = paginated(1);
+    const r = await verifyRemote(store, { ...opts(), fetch: f });
+    expect(r.ok, r.problems.join('; ')).toBe(true);
+    expect(r.checks.map((c) => c.source)).toEqual(['remote', 'remote', 'remote']);
+    expect(r.notes.join('\n')).not.toMatch(/not listed/);
+    expect(f.calls.filter((c) => c.startsWith('/v1/chains/'))).toHaveLength(3);
+    expect((await verifyLastAnchor(store, { ...opts(), fetch: paginated(1), remote: true })).detail).toBeNull();
+    store.close();
+  });
+
+  it('pagination: a missing, looping or truncating cursor is an error, never "verified"; held receipts are still checked', async () => {
+    const { store } = makeStore(1);
+    for (let i = 0; i < 3; i++) {
+      store.docs.putDocument({ slug: `q${i}`, title: `Q${i}`, markdown: `# Q${i}\n\nq.\n`, actor_id: 't' });
+      store.chain.checkpoint();
+      await pushCheckpoint(store, opts());
+    }
+    const broken: [string, typeof fetch, RegExp][] = [
+      ['missing cursor', paginated(1, (n, j) => (n === 1 ? (({ next_cursor: _c, ...rest }) => rest)(j) as Json : j)), /paginated but has no next_cursor/],
+      ['looping cursor', paginated(1, (_n, j) => ({ ...j, next_cursor: j['next_cursor'] === null ? null : 'c1' })), /repeats next_cursor|a second time/],
+      ['truncated', paginated(1, (n, j) => (n === 1 ? { ...j, next_cursor: null } : j)), /ended after 2 of 3 anchors/],
+      ['stripped legacy', paginated(10, (_n, j) => (({ next_cursor: _c, page: _p, ...rest }) => ({ ...rest, anchors: (rest.anchors as unknown[]).slice(0, 2) }))(j) as Json), /ended after 2 of 3 anchors/],
+    ];
+    for (const [label, f, re] of broken) {
+      await expect(new AnchorClient(b.url, { fetch: f }).chain((await import('../src/anchor/anchor.js')).localChainIdentity(store).chain_id), label).rejects.toBeInstanceOf(AnchorListingError);
+      const r = await verifyRemote(store, { ...opts(), fetch: f });
+      expect(r.ok, label).toBe(false);
+      expect(r.problems.join('\n'), label).toMatch(re);
+      expect(r.checks.map((c) => `${c.source}:${c.result}`), label).toEqual(['local:match', 'local:match', 'local:match']);
+      const v = await verifyLastAnchor(store, { ...opts(), fetch: f, remote: true });
+      expect(v.remote, label).toBe('invalid');
+      expect(v.detail, label).toMatch(re);
+    }
+    // A divergence inside a range the broken listing never delivered is still found from the local receipt.
+    rewriteSeq(store, store.chain.head().seq, 1, 1);
+    const r = await verifyRemote(store, { ...opts(), fetch: broken[2]![1] });
+    expect(r.checks.some((c) => c.result === 'diverged')).toBe(true);
+    store.close();
+  });
+
+  it('410 chain_erased: reported clearly, exit non-zero, not retried, nothing stored', async () => {
+    const { dataDir, store } = makeStore(1);
+    let posts = 0;
+    const erased: typeof fetch = async (input, init) => {
+      if ((init?.method ?? 'GET') === 'POST') {
+        posts++;
+        return new Response(JSON.stringify({ error: 'chain_erased', detail: 'this chain was erased on request; it accepts no further anchors (existing receipts stay public)' }), { status: 410, headers: { 'content-type': 'application/json' } });
+      }
+      return globalThis.fetch(input, init);
+    };
+    const out = await tryPushCheckpoint(store, { ...opts(), fetch: erased });
+    expect(out).toMatchObject({ ok: false, error: 'anchor_refused' });
+    expect(out.message).toMatch(/410 chain_erased.*erased on the anchor service.*Not retried/);
+    expect(posts).toBe(1);
+    expect(store.chain.listAnchors()).toHaveLength(0);
+    store.close();
+    const gone = createServer((req, res) => {
+      res.writeHead(410, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'chain_erased', detail: 'erased' }));
+      req.resume();
+    });
+    await new Promise<void>((r) => gone.listen(0, '127.0.0.1', r));
+    const addr = gone.address();
+    try {
+      const r = await cli(['checkpoint', '--push', '--data-dir', dataDir, '--url', `http://127.0.0.1:${typeof addr === 'object' && addr ? addr.port : 0}`], { KRONICLE_ANCHOR_KEY: b.license });
+      expect(r.status).toBe(2);
+      expect(r.stderr).toMatch(/push failed: anchor service refused \(410 chain_erased\)/);
+    } finally {
+      await new Promise<void>((r) => gone.close(() => r()));
+    }
+  });
+
+  it('A2-09 parity: small-order keys and small-order R are refused (node:crypto alone accepts them)', () => {
+    const identity = Buffer.alloc(32);
+    identity[0] = 1;
+    const spki = Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), identity]);
+    const pem = createPublicKey({ key: spki, format: 'der', type: 'spki' }).export({ type: 'spki', format: 'pem' }) as string;
+    const forgery = Buffer.concat([identity, Buffer.alloc(32)]).toString('base64');
+    expect(nodeVerify(null, Buffer.from('any root'), createPublicKey(pem), Buffer.from(forgery, 'base64'))).toBe(true); // the gap
+    expect(verifyEd25519Strict(pem, 'any root', forgery)).toBe(false);
+    for (const hex of [
+      '0000000000000000000000000000000000000000000000000000000000000000',
+      '0000000000000000000000000000000000000000000000000000000000000080',
+      '0100000000000000000000000000000000000000000000000000000000000000',
+      '26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05',
+      '26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85',
+      'c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a',
+      'c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa',
+      'ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f',
+      'edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f', // p (non-canonical 0)
+      'eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f', // p+1 (non-canonical 1)
+    ]) {
+      expect(isUsableEd25519Point(Buffer.from(hex, 'hex')), hex).toBe(false);
+    }
+    const k = ed25519();
+    const sig = sign(null, Buffer.from('m'), k.priv);
+    expect(verifyEd25519Strict(k.pem, 'm', sig.toString('base64'))).toBe(true);
+    // S ≥ L (S + L) is refused even where a lenient verifier would reduce it.
+    const L = 2n ** 252n + 27742317777372353535851937790883648493n;
+    let S = 0n;
+    for (let i = 63; i >= 32; i--) S = (S << 8n) | BigInt(sig[i]!);
+    const big = S + L;
+    const hi = Buffer.alloc(32);
+    for (let i = 0, v = big; i < 32; i++, v >>= 8n) hi[i] = Number(v & 0xffn);
+    if (big < 2n ** 256n) expect(verifyEd25519Strict(k.pem, 'm', Buffer.concat([sig.subarray(0, 32), hi]).toString('base64'))).toBe(false);
+    // A small-order service key in a key document is a violation and is never pinned.
+    const { store } = makeStore(1);
+    const rec = reconcileServiceKeys(store, b.url, { v: 1, keys: [{ key_id: serviceKeyIdFromPem(pem), public_key_pem: pem, status: 'active', valid_from: null, valid_to: null }] });
+    expect(rec.keys).toHaveLength(0);
+    expect(rec.violations.join('\n')).toMatch(/not a usable Ed25519 public key/);
+    expect(checkPublishedServiceKey([{ key_id: serviceKeyIdFromPem(pem), public_key_pem: pem, status: 'active' }], serviceKeyIdFromPem(pem), '2026-11-01T00:00:00.000Z').ok).toBe(false);
+    store.close();
   });
 });

@@ -628,6 +628,18 @@ pinned, non-revoked key named in `signed_by` over
 `kronicle-lite anchor keys add PEM-FILE`. A pinned public key is never
 replaced from the network; status and validity only tighten (active →
 retired → revoked; `valid_to` only earlier). A key document entry whose
-key_id does not derive from its public key fails verification. Pushing a
+key_id does not derive from its public key fails verification. Key rules
+match the service's (`isokron-anchor src/core/servicekeys.ts`): absent
+status reads as `active`; `retired` needs `valid_to`; `valid_from ≤
+received_at < valid_to`; a key listed twice or with a `successor_signature`
+that does not verify is refused. Ed25519 checks on these paths are strict:
+small-order or non-canonical public keys and R, and S ≥ L, never verify.
+
+The chain listing is paginated by newer services (`next_cursor`, null on
+the last page; `?cursor=` to continue). The client follows it to the end and
+rejects the whole listing — reported, never treated as complete — on a
+paginated page without `next_cursor`, a repeated cursor or anchor, another
+chain's page, or fewer anchors than `anchor_count`. A push to an erased
+chain is answered `410 chain_erased` and is not retried. Pushing a
 different root for an already-anchored range is answered `409` and both
 anchors are flagged `conflict`.

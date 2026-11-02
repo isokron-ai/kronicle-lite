@@ -43,6 +43,26 @@ uses semantic versioning once past 0.x.
   prints a warning (prefer `KRONICLE_ANCHOR_KEY` or `config.json`).
 - **A2-21 (S4):** THREAT-MODEL and README: the service is deployed (Free
   tier); `409 CONFLICT` only for the identical range; what the client checks.
+- **Compatibility with the hardened anchor service (isokron-anchor
+  hardening A2), while staying compatible with the current one:**
+  - `GET /v1/chains/{id}` is followed across pages (`next_cursor`, ≤ 500
+    per page). A paginated page without `next_cursor`, a repeated cursor, an
+    anchor listed twice, another chain's page, or fewer anchors than the
+    service's `anchor_count` rejects the listing: `verify --remote` reports
+    it as a problem (exit 1) and still checks every receipt held locally;
+    MCP `anchor_status` reports `remote: "invalid"`. A pre-pagination
+    service (one page, no `next_cursor`) still works.
+  - A push to an erased chain (`410 chain_erased`) is reported as such,
+    exits 2 and is not retried.
+  - Service-key rules match the service's `src/core/servicekeys.ts`:
+    absent status = active; `retired` needs `valid_to`; `valid_from ≤
+    received_at < valid_to`; a key listed twice, or with a
+    `successor_signature` that does not verify against a listed, trusted
+    predecessor, is refused.
+  - Strict Ed25519 for service keys, receipt countersignatures, successor
+    and re-checked checkpoint signatures: small-order or non-canonical keys
+    and R, and S ≥ L, are refused (node:crypto alone accepts the identity key
+    with R = identity, S = 0 over any message).
 
 Behaviour you will notice: the first online push or `verify --remote` per
 data dir prints `note: pinned 1 anchor service key(s) … on first use`;

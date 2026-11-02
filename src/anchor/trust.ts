@@ -29,7 +29,6 @@
  * (active → retired → revoked; valid_to only moves earlier).
  */
 
-import { createPublicKey } from 'node:crypto';
 import { chmodSync, existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -37,9 +36,10 @@ import type Database from 'better-sqlite3';
 
 import { checkpointSigningPayload } from '../chain/chain.js';
 import { canonicalize } from '../crypto/canonical.js';
-import { chainIdFromPublicKeyPem, verifyEd25519 } from '../crypto/keys.js';
+import { chainIdFromPublicKeyPem } from '../crypto/keys.js';
 import { AnchorConfigError, CONFIG_FILE, readConfigFile } from './config.js';
 import { parseAnchorReceipt, verifyAnchorReceiptSignature, type AnchorReceipt } from './receipt.js';
+import { isUsableEd25519PublicKeyPem, verifyEd25519Strict } from './ed25519-strict.js';
 import { isJsonObject } from './wire.js';
 
 export const SERVICE_KEY_PREFIX = 'anchor-ed25519-';
@@ -96,12 +96,9 @@ function spkiHash(pem: string): string | null {
   }
 }
 
+/** Ed25519 SPKI PEM with a canonical, non-small-order point (A2-09). */
 function isEd25519Pem(pem: string): boolean {
-  try {
-    return createPublicKey(pem).asymmetricKeyType === 'ed25519';
-  } catch {
-    return false;
-  }
+  return isUsableEd25519PublicKeyPem(pem);
 }
 
 function originOf(url: string): string {
@@ -143,7 +140,7 @@ export function readPinFile(scope: PinScope): PinnedServiceKey[] {
     out.push({
       key_id: k['key_id'],
       public_key_pem: k['public_key_pem'],
-      status: str(k['status']) ?? 'unknown',
+      status: str(k['status']) ?? 'active',
       valid_from: str(k['valid_from']),
       valid_to: str(k['valid_to']),
       source: (str(k['source']) ?? 'tofu') as PinSource,
@@ -299,7 +296,7 @@ export function reconcileServiceKeys(scope: PinScope, anchorUrl: string, doc: un
     const key_id = e['key_id'];
     const pem = e['public_key_pem'];
     if (!isEd25519Pem(pem)) {
-      violations.push(`service key ${key_id} from ${origin}: public_key_pem is not an Ed25519 public key`);
+      violations.push(`service key ${key_id} from ${origin}: public_key_pem is not a usable Ed25519 public key (malformed, non-canonical or small order)`);
       continue;
     }
     const derived = serviceKeyIdFromPem(pem);
@@ -311,12 +308,26 @@ export function reconcileServiceKeys(scope: PinScope, anchorUrl: string, doc: un
     entries.push({
       key_id,
       public_key_pem: pem,
-      status: s(e['status']) ?? 'unknown',
+      status: s(e['status']) ?? 'active',
       valid_from: s(e['valid_from']),
       valid_to: s(e['valid_to']),
       successor_signature: s(e['successor_signature']),
       signed_by: s(e['signed_by']),
     });
+  }
+
+  // Same rules the service applies (isokron-anchor src/core/servicekeys.ts):
+  // a key_id listed twice, or a successor_signature that does not verify
+  // against a listed, trusted predecessor, disqualifies the entry.
+  const counts = new Map<string, number>();
+  for (const e of entries) counts.set(e.key_id, (counts.get(e.key_id) ?? 0) + 1);
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i]!;
+    const why = (counts.get(e.key_id) ?? 0) > 1 ? `${e.key_id} is listed more than once` : successionRefusal(e, entries);
+    if (why) {
+      violations.push(`service key document from ${origin}: ${why}; refusing it`);
+      entries.splice(i, 1);
+    }
   }
 
   const trust = new Map(trusted0.map((k) => [k.key_id, k]));
@@ -363,7 +374,7 @@ export function reconcileServiceKeys(scope: PinScope, anchorUrl: string, doc: un
           rank(signer.status) < 2 &&
           e.successor_signature !== null &&
           e.valid_from !== null &&
-          verifyEd25519(signer.public_key_pem, canonicalize({ key_id: e.key_id, public_key_pem: e.public_key_pem, valid_from: e.valid_from }), e.successor_signature);
+          verifyEd25519Strict(signer.public_key_pem, successorSigningPayload({ key_id: e.key_id, public_key_pem: e.public_key_pem, valid_from: e.valid_from }), e.successor_signature);
         if (ok) {
           const pin: PinnedServiceKey = {
             ...anchorPin(e.public_key_pem, 'successor', origin),
@@ -403,26 +414,89 @@ export function reconcileServiceKeys(scope: PinScope, anchorUrl: string, doc: un
 
 // ───────────────────────────── receipts ─────────────────────────────
 
-/** null when `key` may vouch for a receipt received at `received_at`, else why not (A2-04). */
+export function successorSigningPayload(k: { key_id: string; public_key_pem: string; valid_from: string }): string {
+  return canonicalize({ key_id: k.key_id, public_key_pem: k.public_key_pem, valid_from: k.valid_from });
+}
+
+const UNTRUSTED_STATUSES = new Set(['revoked', 'compromised']);
+
+/**
+ * A successor_signature, when present, must verify against a listed,
+ * not-revoked/compromised predecessor named by signed_by (not itself) over
+ * canonicalize({key_id, public_key_pem, valid_from}). null when fine.
+ */
+function successionRefusal(
+  entry: { key_id: string; public_key_pem: string; valid_from?: string | null; successor_signature?: string | null; signed_by?: string | null },
+  listed: readonly { key_id: string; public_key_pem: string; status?: string | null }[],
+): string | null {
+  if (entry.successor_signature === null || entry.successor_signature === undefined) return null;
+  if (!entry.signed_by) return `${entry.key_id}: successor_signature present but signed_by is missing`;
+  if (entry.signed_by === entry.key_id) return `${entry.key_id}: successor_signature is self-signed`;
+  const pred = listed.find((k) => k.key_id === entry.signed_by);
+  if (!pred) return `${entry.key_id}: successor_signature signed_by ${entry.signed_by}, which is not listed`;
+  if (UNTRUSTED_STATUSES.has(pred.status ?? '')) return `${entry.key_id}: predecessor ${pred.key_id} is ${pred.status}`;
+  if (!isEd25519Pem(pred.public_key_pem) || serviceKeyIdFromPem(pred.public_key_pem) !== pred.key_id) {
+    return `${entry.key_id}: predecessor ${pred.key_id} does not derive from its public key`;
+  }
+  if (typeof entry.valid_from !== 'string') return `${entry.key_id}: successor_signature present but valid_from is missing`;
+  const payload = successorSigningPayload({ key_id: entry.key_id, public_key_pem: entry.public_key_pem, valid_from: entry.valid_from });
+  return verifyEd25519Strict(pred.public_key_pem, payload, entry.successor_signature) ? null : `${entry.key_id}: successor_signature by ${pred.key_id} does not verify`;
+}
+
+function parseTime(s: string | null | undefined): number | null {
+  if (s === null || s === undefined) return null;
+  const t = Date.parse(s);
+  return Number.isFinite(t) ? t : Number.NaN;
+}
+
+/**
+ * null when `key` may vouch for something issued at `received_at` (the
+ * receipt's signed time), else why not (A2-04). Same rules as the service
+ * (isokron-anchor src/core/servicekeys.ts checkServiceKey):
+ *   - status "active" (the default when absent), or "retired" with a
+ *     valid_to; every other status fails;
+ *   - valid_from ≤ received_at, and received_at < valid_to when set;
+ *   - an unparseable time fails.
+ */
 export function serviceKeyRefusal(
   key: { key_id: string; status?: string | null; valid_from?: string | null; valid_to?: string | null },
   received_at: string,
 ): string | null {
-  const status = key.status ?? 'unknown';
-  if (!(ACCEPTED_SERVICE_KEY_STATUSES as readonly string[]).includes(status)) return `service key ${key.key_id} has status ${status}`;
-  const t = Date.parse(received_at);
-  if (Number.isNaN(t)) return `receipt received_at ${received_at} is not a time`;
-  if (key.valid_from) {
-    const f = Date.parse(key.valid_from);
-    if (Number.isNaN(f)) return `service key ${key.key_id} has an unreadable valid_from`;
-    if (t < f) return `receipt time ${received_at} is before service key ${key.key_id} valid_from ${key.valid_from}`;
-  }
-  if (key.valid_to) {
-    const u = Date.parse(key.valid_to);
-    if (Number.isNaN(u)) return `service key ${key.key_id} has an unreadable valid_to`;
-    if (t > u) return `receipt time ${received_at} is after service key ${key.key_id} valid_to ${key.valid_to}`;
-  }
+  const status = key.status ?? 'active';
+  if (!(ACCEPTED_SERVICE_KEY_STATUSES as readonly string[]).includes(status)) return `service key ${key.key_id} is ${status}; it vouches for nothing`;
+  const t = parseTime(received_at);
+  if (t === null || Number.isNaN(t)) return `receipt time ${received_at} is not a timestamp`;
+  const from = parseTime(key.valid_from);
+  const to = parseTime(key.valid_to);
+  if (Number.isNaN(from) || Number.isNaN(to)) return `service key ${key.key_id} has an unparseable validity window`;
+  if (status === 'retired' && to === null) return `service key ${key.key_id} is retired without valid_to`;
+  if (from !== null && t < from) return `receipt dated ${received_at} precedes service key ${key.key_id} valid_from ${key.valid_from}`;
+  if (to !== null && t >= to) return `receipt dated ${received_at} is after service key ${key.key_id} valid_to ${key.valid_to}`;
   return null;
+}
+
+/**
+ * The service's full check for an UNPINNED key list (AnchorClient.verifyReceipt):
+ * listed exactly once, derives to its key_id, usable point, status and window
+ * at `at`, successor signature when present. Returns the PEM or the reason.
+ */
+export function checkPublishedServiceKey(
+  keys: readonly { key_id: string; public_key_pem: string; status?: string | null; valid_from?: string | null; valid_to?: string | null; successor_signature?: string | null; signed_by?: string | null }[],
+  service_key_id: string,
+  at: string,
+): { ok: true; pem: string } | { ok: false; detail: string } {
+  const matches = keys.filter((k) => k.key_id === service_key_id);
+  if (matches.length === 0) return { ok: false, detail: `${service_key_id} is not listed in /.well-known/anchor-keys.json` };
+  if (matches.length > 1) return { ok: false, detail: `${service_key_id} is listed more than once` };
+  const entry = matches[0]!;
+  if (typeof entry.public_key_pem !== 'string' || !isEd25519Pem(entry.public_key_pem)) return { ok: false, detail: `${service_key_id}: listed key is not a usable Ed25519 public key` };
+  const derived = serviceKeyIdFromPem(entry.public_key_pem);
+  if (derived !== service_key_id) return { ok: false, detail: `listed key derives to ${derived}, not ${service_key_id}` };
+  const refusal = serviceKeyRefusal(entry, at);
+  if (refusal) return { ok: false, detail: refusal };
+  const succ = successionRefusal(entry, keys);
+  if (succ) return { ok: false, detail: succ };
+  return { ok: true, pem: entry.public_key_pem };
 }
 
 export type TrustedReceiptResult = { ok: true; receipt: AnchorReceipt } | { ok: false; reason: string; claimed: AnchorReceipt | null };
@@ -465,7 +539,7 @@ export function receiptChainRefusal(db: Database.Database, receipt: AnchorReceip
     return `local signing key ${receipt.checkpoint.key_id} is unreadable`;
   }
   if (localChain !== receipt.chain_id) return `receipt chain_id ${receipt.chain_id.slice(0, 16)}… does not derive from local key ${receipt.checkpoint.key_id}`;
-  if (!verifyEd25519(row.public_key_pem, checkpointSigningPayload(receipt.checkpoint), receipt.checkpoint.signature)) {
+  if (!verifyEd25519Strict(row.public_key_pem, checkpointSigningPayload(receipt.checkpoint), receipt.checkpoint.signature)) {
     return 'receipt checkpoint signature does not verify against the local chain key';
   }
   return null;

@@ -92,7 +92,11 @@ also controls `config.json`, `anchor_url`, the network path and the
   Status only tightens.
 - Every receipt held locally is checked online too, so a service (or a
   man-in-the-middle) that stops listing an anchor cannot hide a divergence
-  in it; the omission is reported.
+  in it; the omission is reported. A paginated listing is followed to the
+  end; a missing or looping cursor, or fewer anchors than the service's
+  `anchor_count`, rejects the listing instead of passing it.
+- Ed25519 is verified strictly on these paths (no small-order keys or R,
+  canonical encodings, S < L), matching the service.
 - `checkpoint --push` stores only `receipt_jcs` that is exactly the JCS of
   the verified receipt; anything else is refused (exit 2) and nothing is
   stored.

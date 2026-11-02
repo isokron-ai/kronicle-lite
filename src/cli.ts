@@ -220,7 +220,7 @@ function anchorOpts(flags: Record<string, string | true>): AnchorCallOptions {
 }
 
 function isAnchorIoError(err: unknown): boolean {
-  return err instanceof Error && ['AnchorUnreachableError', 'AnchorApiError', 'AnchorConfigError', 'ServiceKeyTrustError'].includes(err.name);
+  return err instanceof Error && ['AnchorUnreachableError', 'AnchorApiError', 'AnchorConfigError', 'ServiceKeyTrustError', 'AnchorListingError'].includes(err.name);
 }
 
 /** `anchor keys`: the explicit operator path for service-key pins (A2-12). */

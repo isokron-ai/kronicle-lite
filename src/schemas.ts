@@ -547,7 +547,7 @@ export const AnchorStatusResultSchema = z.object({
         'Local root over the range in the last countersigned receipt vs the root it signs. unverified: the receipt does not verify against a pinned service key or the local chain key, so nothing was compared.',
       ),
     countersignature: z.enum(['ok', 'failed', 'unchecked']),
-    remote: z.enum(['checked', 'skipped', 'unreachable']),
+    remote: z.enum(['checked', 'skipped', 'unreachable', 'invalid']).describe('invalid: the service answered but its paginated listing was incomplete or looping; nothing remote was trusted.'),
     remote_conflict: z.boolean().nullable(),
     detail: z.string().nullable(),
   }),
