@@ -16,7 +16,7 @@ import type { Chain, ChainEvent } from '../chain/index.js';
 import { canonicalize } from '../crypto/canonical.js';
 import { sha256Hex } from '../crypto/hash.js';
 import type { Db } from '../db/open.js';
-import { scanValue, SecretDetectedError } from '../secrets/guard.js';
+import { redactSecrets, scanForSecrets, scanValue, SecretDetectedError } from '../secrets/guard.js';
 import {
   auditEventType,
   auditIdentity,
@@ -111,14 +111,31 @@ export class AuditLog {
 
   // ───────────────────────────── blobs ─────────────────────────────
 
-  /** Store an artifact by content; returns its ref. Re-putting the same bytes is a no-op. */
-  putBlob(bytes: Uint8Array, media_type?: string): { sha256: string; size: number; media_type?: string } {
+  /**
+   * Store an artifact by content; returns its ref. Re-putting the same bytes
+   * is a no-op. The write-time secret guard runs over the bytes (as latin1,
+   * so binary is scanned byte-for-byte): a match is refused
+   * (SecretDetectedError, nothing stored) unless `secrets: 'redact'`, which
+   * stores a copy with each match replaced by `[REDACTED:<detector>]` and
+   * returns the count as `redactions` (the ref is the redacted copy's hash).
+   */
+  putBlob(bytes: Uint8Array, media_type?: string, opts: { secrets?: 'refuse' | 'redact' } = {}): { sha256: string; size: number; media_type?: string; redactions?: number } {
     if (bytes.byteLength > MAX_BLOB_BYTES) throw new AuditError('blob_too_large', `blob is ${bytes.byteLength} bytes; the limit is ${MAX_BLOB_BYTES}`);
-    const sha256 = blobHash(bytes);
+    let body = Buffer.from(bytes);
+    let redactions = 0;
+    const text = body.toString('latin1');
+    const found = scanForSecrets(text, 'blob');
+    if (found.length > 0) {
+      if (opts.secrets !== 'redact') throw new SecretDetectedError(found, 'this blob', 'redact it first, or put it with secrets: "redact" (CLI --redact-secrets)');
+      const r = redactSecrets(text, 'blob');
+      body = Buffer.from(r.text, 'latin1');
+      redactions = r.findings.length;
+    }
+    const sha256 = blobHash(body);
     this.db
       .prepare(`INSERT OR IGNORE INTO blobs (sha256, size, media_type, bytes, created_at) VALUES (?, ?, ?, ?, ?)`)
-      .run(sha256, bytes.byteLength, media_type ?? null, Buffer.from(bytes), new Date().toISOString());
-    return { sha256, size: bytes.byteLength, ...(media_type !== undefined ? { media_type } : {}) };
+      .run(sha256, body.byteLength, media_type ?? null, body, new Date().toISOString());
+    return { sha256, size: body.byteLength, ...(media_type !== undefined ? { media_type } : {}), ...(redactions > 0 ? { redactions } : {}) };
   }
 
   getBlob(sha256: string): BlobRow | null {
@@ -148,6 +165,8 @@ export class AuditLog {
   }
 
   private recordOne(audit_id: string, raw: AuditEventInput, actor_id: string, index: number): RecordedAuditEvent {
+    const shape = unsafeShape(raw);
+    if (shape) throw new AuditError('invalid_audit_event', `event ${index}: ${shape}`, index);
     const input = AuditEventInputSchema.safeParse(raw);
     if (!input.success) throw new AuditError('invalid_audit_event', `event ${index}: ${input.error.issues[0]!.message}`, index);
     const { kind, event_key } = input.data;
@@ -279,7 +298,8 @@ export class AuditLog {
   query(q: AuditQuery): AuditEventView[] {
     if (q.audit_id === undefined && q.fingerprint === undefined) throw new AuditError('invalid_audit_event', 'query needs audit_id or fingerprint');
     const where: string[] = ['a.seq > ?'];
-    const args: (string | number)[] = [q.after_seq ?? 0];
+    const after = Number.isSafeInteger(q.after_seq) ? Math.max(q.after_seq!, 0) : 0;
+    const args: (string | number)[] = [after];
     let from = 'audit_events a';
     if (q.fingerprint !== undefined) {
       from = 'audit_event_fingerprints f JOIN audit_events a ON a.seq = f.seq';
@@ -291,7 +311,7 @@ export class AuditLog {
       where.push(`a.${col} = ?`);
       args.push(v);
     }
-    const limit = Math.min(Math.max(q.limit ?? 200, 1), 5000);
+    const limit = Number.isFinite(q.limit) ? Math.min(Math.max(Math.trunc(q.limit!), 1), 5000) : 200;
     const rows = this.db
       .prepare(
         `SELECT a.seq, a.audit_id, a.kind, a.event_key, e.event_id, e.this_hash, e.actor_id, e.occurred_at, e.payload_canonical
@@ -310,6 +330,26 @@ export class AuditLog {
   static payloadHash(payload: Record<string, unknown>): string {
     return sha256Hex(canonicalize(payload));
   }
+}
+
+/** Deepest nesting an audit event may have (the real payloads need 4). */
+export const MAX_EVENT_DEPTH = 16;
+
+/**
+ * Refuse what a schema would silently drop or choke on: `__proto__` keys (JSON.parse makes them own
+ * properties; zod and object spreads drop or reinterpret them) and nesting deeper than MAX_EVENT_DEPTH.
+ * Iterative, so a 100k-deep value costs nothing.
+ */
+function unsafeShape(v: unknown): string | null {
+  const stack: [unknown, number][] = [[v, 0]];
+  while (stack.length > 0) {
+    const [x, d] = stack.pop()!;
+    if (typeof x !== 'object' || x === null) continue;
+    if (d > MAX_EVENT_DEPTH) return `nested deeper than ${MAX_EVENT_DEPTH} levels`;
+    if (!Array.isArray(x) && Object.prototype.hasOwnProperty.call(x, '__proto__')) return 'a "__proto__" key is not allowed';
+    for (const y of Object.values(x as object)) stack.push([y, d + 1]);
+  }
+  return null;
 }
 
 function strOrNull(v: unknown): string | null {

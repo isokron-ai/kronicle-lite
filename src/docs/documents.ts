@@ -130,12 +130,15 @@ export interface TombstoneBlockResult {
 export class DocumentError extends Error {
   override readonly name = 'DocumentError';
   constructor(
-    readonly code: 'unknown_block' | 'block_not_live' | 'unknown_document' | 'invalid_slug' | 'empty_content' | 'invalid_source' | 'invalid_lineage',
+    readonly code: 'unknown_block' | 'block_not_live' | 'unknown_document' | 'invalid_slug' | 'empty_content' | 'invalid_source' | 'invalid_lineage' | 'reserved_key',
     message: string,
   ) {
     super(message);
   }
 }
+
+/** 0.9.0: chain idempotency-key namespaces only kronicle-lite's own writers (audit, apply) may use. */
+export const RESERVED_KEY_PREFIXES = ['audit:', 'apply:'] as const;
 
 export const SLUG_RE = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 /**
@@ -517,6 +520,11 @@ export class DocumentStore {
     args = { ...args, ...guarded.fields };
     if (!isValidSlug(args.slug)) {
       throw new DocumentError('invalid_slug', `slug must match ${SLUG_RE} or the namespaced form ${PATH_SLUG_RE}`);
+    }
+    // 0.9.0: idempotency keys under these prefixes belong to audit_record and apply; a document put
+    // holding one would squat a future audit event or apply commit (its retry would replay the put).
+    if (args.idempotency_key !== undefined && RESERVED_KEY_PREFIXES.some((p) => args.idempotency_key!.startsWith(p))) {
+      throw new DocumentError('reserved_key', `idempotency_key prefixes ${RESERVED_KEY_PREFIXES.join(', ')} are reserved for audit_record / apply`);
     }
     if (args.source !== undefined && (typeof args.source.kind !== 'string' || typeof args.source.path !== 'string')) {
       throw new DocumentError('invalid_source', 'source needs string kind and path');
