@@ -416,6 +416,12 @@ regression test (test/lineage-integrity.test.ts) and its probe now passes.
   `lineage_unknown`; pulse `reason` adds `pending` (with `pending[]`), and
   in actor mode the invoking actor's `pending` gates a pulse that has no
   usable position.
+- Cost: the projection half of the integrity pass (live-block re-hash,
+  lifecycle and lineage rows, FTS content) is memoised per database state
+  (`data_version`, this connection's `total_changes`, chain head), so repeated
+  pulses on a long-lived server cost a lookup; any write by any connection
+  re-runs it. The lifecycle check uses `IN` over the retired ids instead of a
+  correlated `EXISTS` (seconds → milliseconds on a 1k-document store).
 
 ### Migration
 

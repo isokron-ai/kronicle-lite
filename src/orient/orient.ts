@@ -27,7 +27,7 @@ import {
   type StaleWriteAdvisory,
 } from './drift.js';
 import { scrubDeep } from '../secrets/guard.js';
-import { FlightRecorder, type FlightRecord } from './flight-recorder.js';
+import { FlightRecorder } from './flight-recorder.js';
 import { __mutants, type FormatRule } from './cosmetic.js';
 import { computeRetractions, type Retraction } from './retraction.js';
 import { snippet, wordDiff } from './textdiff.js';
