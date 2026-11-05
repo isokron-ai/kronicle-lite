@@ -33,6 +33,22 @@ uses semantic versioning once past 0.x.
   `verify-bundle DIR [--key PEM]`, offline. Deterministic canonical JSON.
   docs/EVIDENCE-BUNDLE.md is the verification procedure; a pass (or an
   anchor) proves integrity and existence, not that the audit is correct.
+- **Review hardening (before release).**
+  - **Manifest signature.** The store key signs the whole canonical manifest:
+    index, stub hashes, blob lists and digests. Before this, the signature
+    covered only the root, so an audit event could be turned into a stub and
+    the bundle still verified, even with `--key`.
+  - **Missing artifacts** fail `verify-bundle` unless `--allow-missing` is
+    passed, and the result reports it.
+  - **Hostile bundles** yield `ok: false`, never a throw. That covers any
+    shape, any depth, blob names that are not 64 hex, and blobs that are
+    directories.
+  - **Blobs** go through the write-time secret guard: refused, or stored
+    redacted with `--redact-secrets`.
+  - **Ingest:** `__proto__` keys and nesting deeper than 16 are refused. A
+    second refuting `gate_result` is allowed.
+  - **Reserved keys:** the `audit:` and `apply:` idempotency-key prefixes are
+    reserved, and `put_document` refuses them (`reserved_key`).
 
 ### Changed
 

@@ -12,6 +12,16 @@ kronicle-lite records MCP-audit evidence as first-class chain events.
 
 Source: `src/audit/`. Bundles: [EVIDENCE-BUNDLE.md](EVIDENCE-BUNDLE.md).
 
+## Blobs
+
+`audit put-blob FILE` stores an artifact by content.
+- **Secret guard.** The write-time secret guard runs over the bytes, read as
+  latin1 so binary is scanned byte for byte. A match is refused and nothing is
+  stored.
+- **Redaction.** `--redact-secrets` (API `secrets: 'redact'`) stores a copy with
+  each match replaced by `[REDACTED:<detector>]` and returns `redactions: n`.
+  The ref is the hash of the redacted copy.
+
 ## Recording
 
 - **MCP:** `audit_record {audit_id, events: [{kind, event_key, payload}]}`, at
@@ -22,6 +32,8 @@ Source: `src/audit/`. Bundles: [EVIDENCE-BUNDLE.md](EVIDENCE-BUNDLE.md).
 **One call is one transaction.** A bad event refuses the whole call, and the
 error carries `index`. Each event is checked in this order:
 
+0. **Shape.** `__proto__` keys and nesting deeper than 16 levels are refused,
+   not silently dropped.
 1. **Kind and schema.** The payload must validate against the schema for its
    `kind` (below). Unknown fields are refused. `audit_id` and `event_key` are
    filled into the payload.
@@ -56,10 +68,19 @@ is `{sha256, size, media_type?, redacted?: true}`.
 
 The full JSON Schemas are served at `kronicle://schemas/audit`.
 
+**Reserved keys.** The chain idempotency keys `audit:…` and `apply:…` are
+reserved. `put_document` refuses them (`reserved_key`), so no document write
+can squat a future audit event or apply commit.
+
 ## Finding state (projection)
 
-A finding moves through four statuses: `discovered → refuted | accepted`,
-`refuted | accepted → reopened`, and `reopened → refuted | accepted`.
+| from \ to | discovered | refuted | accepted | reopened |
+|---|---|---|---|---|
+| (new) | yes | no | no | no |
+| discovered | no | yes | yes | no |
+| refuted | no | yes (another refuter) | no | yes |
+| accepted | no | no | no | yes |
+| reopened | no | yes | yes | no |
 
 - **First event:** a finding's first event must be `finding{status: discovered}`.
 - **Refuted:** a `gate_result` with `verdict: refuted` refutes the finding.

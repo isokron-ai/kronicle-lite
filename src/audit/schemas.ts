@@ -178,13 +178,18 @@ export function statusEffect(kind: AuditKind, payload: Record<string, unknown>):
   return null;
 }
 
-/** Allowed finding transitions (from → to). The first event must be `discovered`. */
+/**
+ * Allowed finding transitions (from → to); docs/AUDIT.md has the table.
+ * The first event must be `discovered`.
+ */
 export function transitionAllowed(from: FindingStatus | null, to: FindingStatus): boolean {
   if (from === null) return to === 'discovered';
   switch (to) {
     case 'discovered':
       return false;
     case 'refuted':
+      // Several refuters may refute the same finding: refuted → refuted is a no-op transition.
+      return from === 'discovered' || from === 'reopened' || from === 'refuted';
     case 'accepted':
       return from === 'discovered' || from === 'reopened';
     case 'reopened':

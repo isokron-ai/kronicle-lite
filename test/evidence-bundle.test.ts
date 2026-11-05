@@ -107,18 +107,18 @@ describe('evidence bundle: export and offline verification', () => {
     // a pinned key that did not sign it
     {
       const { kl, dir } = fresh();
-      expect(failed(dir, { public_key_pem: ephemeralIdentity().signer.public_key_pem })).toEqual(['root']);
+      expect(failed(dir, { public_key_pem: ephemeralIdentity().signer.public_key_pem })).toEqual(['signature', 'root']);
       expect(failed(dir, { public_key_pem: kl.identity.signer.public_key_pem })).toEqual([]);
       kl.close();
     }
-    // the redacted list emptied: a dangling ref
+    // the redacted list emptied: the manifest signature breaks, and the ref dangles
     {
       const { kl, dir } = fresh();
       const p = join(dir, 'manifest.json');
       const m = JSON.parse(readFileSync(p, 'utf8')) as { redacted: unknown[] };
       m.redacted = [];
       writeFileSync(p, canonicalize(m as never) + '\n');
-      expect(failed(dir)).toEqual(['refs']);
+      expect(failed(dir)).toEqual(['signature', 'refs']);
       kl.close();
     }
     // an extra file slipped into blobs/
@@ -138,14 +138,15 @@ describe('evidence bundle: export and offline verification', () => {
     }
   });
 
-  it('a blob gone from the store is listed as missing (never hidden) and the bundle still verifies as declared', () => {
+  it('a blob gone from the store is listed as missing (never hidden): the bundle fails unless missing is allowed', () => {
     const kl = new KronicleLite({ memory: true });
     const { resp } = seeded(kl);
     kl.db.prepare(`DELETE FROM blobs WHERE sha256 = ?`).run(resp.sha256);
     const dir = tempDir('kl-bundle-');
     const r = exportBundle({ chain: kl.chain, audit: kl.audit, signer: kl.identity.signer, audit_id: 'A1', dir });
     expect(r.manifest.missing.map((x) => x.sha256)).toEqual([resp.sha256]);
-    expect(verifyBundle(dir)).toMatchObject({ ok: true, counts: { missing: 1 } });
+    expect(verifyBundle(dir)).toMatchObject({ ok: false, allow_missing: false, counts: { missing: 1 } });
+    expect(verifyBundle(dir, { allow_missing: true })).toMatchObject({ ok: true, allow_missing: true, counts: { missing: 1 } });
     kl.close();
   });
 

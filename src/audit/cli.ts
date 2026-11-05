@@ -23,7 +23,7 @@ export async function runAuditCli(positional: string[], flags: Flags, dataDir: s
       case 'put-blob': {
         const file = rest[0];
         if (!file) break;
-        const ref = store.audit.putBlob(readFileSync(file), str(flags['media-type']));
+        const ref = store.audit.putBlob(readFileSync(file), str(flags['media-type']), { secrets: flags['redact-secrets'] === true ? 'redact' : 'refuse' });
         process.stdout.write(JSON.stringify(ref) + '\n');
         return 0;
       }

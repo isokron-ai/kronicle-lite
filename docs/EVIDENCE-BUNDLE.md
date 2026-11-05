@@ -13,13 +13,19 @@ kronicle-lite verify-bundle bundle/ [--key store.pem]     # anywhere; exit 0 = v
 
 ## What a passing check proves, and what it does not
 
-**A pass proves four things:**
-- The files are exactly what the manifest describes.
-- The audit's events hash correctly and form one contiguous segment of a single
-  hash chain.
-- The store key named in the manifest signed that segment's Merkle root. Pin the
-  key with `--key`, or the check only proves the key is self-consistent.
-- Every artifact reference resolves, or is openly declared redacted or missing.
+**A pass proves five things:**
+- **The store key signed the whole manifest.** The signature covers its index
+  (which seqs are full audit events and which are stubs, with each stub's hash),
+  the blob lists and every digest, not just the root. Pin the key with `--key`.
+  Without it, the check only proves the bundle is self-consistent under
+  *some* key, and anyone can produce such a bundle.
+- **The files are exactly what the manifest describes.**
+- **The events form one chain segment.** The audit's events hash correctly and,
+  together with the stubs, form one contiguous segment of a single hash chain.
+  The same key signs that segment's Merkle root.
+- **Every artifact reference resolves**, or is openly declared redacted.
+- **Nothing is missing.** A missing artifact fails the bundle unless you pass
+  `--allow-missing`, and the result reports that you did.
 
 **A pass does not prove the audit is correct.** The findings, verdicts and
 measurements are claims made by whoever recorded them. A bundle shows they were
@@ -35,8 +41,9 @@ audit was right, complete, or honest.
 | File | Content |
 |---|---|
 | `manifest.json` | Canonical JSON ([RFC 8785](https://www.rfc-editor.org/rfc/rfc8785)) plus `\n`: format, audit_id, range, index, blob lists, signed root |
-| `events.jsonl` | One canonical JSON line per chain event in `[from_seq, to_seq]`. Audit events are in full (the stored chain event). Every other event in the range is a **stub**: `{seq, prev_hash, this_hash, stub: true}`, with no payload |
-| `blobs/<sha256>` | Each referenced artifact the store holds, named by the sha256 of its bytes |
+| `manifest.json` signature | `signature: {key_id, signature}`: the store key over the canonical manifest (step 2) |
+| `events.jsonl` | One canonical JSON line per chain event in `[from_seq, to_seq]`. Audit events are in full (the stored chain event). Every other event in the range is a **stub**: `{seq, prev_hash, this_hash, stub: true}`, with no payload; `manifest.stubs` lists each stub's `{seq, this_hash}` |
+| `blobs/<sha256>` | Each referenced artifact the store holds, named by the sha256 of its bytes. Blobs pass the write-time secret guard when they are stored (AUDIT.md) |
 
 - **Range:** the audit's first event to its last.
 - **Why stubs:** they keep the hash links continuous without disclosing other
@@ -47,14 +54,26 @@ audit was right, complete, or honest.
 
 ## Verification procedure
 
-`verify-bundle` reports the first failure in each of the six steps below.
+`verify-bundle` reports the first failure in each of the eight steps below.
+
+Hostile input fails cleanly:
+- Any manifest shape, any nesting depth (more than 64 levels is refused before
+  parsing) and any file name yields `ok: false` with a reason, never a crash.
+- Blob names must be 64 lowercase hex characters and regular files, so nothing
+  outside `DIR/blobs/` is ever read.
 
 ### 1. `canonical`
 1. `manifest.json` must equal `JCS(manifest) + "\n"`.
 2. Every line of `events.jsonl` must equal `JCS(line)`, and the file must end with `\n`.
 3. `sha256(events.jsonl bytes)` must equal `manifest.events_sha256`.
 
-### 2. `events`
+### 2. `signature`
+1. `signature.signature` must be an Ed25519 signature over
+   `"kronicle-lite/evidence-bundle-manifest/1\n" + JCS(manifest without "signature")`
+   by `root.public_key_pem`, or by the `--key` given.
+2. `signature.key_id` and `root.key_id` must both equal that key's id.
+
+### 3. `events`
 For every full line (not a stub):
 1. Recompute `this_hash` with the FORMAT §1 recipe:
    `sha256(JCS({event_id, event_type, actor_id, occurred_at, payload}) | seq | prev_hash | nonce)`.
@@ -62,10 +81,13 @@ For every full line (not a stub):
 3. `payload.audit_id` must equal the manifest's `audit_id`.
 4. The payload must validate against that kind's schema (AUDIT.md).
 
-Then check that the full lines match `manifest.events` and the stubs match
-`manifest.stubs`, exactly and in order.
+A stub is exactly `{seq, prev_hash, this_hash, stub: true}`. The full lines
+must match `manifest.events`, and the stubs must match `manifest.stubs`
+(`{seq, this_hash}`), exactly and in order. Because the manifest is signed,
+turning an audit event into a stub breaks the signature, even if every digest
+is recomputed.
 
-### 3. `chain`
+### 4. `chain`
 1. Lines must run `from_seq, from_seq+1, … to_seq` with no gaps.
 2. `leaf_count` must equal the number of lines.
 3. The first line's `prev_hash` must equal `range.first_prev_hash`.
@@ -74,33 +96,37 @@ Then check that the full lines match `manifest.events` and the stubs match
 A stub contributes its `prev_hash` and `this_hash`, so links stay checkable
 through events whose payloads are withheld.
 
-### 4. `root`
+### 5. `root`
 1. Compute the Merkle root (FORMAT §2) over the segment's leaves.
    - Each leaf is `sha256(JCS({seq, this_hash}))`.
    - Each node is `sha256(left ‖ right)`.
    - An odd node is promoted unchanged.
 2. The root must equal `root.root`.
 3. The Ed25519 signature `root.signature` must verify over
-   `JCS({v: 1, from_seq, to_seq, leaf_count, root})` with `root.public_key_pem`.
-4. That key's id, `ed25519-` plus the first 16 hex of `sha256(SPKI DER)`, must
-   equal `root.key_id`.
-5. With `--key`, the pinned key must be the one that signed.
+   `JCS({v: 1, from_seq, to_seq, leaf_count, root})` with the same key as
+   step 2. The key's id is `ed25519-` plus the first 16 hex of `sha256(SPKI DER)`.
 
 This root is the same checkpoint the store keeps for the range, so the existing
 anchor flow can anchor it.
 
-### 5. `artifacts`
-1. Every entry in `manifest.blobs` must exist as `blobs/<sha256>`, hash to its
-   name and have the stated size.
-2. No file may sit in `blobs/` unless it is listed.
+### 6. `artifacts`
+1. Every entry in `manifest.blobs` must exist as a regular file
+   `blobs/<sha256>`, where the name is 64 hex. It must hash to its name and
+   have the stated size.
+2. No entry may sit in `blobs/` unless it is listed.
 
-### 6. `refs`
+### 7. `refs`
 1. Every blob ref in every event payload must appear in exactly one of:
    - `blobs` (present);
    - `redacted` (declared at record time as `redacted: true`: never stored);
    - `missing` (the store no longer held it at export).
 2. Every listed hash must be referenced by some event.
 3. Every `evidence` event id must be an event in the bundle.
+
+### 8. `missing`
+`manifest.missing` must be empty, unless the caller passes `--allow-missing`
+(`allow_missing` in the JSON result). The bundle then verifies with the
+missing count reported.
 
 ## The redacted and missing lists
 
@@ -109,7 +135,8 @@ anchor flow can anchor it.
   carries the hash of the original, so anyone holding the original can prove
   it matches.
 - **`missing`:** artifacts that were stored once and are gone now. Export lists
-  them and exits 1, so they are never silently dropped.
+  them and exits 1, and `verify-bundle` fails without `--allow-missing`, so
+  they are never silently dropped.
 
 A verifier should read both lists as part of the result. "Verifies, with 3
 redacted and 0 missing" is a different statement from "verifies, with 0 and 0".

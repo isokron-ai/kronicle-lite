@@ -82,6 +82,7 @@ const BOOLEAN_FLAGS = new Set([
   'core',
   'redact-secrets',
   'findings',
+  'allow-missing',
   'allow-secrets',
   'insecure-http',
 ]);
@@ -197,13 +198,17 @@ Usage:
   kronicle-lite pulse        [--data-dir DIR] [--cwd DIR] [--cursor C | --state D] [--mode deny|warn] [--json] [-- CMD…]
                                                                  the exec-time check: exit 0 allow, 77 refused (unreconciled
                                                                  retractions or integrity failure; reason on stderr), 3 no store
-  kronicle-lite audit put-blob FILE [--media-type T]           store an artifact by content (outside the chain); prints its ref
+  kronicle-lite audit put-blob FILE [--media-type T] [--redact-secrets]
+                                                                 store an artifact by content (outside the chain); prints its ref;
+                                                                 refused when it holds a secret unless --redact-secrets
   kronicle-lite audit record --audit-id A [--in FILE|-] [--actor A]
                                                                  append audit events (JSONL of {kind, event_key, payload}),
                                                                  all or nothing; a retried event_key is a no-op
   kronicle-lite audit query  --audit-id A | --fingerprint F [--kind K] [--finding ID] [--findings] [--json]
   kronicle-lite audit export --audit-id A --out DIR             evidence bundle: manifest + events + blobs, signed root
-  kronicle-lite verify-bundle DIR [--key PEM-FILE] [--json]     verify a bundle offline (no store); exit 1 on any failure
+  kronicle-lite verify-bundle DIR [--key PEM-FILE] [--allow-missing] [--json]
+                                                                 verify a bundle offline (no store); exit 1 on any failure
+                                                                 (missing artifacts fail unless --allow-missing)
   kronicle-lite shim install [--dir D] [--commands git,terraform,kubectl,…] [--world "make release,…"] [--mode deny|warn]
   [--git-hook]   | status | ack --operator [--through SEQ] | uninstall   PATH wrappers (+ git pre-push hook) that pulse before
                                                                  world-changing commands (git push, terraform apply, …)
@@ -415,15 +420,15 @@ async function main(argv: string[]): Promise<number> {
     }
     case 'verify-bundle': {
       const dir = positional[0];
-      if (!dir) throw new Error('usage: kronicle-lite verify-bundle DIR [--key PEM-FILE] [--json]');
+      if (!dir) throw new Error('usage: kronicle-lite verify-bundle DIR [--key PEM-FILE] [--allow-missing] [--json]');
       const { verifyBundle } = await import('./audit/verify-bundle.js');
       const key = str(flags['key']);
-      const r = verifyBundle(dir, key ? { public_key_pem: readFileSync(key, 'utf8') } : {});
+      const r = verifyBundle(dir, { ...(key ? { public_key_pem: readFileSync(key, 'utf8') } : {}), allow_missing: flags['allow-missing'] === true });
       if (flags['json'] === true) process.stdout.write(JSON.stringify(r, null, 2) + '\n');
       else {
         for (const c of r.checks) process.stdout.write(`${c.ok ? 'ok  ' : 'FAIL'} ${c.check}${c.problem ? `: ${c.problem}` : ''}\n`);
         process.stdout.write(
-          `${r.ok ? 'bundle verifies' : 'bundle does NOT verify'}: audit ${r.audit_id ?? '?'}, ${r.counts.events} event(s), ${r.counts.stubs} stub(s), ${r.counts.blobs} blob(s), ${r.counts.redacted} redacted, ${r.counts.missing} missing; root ${r.root ?? '?'}; manifest sha256 ${r.manifest_sha256 ?? '?'}\n`,
+          `${r.ok ? 'bundle verifies' : 'bundle does NOT verify'}: audit ${r.audit_id ?? '?'}, ${r.counts.events} event(s), ${r.counts.stubs} stub(s), ${r.counts.blobs} blob(s), ${r.counts.redacted} redacted, ${r.counts.missing} missing${r.allow_missing ? ' (allowed by --allow-missing)' : ''}; key ${key ? 'pinned' : 'NOT pinned (pass --key)'}; root ${r.root ?? '?'}; manifest sha256 ${r.manifest_sha256 ?? '?'}\n`,
         );
       }
       return r.ok ? 0 : 1;
