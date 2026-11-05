@@ -224,7 +224,7 @@ describe('L3: staleness cut short by the depth bound or a cycle is not memoized'
   });
 });
 
-describe('L4: lineage inference starts at the session\'s first orient', () => {
+describe('L4: lineage inference keeps the reads before a re-orient', () => {
   const RUNBOOK = '# Deploy\n\nDeploys go to the cluster blue-7 first.\n';
 
   it('recall → orient (presenting the cursor) → write infers the read, with or without the cursor on the write', async () => {
@@ -241,16 +241,15 @@ describe('L4: lineage inference starts at the session\'s first orient', () => {
     kl.close();
   });
 
-  it('an orient without a cursor starts a new session (earlier reads are not inferred)', async () => {
+  it('R2-04 supersedes L4: a cursorless re-orient keeps reads of the 24 h window (over-approximation, never drop)', async () => {
     const kl = new KronicleLite({ memory: true });
     kl.docs.putDocument({ slug: 'deploy', title: 'D', markdown: RUNBOOK, actor_id: 'h' });
     kl.orient.getSystemState({ actor_id: 'agent' });
     kl.recall.recall({ query: 'deploys cluster', actor_id: 'agent' });
     await new Promise((r) => setTimeout(r, 5));
     const c = kl.orient.getSystemState({ actor_id: 'agent' }).cursor;
-    expect(kl.orient.sessionOrigin('agent', c)).toBe(kl.orient.sessionStart('agent', c));
-    expect(kl.docs.putDocument({ slug: 'n', title: 'N', markdown: '# N\n\nTarget.\n', actor_id: 'agent', cursor: c }).lineage).toBeUndefined();
-    expect(kl.orient.sessionOrigin('nobody')).toBeNull();
+    expect(kl.docs.putDocument({ slug: 'n', title: 'N', markdown: '# N\n\nTarget.\n', actor_id: 'agent', cursor: c }).lineage).toEqual({ derived_from: 0, derived_from_inferred: 1 });
+    expect(kl.orient.sessionStartSeq('nobody')).toBeNull();
     kl.close();
   });
 });

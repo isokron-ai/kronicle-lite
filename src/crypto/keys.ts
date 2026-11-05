@@ -35,6 +35,10 @@ export interface ServerIdentity {
   readonly signer: Signer;
   readonly cursor_secret: string;
   readonly data_dir: string | null;
+  /** 0.8.1 (C2-03): this open created a new cursor-secret for an existing store: every earlier cursor is now unreadable. */
+  readonly cursor_secret_regenerated?: boolean;
+  /** 0.8.1: set when this open had to create the cursor-secret file. */
+  readonly cursor_secret_created?: boolean;
 }
 
 /** key_id = first 16 hex chars of sha256(SPKI DER of the public key). */
@@ -120,16 +124,19 @@ export function loadOrCreateIdentity(dataDir: string): ServerIdentity {
   ).value;
 
   let secret: string;
+  let secretCreated = false;
   try {
-    secret = readOrCreateOnce(
+    const r = readOrCreateOnce(
       secretPath,
       () => randomBytes(32).toString('hex') + '\n',
       (text) => (/^[0-9a-f]{64}$/.test(text.trim()) ? text.trim() : null),
-    ).value;
+    );
+    secret = r.value;
+    secretCreated = r.created;
   } catch (err) {
     if (err instanceof CorruptFileError) throw new Error(`${secretPath} is corrupt; expected 64 hex chars`);
     throw err;
   }
 
-  return { signer: signerFromPrivateKey(priv), cursor_secret: secret, data_dir: dataDir };
+  return { signer: signerFromPrivateKey(priv), cursor_secret: secret, data_dir: dataDir, ...(secretCreated ? { cursor_secret_created: true } : {}) };
 }

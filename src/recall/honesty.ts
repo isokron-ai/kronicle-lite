@@ -35,6 +35,7 @@ export const AUTHORITY_REASONS = [
   'document_source_only',
   'no_source',
   'read_scrubbed',
+  'lineage_unknown',
 ] as const;
 export type AuthorityReason = (typeof AUTHORITY_REASONS)[number];
 
@@ -55,6 +56,12 @@ export interface HonestyInput {
    * being re-derived from the current version (src/lineage/lineage.ts).
    */
   stale_derived?: boolean;
+  /**
+   * 0.8.1: the hit's document is a derived note whose sources could not all
+   * be determined (inference cut short by its bound, or a chain of derived
+   * notes deeper than the bound). Caps can_act at inspect_only.
+   */
+  lineage_undetermined?: boolean;
 }
 
 export interface Honesty {
@@ -95,10 +102,13 @@ export function meet(a: Authority, b: Authority): Authority {
 /**
  * Resolve one hit's authority. After the table, a read-time scrub caps
  * can_act at inspect_only (`read_scrubbed`): the text served is not the
- * chained text the evidence was about.
+ * chained text the evidence was about. 0.8.1: so does an undetermined
+ * lineage (`lineage_unknown`): a note whose sources are not known is never
+ * can_act on the strength of its own file.
  */
 export function resolveAuthority(i: HonestyInput): Honesty {
   const rule = HONESTY_RULES.find((r) => r.test(i))!;
+  if (rule.authority === 'can_act' && i.lineage_undetermined === true) return { authority: 'inspect_only', reason: 'lineage_unknown', basis: 'document' };
   if (rule.authority === 'can_act' && i.read_scrubbed) return { authority: 'inspect_only', reason: 'read_scrubbed', basis: 'block' };
   return { authority: rule.authority, reason: rule.reason, basis: rule.basis };
 }

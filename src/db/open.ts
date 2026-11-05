@@ -11,7 +11,7 @@ import {
   type ServerIdentity,
 } from '../crypto/keys.js';
 import { ensureDir } from '../util/once-file.js';
-import { ADDED_COLUMNS, SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
+import { ADDED_COLUMNS, DATA_MIGRATIONS, SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
 
 export type Db = Database.Database;
 
@@ -76,10 +76,23 @@ export function openDatabase(opts: OpenOptions = {}): Opened {
       .transaction(() => {
         db.exec(SCHEMA_DDL);
         addColumns(db);
+        dataMigrations(db);
         initialize(db, identity);
       })
       .immediate(),
   );
+  // 0.8.1 (C2-03): a cursor-secret created for a store that already had a chain
+  // (restored without it, deleted) silently invalidated every cursor. Never silent:
+  // say so on stderr, record it in meta, and let callers treat old cursors as unknown.
+  if (identity.cursor_secret_created && !opts.memory && (db.prepare(`SELECT seq FROM chain_head WHERE id = 1`).get() as { seq: number } | undefined)?.seq) {
+    identity = { ...identity, cursor_secret_regenerated: true };
+    process.stderr.write(`kronicle-lite: ${dataDir}/cursor-secret was missing and has been regenerated; every cursor issued before is now unreadable (positions recover from the flight recorder; shims re-check pending).\n`);
+    try {
+      db.prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES ('cursor_secret_regenerated_at', ?)`).run(new Date().toISOString());
+    } catch {
+      // best effort: the warning above is the signal
+    }
+  }
   return { db, identity, dataDir };
 }
 
@@ -125,6 +138,17 @@ function addColumns(db: Db): void {
       if (c.backfill) db.exec(c.backfill);
     }
     if (c.index) db.exec(c.index);
+  }
+}
+
+/** 0.8.1: one-time projection backfills (DATA_MIGRATIONS), each recorded in `meta`. */
+function dataMigrations(db: Db): void {
+  const done = db.prepare(`SELECT 1 FROM meta WHERE key = ?`);
+  const mark = db.prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)`);
+  for (const m of DATA_MIGRATIONS) {
+    if (done.get(m.key) !== undefined) continue;
+    db.exec(m.sql);
+    mark.run(m.key, new Date().toISOString());
   }
 }
 

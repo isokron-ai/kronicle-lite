@@ -54,17 +54,45 @@ const looksLikeCredential = (raw: string) => {
 const PLACEHOLDER =
   /^(?:<[^>]*>|\$\{\{[^}]*\}\}|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|\{\{[^}]*\}\}|%[A-Za-z_]+%|\*+|x+|X+|\.{3,}|…|password|passwd|pass|pwd|secret|changeme|example|placeholder|redacted|your[-_a-z]*|my[-_a-z]*|<redacted>|\[REDACTED[^\]]*\])$/i;
 
+/**
+ * 0.8.1: a value is a placeholder when it IS one, or is built only from
+ * delimited words around one (`example-password`, `your_db_password`,
+ * `changeme123`). A value that merely CONTAINS the word inside other
+ * characters (`Kx9…example…`) is not: that rule let real passwords through.
+ */
+const PLACEHOLDER_WORDS = /^(?:[a-z0-9]+[-_.])*(?:example|placeholder|changeme|redacted|dummy|sample)(?:[-_.]?[a-z0-9]+)*$/i;
 function isPlaceholder(v: string): boolean {
   const t = v.replace(/^['"]|['"]$/g, '');
-  return PLACEHOLDER.test(t) || /example|placeholder|your[-_]|changeme|REDACTED/i.test(t);
+  return PLACEHOLDER.test(t) || /^your[-_]/i.test(t) || /REDACTED/.test(t) || (PLACEHOLDER_WORDS.test(t) && /^(?:[a-z]+[-_.]?)*(?:example|placeholder|changeme|redacted|dummy|sample)/i.test(t));
 }
+
+/**
+ * 0.8.1: `<key><sep><value>` where the key contains password/passwd, or ends in
+ * pwd/secret/token (`secretName`, `token_url`, `tokenizer` are not secrets).
+ * Group 1 = key, 2 = value (quotes kept, checked by isPlaceholder).
+ */
+const PASSWORD_ASSIGNMENT =
+  /(?<![A-Za-z0-9_-])["']?([A-Za-z0-9_-]{0,48}pass(?:word|wd)[A-Za-z0-9_-]{0,48}|[A-Za-z0-9_-]{0,48}(?:pwd|secret|token)s?)["']?[ \t]*(?::=|=|:)[ \t]*(["']?[^\s"'#,;{}[\]]{6,512}["']?)/gi;
+/** The value of a password assignment: a literal credential, not a path, a reference or an expression. */
+const passwordValueOk = (m: string): boolean => {
+  const sep = m.search(/(?::=|=|:)[ \t]*["']?[^\s"'#,;{}[\]]{6,}["']?$/);
+  const v = m.slice(sep).replace(/^(?::=|=|:)[ \t]*/, '').replace(/^['"]|['"]$/g, '');
+  if (/^[~/.]|^[A-Za-z]:\\|^https?:|^\$|^%|environ|getenv|secrets?\.|\(|^(?:true|false|null|none|nil|undefined)$/i.test(v)) return false;
+  // A letter and a digit (hunter2, Zq…9), or a long mixed value (three of: lower, upper, digit, symbol).
+  if (!/[A-Za-z]/.test(v)) return false;
+  if (/[0-9]/.test(v)) return true;
+  const classes = [/[a-z]/, /[A-Z]/, /[^A-Za-z0-9]/].filter((r) => r.test(v)).length;
+  return v.length >= 12 && classes >= 3;
+};
 
 /** Write-time ruleset (refuse / redact). Order matters: specific shapes before generic ones. */
 export const WRITE_DETECTORS: readonly Detector[] = [
   {
     id: 'private_key',
     description: 'PEM / OpenSSH / PGP private key with a body',
-    re: /-----BEGIN (?:[A-Z]+ )*PRIVATE KEY(?: BLOCK)?-----\s*\n(?:[A-Za-z0-9+/=:\- ]*\n){0,8}?[A-Za-z0-9+/=]{40,}[\s\S]*?-----END (?:[A-Z]+ )*PRIVATE KEY(?: BLOCK)?-----/g,
+    // 0.8.1 (R2-10): body lines may carry any line prefix: indentation (YAML block
+    // scalar, list item), block quote `>`, list markers, comment `#`, quotes.
+    re: /-----BEGIN (?:[A-Z]+ )*PRIVATE KEY(?: BLOCK)?-----[ \t"',]*\r?\n(?:[ \t>*+#"'-]*[A-Za-z0-9+/=:\- ]*\r?\n){0,8}?[ \t>*+#"'-]*[A-Za-z0-9+/=]{40,}[\s\S]*?-----END (?:[A-Z]+ )*PRIVATE KEY(?: BLOCK)?-----/g,
   },
   { id: 'aws_access_key', description: 'AWS access key id', re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, accept: (m) => !m.includes('EXAMPLE') },
   {
@@ -105,6 +133,16 @@ export const WRITE_DETECTORS: readonly Detector[] = [
     accept: (m) => looksLikeCredential(m.slice(m.search(/[:=]/) + 1)),
   },
   {
+    // 0.8.1 (R2-11): a key NAME that contains password / passwd (anywhere) or ends in
+    // pwd / secret / token, in snake, camel or kebab case (`db_password:`, `"dbPassword": "…"`,
+    // `db-password=`, `apiToken:`), assigned with `:`, `=` or as a JSON pair.
+    id: 'password_assignment',
+    description: 'Password / secret / token assignment under any key spelling, with a real-looking value',
+    re: PASSWORD_ASSIGNMENT,
+    valueGroup: 2,
+    accept: (m) => passwordValueOk(m),
+  },
+  {
     id: 'config_secret',
     description: 'Sensitive config key (password: / secret = / api_key: …) with a real-looking value',
     re: /\b(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|client[_-]?secret)["']?[ \t]*[:=][ \t]*(['"]?[^\s'"#,;]{8,}['"]?)/gi,
@@ -125,7 +163,34 @@ interface Match {
   end: number;
 }
 
+/**
+ * 0.8.1: invisible format characters (soft hyphen, zero-width space / joiners,
+ * word joiner, BOM) are dropped FOR DETECTION ONLY, so a token split by one is
+ * still recognised; `map[i]` = index in the original text of normalised
+ * char i. Stored and served text is never normalised.
+ */
+const INVISIBLE = /[\u00AD\u200B-\u200D\u2060\uFEFF]/;
+function stripInvisible(text: string): { text: string; map: number[] | null } {
+  if (!INVISIBLE.test(text)) return { text, map: null };
+  let out = '';
+  const map: number[] = [];
+  for (let i = 0; i < text.length; i++) {
+    if (INVISIBLE.test(text[i]!)) continue;
+    out += text[i];
+    map.push(i);
+  }
+  map.push(text.length);
+  return { text: out, map };
+}
+
 function matchAll(text: string, detectors: readonly Detector[]): Match[] {
+  const n = stripInvisible(text);
+  if (n.map === null) return matchAllRaw(text, detectors);
+  const map = n.map;
+  return matchAllRaw(n.text, detectors).map((m) => ({ ...m, start: map[m.start]!, end: m.end > 0 ? map[m.end - 1]! + 1 : 0 }));
+}
+
+function matchAllRaw(text: string, detectors: readonly Detector[]): Match[] {
   const out: Match[] = [];
   for (const d of detectors) {
     d.re.lastIndex = 0;
@@ -217,7 +282,7 @@ export function guardFields<T extends Record<string, string>>(
  * (bare key armor lines, any URL userinfo password, shorter tokens). It masks;
  * it never refuses.
  */
-const READ_RULES: readonly { id: string; re: RegExp; valueGroup?: number; needDigit?: boolean }[] = [
+const READ_RULES: readonly { id: string; re: RegExp; valueGroup?: number; needDigit?: boolean; accept?: (m: string) => boolean }[] = [
   { id: 'private_key_armor', re: /-----BEGIN (?:[A-Z]+ )*PRIVATE KEY(?: BLOCK)?-----(?:[\s\S]*?-----END (?:[A-Z]+ )*PRIVATE KEY(?: BLOCK)?-----)?/g },
   { id: 'aws_access_key_id', re: /\b(?:AKIA|ASIA|AGPA|AIDA|AROA|ANPA)[0-9A-Z]{16}\b/g },
   { id: 'github_token', re: /\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,})/g },
@@ -233,10 +298,20 @@ const READ_RULES: readonly { id: string; re: RegExp; valueGroup?: number; needDi
   { id: 'url_password', re: /\b[a-z][a-z0-9+.-]{1,20}:\/\/[^\s:/@'"`<>]+:([^\s@/'"`]+)@/gi, valueGroup: 1 },
   { id: 'auth_header', re: /\b(?:Bearer|Basic|Token)\s+([A-Za-z0-9_\-.~+/]{16,}=*)/g, valueGroup: 1, needDigit: true },
   { id: 'npmrc_auth', re: /(?:_authToken|_password|_auth)\s*=\s*([^\s"']{8,})/g, valueGroup: 1, needDigit: true },
+  // 0.8.1 (R2-11): password / secret / token assignments under any key spelling (same shape as the write rule).
+  { id: 'password_assignment', re: PASSWORD_ASSIGNMENT, valueGroup: 2, accept: passwordValueOk },
 ];
 
 /** Mask read-time matches as `[REDACTED:read:<id>]`. `detectors` lists the rules that fired (deduplicated). */
 export function scrubForRead(text: string): { text: string; detectors: string[] } {
+  if (!INVISIBLE.test(text)) return scrubForReadRaw(text);
+  // 0.8.1: a secret split by invisible characters is masked on the normalised text (served
+  // normalised only when something fired there; otherwise the text goes out as stored).
+  const n = scrubForReadRaw(stripInvisible(text).text);
+  return n.detectors.length > 0 ? n : scrubForReadRaw(text);
+}
+
+function scrubForReadRaw(text: string): { text: string; detectors: string[] } {
   const fired = new Set<string>();
   let out = text;
   for (const r of READ_RULES) {
@@ -246,6 +321,7 @@ export function scrubForRead(text: string): { text: string; detectors: string[] 
         const v = groups[r.valueGroup - 1];
         if (typeof v !== 'string' || isPlaceholder(v) || (r.needDigit === true && !/[0-9]/.test(v))) return m;
       }
+      if (r.accept && !r.accept(m)) return m;
       if (r.id === 'aws_access_key_id' && m.includes('EXAMPLE')) return m;
       fired.add(r.id);
       return `[REDACTED:read:${r.id}]`;

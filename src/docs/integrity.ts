@@ -40,6 +40,15 @@ import { DocumentStore } from './documents.js';
 export const ROW_PROBLEMS = ['content_hash_mismatch', 'chain_event_missing', 'chain_event_mismatch', 'chain_event_hash_mismatch'] as const;
 export type RowProblem = (typeof ROW_PROBLEMS)[number];
 
+/**
+ * 0.8.1: why recall withheld a match. A row problem, or:
+ *   projection_mismatch  the projection says the block is live but the chain retired it
+ *   lineage_mismatch     the document's lineage rows do not match the chain
+ *   store_damaged        the store file failed its check (db/health.ts)
+ */
+export const WITHHELD_PROBLEMS = [...ROW_PROBLEMS, 'projection_mismatch', 'lineage_mismatch', 'store_damaged'] as const;
+export type WithheldProblem = (typeof WITHHELD_PROBLEMS)[number];
+
 export interface BlockRowLike {
   block_id: string;
   doc_id: string;
@@ -105,7 +114,7 @@ export function checkRevisionRow(chain: Chain, row: RevisionRowLike): RowProblem
 }
 
 export interface ProjectionMismatch {
-  table: 'documents' | 'document_revisions' | 'blocks' | 'doc_sources' | 'doc_lineage';
+  table: 'documents' | 'document_revisions' | 'blocks' | 'doc_sources' | 'doc_lineage' | 'doc_lineage_gaps' | 'blocks_fts';
   /** Primary key of the row (doc_id, doc_id@revision or block_id). */
   key: string;
   /** missing (in the chain, not stored) | extra (stored, not in the chain) | a column name | content_hash. */
@@ -168,6 +177,8 @@ const TABLES: { table: ProjectionMismatch['table']; key: string; order: string; 
     order: 'doc_id, source_block_id, inferred',
     cols: ['source_content_hash', 'chain_seq'],
   },
+  // 0.8.1: undetermined lineage (an inference the bound cut short) is safety state too.
+  { table: 'doc_lineage_gaps', key: 'doc_id', order: 'doc_id', cols: ['chain_seq'] },
 ];
 
 function short(v: unknown): string {
@@ -257,6 +268,11 @@ export function verifyProjection(db: Db, chain: Chain): ProjectionResult {
       }
     }
 
+    // 0.8.1 (R2-17): the full-text index must hold exactly the stored text
+    // (absence is certified from it). FTS5's own check, against the content table.
+    const fts = checkFtsContent(db);
+    if (fts) report({ table: 'blocks_fts', key: 'index', field: 'content', detail: fts });
+
     return {
       ok: count === 0,
       events_replayed: events,
@@ -289,7 +305,7 @@ export function rebuildProjection(db: Db, chain: Chain): { events: number } {
     // The delete trigger would feed possibly-corrupt old values back to FTS5;
     // drop it, clear everything, replay, then rebuild the index from scratch.
     db.exec(`INSERT INTO blocks_fts(blocks_fts) VALUES('delete-all'); DROP TRIGGER IF EXISTS blocks_ad;`);
-    db.exec(`DELETE FROM doc_lineage; DELETE FROM doc_sources; UPDATE blocks SET superseded_by = NULL; DELETE FROM blocks; DELETE FROM document_revisions; DELETE FROM documents;`);
+    db.exec(`DELETE FROM doc_lineage_gaps; DELETE FROM doc_lineage; DELETE FROM doc_sources; UPDATE blocks SET superseded_by = NULL; DELETE FROM blocks; DELETE FROM document_revisions; DELETE FROM documents;`);
     db.exec(SCHEMA_SQL.replace(/PRAGMA journal_mode = WAL;/, ''));
     for (const ev of chain.iterate()) {
       docs.applyEvent(ev);
@@ -299,4 +315,70 @@ export function rebuildProjection(db: Db, chain: Chain): { events: number } {
   });
   tx.immediate();
   return { events };
+}
+
+// ───────────────────────────── 0.8.1: cheap cross-checks for every read ─────────────────────────────
+
+const RETIRED_ID = `(CASE WHEN json_valid(e.payload_canonical) THEN json_extract(e.payload_canonical, '$.block_id') END)`;
+
+/**
+ * 0.8.1 (R2-09): block lifecycle in the projection against the chain, cheap
+ * enough for every orient focus and pulse (index lookups and counts, no
+ * replay). Catches what a partial restore or a hand edit of `blocks` does to
+ * what agents are served: a superseded / tombstoned row made live again, a
+ * live row retired, a row added or deleted, a supersession pointer
+ * re-pointed. null when consistent, else the first problem in words.
+ * Row content is checked separately (checkBlockRow); lineage rows by
+ * Lineage.checkProjection; the whole projection by verifyProjection.
+ */
+export function checkBlockLifecycle(db: Db): string | null {
+  const live = db
+    .prepare(
+      // IN over the retired ids (materialised once), not a correlated EXISTS: the planner would
+      // otherwise scan every retirement event per live block (seconds on a 1k-document store).
+      `SELECT b.block_id FROM blocks b WHERE b.valid_to IS NULL AND b.tombstoned_at IS NULL AND b.block_id IN (
+         SELECT ${RETIRED_ID} FROM events e WHERE e.event_type IN ('block.superseded', 'block.tombstoned')) LIMIT 1`,
+    )
+    .get() as { block_id: string } | undefined;
+  if (live) return `block ${live.block_id} is live in the projection but the chain retired it`;
+  const n = (sql: string) => (db.prepare(sql).get() as { n: number }).n;
+  const created = n(`SELECT count(*) AS n FROM events WHERE event_type = 'block.created'`);
+  const stored = n(`SELECT count(*) AS n FROM blocks`);
+  if (created !== stored) return `${stored} block row(s) stored, the chain created ${created}`;
+  const retiredChain = n(
+    `SELECT count(*) AS n FROM (SELECT DISTINCT ${RETIRED_ID} AS id FROM events e WHERE e.event_type IN ('block.superseded', 'block.tombstoned')) WHERE id IS NOT NULL`,
+  );
+  const retiredStored = n(`SELECT count(*) AS n FROM blocks WHERE valid_to IS NOT NULL OR tombstoned_at IS NOT NULL`);
+  if (retiredChain !== retiredStored) return `${retiredStored} block(s) retired in the projection, the chain retired ${retiredChain}`;
+  const tombChain = n(
+    `SELECT count(*) AS n FROM (SELECT DISTINCT ${RETIRED_ID} AS id FROM events e WHERE e.event_type = 'block.tombstoned') WHERE id IS NOT NULL`,
+  );
+  const tombStored = n(`SELECT count(*) AS n FROM blocks WHERE tombstoned_at IS NOT NULL`);
+  if (tombChain !== tombStored) return `${tombStored} block(s) tombstoned in the projection, the chain tombstoned ${tombChain}`;
+  const ptr = db
+    .prepare(
+      `SELECT b.block_id FROM events e JOIN blocks b ON b.block_id = ${RETIRED_ID}
+        WHERE e.event_type = 'block.superseded' AND b.superseded_by IS NOT json_extract(e.payload_canonical, '$.successor_block_id') LIMIT 1`,
+    )
+    .get() as { block_id: string } | undefined;
+  if (ptr) return `block ${ptr.block_id}: its successor in the projection is not the one the chain records`;
+  return null;
+}
+
+/**
+ * 0.8.1 (R2-17): the full-text index against the stored block text (FTS5
+ * `integrity-check` with rank 1 compares the index with the content table).
+ * null when they agree (or there is no index to check: indexFreshness
+ * reports that), else the problem in words.
+ */
+export function checkFtsContent(db: Db): string | null {
+  try {
+    db.prepare(`INSERT INTO blocks_fts(blocks_fts, rank) VALUES('integrity-check', 1)`).run();
+    return null;
+  } catch (err) {
+    const code = (err as { code?: unknown }).code;
+    if (typeof code === 'string' && code.startsWith('SQLITE_CORRUPT')) return 'the full-text index does not match the stored block text (FTS5 integrity-check)';
+    if (/no such table/i.test(String(err))) return null;
+    return `full-text index check failed: ${err instanceof Error ? err.message : String(err)}`;
+  }
 }
