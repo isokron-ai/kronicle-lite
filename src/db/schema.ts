@@ -41,7 +41,11 @@ export const ADDED_COLUMNS: readonly { table: string; column: string; ddl: strin
     table: 'receipts',
     column: 'actor_id',
     ddl: 'ALTER TABLE receipts ADD COLUMN actor_id TEXT',
-    index: 'CREATE INDEX IF NOT EXISTS receipts_actor_idx ON receipts (actor_id, issued_at)',
+    // 0.8.1: receipts_actor_rowid_idx serves an actor's receipts after a rowid
+    // (the read log's receipts mark, src/lineage/read-log.ts): rowid is the
+    // implicit last column, so (actor_id = ? AND rowid > ?) is one range.
+    index:
+      'CREATE INDEX IF NOT EXISTS receipts_actor_idx ON receipts (actor_id, issued_at); CREATE INDEX IF NOT EXISTS receipts_actor_rowid_idx ON receipts (actor_id)',
   },
   {
     // Unreleased (next): the project a document belongs to (instruction files'
@@ -270,7 +274,14 @@ CREATE TABLE IF NOT EXISTS reads (
   via          TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS reads_actor_idx ON reads (actor_id, read_at);
-CREATE INDEX IF NOT EXISTS reads_actor_block_idx ON reads (actor_id, block_id);
+-- 0.8.1: the log keeps only the latest reads per (actor, block, document, via)
+-- (src/lineage/read-log.ts); this index finds that key's rows and serves
+-- pending's per-block MAX(head_seq) from the index alone. It replaces
+-- reads_actor_block_idx (dropped by the one-time compaction).
+CREATE INDEX IF NOT EXISTS reads_actor_key_idx ON reads (actor_id, block_id, doc_id, via, head_seq);
+-- 0.8.1: readersOf (who read these blocks / this note) without a full scan.
+CREATE INDEX IF NOT EXISTS reads_block_idx ON reads (block_id);
+CREATE INDEX IF NOT EXISTS reads_doc_idx ON reads (doc_id);
 -- Unreleased: walk a supersession lineage backwards (format-only predecessors).
 CREATE INDEX IF NOT EXISTS blocks_superseded_by_idx ON blocks (superseded_by) WHERE superseded_by IS NOT NULL;
 -- Unreleased: the event that retired a block (lineage change seqs; chainRetired). The

@@ -220,3 +220,64 @@ export function foldDelta(events: readonly ChainEvent[], from_seq: number, to_se
 function firstSeq(e: DeltaEntry): number {
   return e.kind === 'event' ? e.seq : e.first_seq;
 }
+
+/** One event type's share of a window (0.8.1): what `rollupDelta` needs instead of the events. */
+export interface TypeGroup {
+  event_type: string;
+  count: number;
+  first_seq: number;
+  last_seq: number;
+  /** The type's last event in the window (the rollup sample). */
+  last: ChainEvent;
+}
+
+/**
+ * 0.8.1: `foldDelta(events, from, to, { budget_tokens: 0 })` from per-type
+ * counts (an index scan) instead of the events themselves: with no budget
+ * every type ends as a rollup, so the counts, first/last seqs and each
+ * type's last event determine the result exactly (test/scale.test.ts checks
+ * the two agree).
+ */
+export function rollupDelta(groups: readonly TypeGroup[], from_seq: number, to_seq: number, opts: PolicyOptions & { payload_text_limit?: number; max_entries?: number } = {}): TypedDelta {
+  const textLimit = opts.payload_text_limit ?? 240;
+  // by_type key order = first occurrence in the window, like foldDelta's.
+  const ordered = [...groups].filter((g) => g.count > 0).sort((a, b) => a.first_seq - b.first_seq);
+  const by_type: Record<string, number> = {};
+  for (const g of ordered) by_type[g.event_type] = g.count;
+  const enumerated = ordered.filter((g) => resolveRenderPolicy(g.event_type, opts) === 'enumerate');
+  // foldDelta demotes the most numerous enumerated type first (stable: first occurrence breaks ties).
+  const demoted = [...enumerated].sort((a, b) => b.count - a.count).map((g) => g.event_type);
+  let entries: DeltaEntry[] = ordered.map((g) => ({
+    kind: 'volume_rollup' as const,
+    event_type: g.event_type,
+    count: g.count,
+    first_seq: g.first_seq,
+    last_seq: g.last_seq,
+    sample: toEntry(g.last, 'volume-rollup', textLimit),
+    rendered_via: demoted.includes(g.event_type) ? ('budget' as const) : ('volume-rollup' as const),
+  }));
+  let truncated = false;
+  const cap = opts.max_entries ?? 500;
+  if (entries.length > cap) {
+    entries = entries.slice(entries.length - cap);
+    truncated = true;
+  }
+  const rolled = entries as DeltaRollupEntry[];
+  const total = ordered.reduce((s, g) => s + g.count, 0);
+  return {
+    from_seq,
+    to_seq,
+    events_since: total,
+    by_type,
+    entries,
+    coverage: {
+      total_events_in: total,
+      enumerated: 0,
+      rolled_up: rolled.reduce((s, r) => s + r.count, 0),
+      rollup_groups: rolled.length,
+      demoted_by_budget: demoted,
+      truncated,
+      estimated_tokens: estimateTokens(entries),
+    },
+  };
+}
