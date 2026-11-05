@@ -170,7 +170,12 @@ describe('P2-04: every tool result validates against the advertised (compact) an
           put_document: () => ({ slug: pick(['a', 'b', 'c.d']), title: 'T', markdown: `# H${Math.floor(rnd() * 5)}\n\nport ${Math.floor(rnd() * 9)}\n\n- item ${Math.floor(rnd() * 3)}` }),
           get_system_state: () => ({ response_format: pick(['json', 'markdown']), focus: pick(['orientation', 'recent_changes', 'retractions', 'pulse']), ...(cursors.length && rnd() < 0.6 ? { since_cursor: pick(cursors) } : {}) }),
           recall: () => ({ query: pick(['port', 'item', 'H1 port', 'nothing here']), receipts: pick(['id', 'inline']), top_k: 1 + Math.floor(rnd() * 5) }),
-          verify: () => (receipts.length ? { receipt_id: pick(receipts) } : { receipt: {} }),
+          verify: () => (receipts.length ? (rnd() < 0.5 ? { receipt_id: pick(receipts) } : { receipt_ids: [pick(receipts), pick(receipts)] }) : { receipt: {} }),
+          audit_record: () => ({
+            audit_id: 'P',
+            events: [{ kind: 'call_measured', event_key: `k${Math.floor(rnd() * 4)}`, payload: { fingerprint: 'a'.repeat(64), tool: 't', status: '200', is_error: false, latency_ms: 1, bytes_out: 1 } }],
+          }),
+          audit_query: () => (rnd() < 0.5 ? { audit_id: 'P' } : { fingerprint: 'a'.repeat(64) }),
           audit_assumptions: () => ({ claims: [{ symbol: pick(['head', 'a', ...(blocks.length ? [pick(blocks)] : [])]), value: pick([1, 'port 3', '0']) }] }),
           verify_chain: () => ({}),
           checkpoint_chain: () => ({}),
