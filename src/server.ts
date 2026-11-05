@@ -65,6 +65,11 @@ export interface ServerOptions {
    * `full` (default) serves every tool.
    */
   profile?: 'full' | 'core';
+  /**
+   * 0.9.0: apply commits need a confirm_token (dry_run first). `serve --http`
+   * sets it: a remote-capable server never commits a batch blind.
+   */
+  requireApplyConfirm?: boolean;
 }
 
 /** 0.6.0: the `--core` profile: orient, grade, search, check a receipt, write, fix one block. */
@@ -713,7 +718,15 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     },
     (args) => {
       try {
-        return json(store.applier.apply({ ...args, actor_id: actorOf(args.actor_id) }));
+        return json(
+          store.applier.apply({
+            ...args,
+            actor_id: actorOf(args.actor_id),
+            // Same project a put_document through this server records.
+            project: opts.project && opts.project.keys.length > 0 ? { key: opts.project.keys[0]!, root: opts.project.root ?? '' } : null,
+            require_confirm: opts.requireApplyConfirm === true,
+          }),
+        );
       } catch (err) {
         return errorResult(err);
       }

@@ -165,10 +165,13 @@ describe('apply: dry_run and the confirm token', () => {
     expect(plan).toMatchObject({ status: 'planned', dry_run: true, receipt: null });
     expect(plan.ops.map((o) => o.status)).toEqual(['planned', 'planned']);
     expect(plan.ops[0]!.diff).toContain('{+9.+}');
-    expect(plan.confirm_token).toMatch(/^klc1\./);
-    const body = JSON.parse(Buffer.from(plan.confirm_token!.split('.')[1]!, 'base64url').toString()) as Record<string, unknown>;
+    expect(plan.confirm_token).toMatch(/^klc2\.[0-9a-f]{32}\.[A-Za-z0-9_-]+$/);
+    // The binding lives server-side, keyed by the token's nonce.
+    const nonce = plan.confirm_token!.split('.')[1]!;
+    const row = kl.db.prepare('SELECT binding_json FROM apply_confirmations WHERE nonce = ?').get(nonce) as { binding_json: string };
+    const body = JSON.parse(row.binding_json) as Record<string, unknown>;
     expect(Object.keys(body).sort()).toEqual(
-      ['actor_id', 'catalog_fingerprint', 'exp', 'idempotency_key', 'nonce', 'plan_hash', 'policy_version', 'resources', 'sandbox', 'server', 'tenant', 'v', 'versions'].sort(),
+      ['actor_id', 'catalog_fingerprint', 'exp', 'idempotency_key', 'nonce', 'plan_hash', 'policy_version', 'project', 'resources', 'sandbox', 'server', 'tenant', 'v', 'versions'].sort(),
     );
     expect(body['resources']).toEqual(['block:' + port, 'doc:alpha', 'doc:beta']);
     const done = kl.applier.apply({ actor_id: 'agent', ops, confirm_token: plan.confirm_token! });

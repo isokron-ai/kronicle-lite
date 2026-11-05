@@ -64,6 +64,21 @@ uses semantic versioning once past 0.x.
   re-validates all of it inside its transaction (`stale_plan` on any state
   change) and re-checks authorization per op (the token authorizes
   nothing). docs/APPLY.md.
+- **apply review hardening (before release).**
+  - **Small tokens.** Confirm tokens are a nonce plus a MAC (about 80
+    characters), with the binding stored server-side. Before this, a 20-op
+    token was 5 KB and failed the MCP schema.
+  - **No false receipts.** A commit whose chain key already holds another
+    event fails with `idempotency_conflict` instead of reporting that event as
+    its receipt.
+  - **When a token is required.** After a dry run of the same plan
+    (`confirm_required`), and always over HTTP.
+  - **Burning.** A wrong-actor attempt no longer burns the owner's token.
+  - **Replays.** Idempotent replays re-check the actor and authz inside the
+    transaction.
+  - **Project scope.** `put` ops keep the server's project scope.
+  - **TTL.** A non-finite `ttl_seconds` gets the default; any value is capped
+    at 900.
 
 ### Changed
 

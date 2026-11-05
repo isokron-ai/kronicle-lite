@@ -337,7 +337,7 @@ CREATE TABLE IF NOT EXISTS audit_findings (
   PRIMARY KEY (audit_id, finding_id)
 );
 
--- 0.9.0: apply. Confirm tokens issued by a dry run (single use: used_at set by the
+-- 0.9.0: apply. Confirmations issued by a dry run (single use: used_at set by the
 -- commit, or burned when the commit fails) and committed results by idempotency
 -- key (replay). Side tables like receipts: not chain data, not projection.
 CREATE TABLE IF NOT EXISTS apply_confirmations (
@@ -347,11 +347,15 @@ CREATE TABLE IF NOT EXISTS apply_confirmations (
   issued_at  TEXT NOT NULL,
   expires_at TEXT NOT NULL,
   used_at    TEXT,
-  outcome    TEXT
+  outcome    TEXT,
+  -- What the token binds (plan hash, actor, tenant, sandbox, catalog, project, resources and
+  -- versions, policy, expiry, idempotency key): server-side, so the token is only nonce + MAC.
+  binding_json TEXT
 );
 CREATE TABLE IF NOT EXISTS apply_results (
   idempotency_key TEXT PRIMARY KEY,
   request_hash    TEXT NOT NULL,
+  actor_id        TEXT NOT NULL,
   result_json     TEXT NOT NULL,
   seq             INTEGER NOT NULL
 );

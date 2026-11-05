@@ -43,8 +43,8 @@ export const APPLY_POLICY_VERSION = 'kl-apply-policy/1';
 export const MAX_APPLY_OPS = 50;
 export const CONFIRM_TTL_DEFAULT_S = 300;
 export const CONFIRM_TTL_MAX_S = 900;
-const TOKEN_PREFIX = 'klc1';
-const TOKEN_DOMAIN = 'kronicle-lite/apply-confirm/1\n';
+const TOKEN_PREFIX = 'klc2';
+const TOKEN_DOMAIN = 'kronicle-lite/apply-confirm/2\n';
 
 export type ApplyOp =
   | { id: string; op: 'put'; slug: string; title: string; markdown: string; expect_version?: number | undefined }
@@ -59,6 +59,10 @@ export interface ApplyInput {
   ttl_seconds?: number | undefined;
   ops: ApplyOp[];
   actor_id: string;
+  /** The project a `put` records (as put_document does with the server's project). Bound into the confirmation. */
+  project?: { key: string; root: string } | null | undefined;
+  /** Refuse any commit without a confirm_token (remote-capable servers: HTTP). */
+  require_confirm?: boolean | undefined;
 }
 
 export type OpStatus = 'planned' | 'applied' | 'failed' | 'rolled_back' | 'not_run';
@@ -107,6 +111,8 @@ export class ApplyError extends Error {
       | 'confirm_expired'
       | 'confirm_used'
       | 'confirm_mismatch'
+      | 'confirm_required'
+      | 'idempotency_conflict'
       | 'stale_plan'
       | 'version_conflict'
       | 'forbidden',
@@ -127,9 +133,11 @@ export type ApplyPolicy = (actor_id: string, op: ApplyOp, target: { slug: string
 export const defaultApplyPolicy: ApplyPolicy = (_actor, _op, target) =>
   target.slug !== null && isInstructionSlug(target.slug) ? `${target.slug} is an instruction-file document; edit the file instead` : null;
 
-interface TokenBody {
-  v: 1;
+/** What a confirmation binds; kept server-side (apply_confirmations.binding_json), keyed by nonce. */
+interface Binding {
+  v: 2;
   plan_hash: string;
+  project: { key: string; root: string } | null;
   actor_id: string;
   tenant: string;
   sandbox: string;
@@ -182,23 +190,36 @@ export class ApplyEngine {
     const request_hash = sha256Hex(canonicalize({ mode, ops } as unknown as JsonValue));
     const key = input.idempotency_key ?? null;
 
-    if (!input.dry_run && key !== null) {
-      const prior = this.db.prepare(`SELECT request_hash, result_json FROM apply_results WHERE idempotency_key = ?`).get(key) as
-        | { request_hash: string; result_json: string }
-        | undefined;
-      if (prior) {
-        if (prior.request_hash !== request_hash) throw new ApplyError('idempotency_key_reused', 'idempotency_key was already used for a different plan');
-        return { ...(JSON.parse(prior.result_json) as ApplyResult), replayed: true };
-      }
-    }
-
     if (input.dry_run) return this.preview(mode, ops, plan_hash, key, input);
 
-    const token = input.confirm_token !== undefined ? this.parseToken(input.confirm_token) : null;
+    const nonce = input.confirm_token !== undefined ? this.parseToken(input.confirm_token) : null;
+    const project = input.project ?? null;
+    // Burn the token after a failed commit only when its owner made the attempt (a wrong-actor try is not the owner's loss).
+    let burnOnFailure = false;
     try {
       const run = this.db.transaction((): ApplyResult => {
-        if (token) this.revalidate(token, { plan_hash, actor_id: input.actor_id, key, ops });
-        const results = this.execute(mode, ops, input.actor_id);
+        if (key !== null) {
+          const prior = this.db.prepare(`SELECT request_hash, actor_id, result_json FROM apply_results WHERE idempotency_key = ?`).get(key) as
+            | { request_hash: string; actor_id: string; result_json: string }
+            | undefined;
+          if (prior) {
+            if (prior.request_hash !== request_hash || prior.actor_id !== input.actor_id) {
+              throw new ApplyError('idempotency_key_reused', 'idempotency_key was already used for a different plan or by another actor');
+            }
+            // A replay discloses the committed result: the actor must still be allowed every op.
+            for (const op of ops) {
+              const denied = this.policy(input.actor_id, op, { slug: this.targetOf(op).slug });
+              if (denied !== null) throw new ApplyError('forbidden', denied);
+            }
+            return { ...(JSON.parse(prior.result_json) as ApplyResult), replayed: true };
+          }
+        }
+        if (nonce !== null) this.revalidate(nonce, { plan_hash, actor_id: input.actor_id, key, ops, project }, () => (burnOnFailure = true));
+        else if (input.require_confirm === true) throw new ApplyError('confirm_required', 'this server requires a confirm_token: dry_run first, then commit with it');
+        else if (this.pendingConfirmation(plan_hash, input.actor_id)) {
+          throw new ApplyError('confirm_required', 'this plan was previewed (dry_run): commit it with the confirm_token it returned');
+        }
+        const results = this.execute(mode, ops, input.actor_id, project);
         const failed = results.some((r) => r.status === 'failed');
         if (failed && mode === 'all_or_nothing') throw new RolledBack(results);
         const result_hash = sha256Hex(canonicalize(results as unknown as JsonValue));
@@ -210,12 +231,15 @@ export class ApplyEngine {
             result_hash,
             mode,
             ...(key !== null ? { idempotency_key: key } : {}),
-            ...(token ? { confirm_nonce: token.nonce } : {}),
+            ...(nonce !== null ? { confirm_nonce: nonce } : {}),
+            ...(project !== null ? { project_key: project.key } : {}),
             policy_version: this.policy_version,
             ops: results.map((r) => ({ id: r.id, op: r.op, status: r.status, ...(r.target.slug ? { slug: r.target.slug } : {}), ...(r.target.block_id ? { block_id: r.target.block_id } : {}), version_after: r.version_after, receipt: r.receipt })) as unknown as JsonValue,
           },
-          ...(key !== null ? { idempotency_key: `apply:${sha256Hex(key)}` } : {}),
+          ...(key !== null ? { idempotency_key: applyChainKey(key) } : {}),
         });
+        // why: the chain returns an EXISTING event when the key is taken; that is someone else's event, never this commit's.
+        if (ev.replayed) throw new ApplyError('idempotency_conflict', `the chain already holds an event under this apply's key (seq ${ev.event.seq}, ${ev.event.event_type}); nothing committed`);
         const out: ApplyResult = {
           status: failed ? 'partial' : 'committed',
           mode,
@@ -232,14 +256,18 @@ export class ApplyEngine {
           head: ev.head,
         };
         if (key !== null) {
-          this.db.prepare(`INSERT INTO apply_results (idempotency_key, request_hash, result_json, seq) VALUES (?, ?, ?, ?)`).run(key, request_hash, JSON.stringify(out), ev.event.seq);
+          this.db
+            .prepare(`INSERT INTO apply_results (idempotency_key, request_hash, actor_id, result_json, seq) VALUES (?, ?, ?, ?, ?)`)
+            .run(key, request_hash, input.actor_id, JSON.stringify(out), ev.event.seq);
         }
         return out;
       });
       return run.immediate();
     } catch (err) {
       // Single use: a token that took part in a failed commit is burned too (the transaction rolled back its consumption).
-      if (token) this.db.prepare(`UPDATE apply_confirmations SET used_at = COALESCE(used_at, ?), outcome = COALESCE(outcome, 'failed') WHERE nonce = ?`).run(this.now().toISOString(), token.nonce);
+      if (nonce !== null && burnOnFailure) {
+        this.db.prepare(`UPDATE apply_confirmations SET used_at = COALESCE(used_at, ?), outcome = COALESCE(outcome, 'failed') WHERE nonce = ?`).run(this.now().toISOString(), nonce);
+      }
       if (err instanceof RolledBack) {
         return {
           status: 'rolled_back',
@@ -270,7 +298,7 @@ export class ApplyEngine {
     // why: run the real writes and always roll back, so the preview is exactly what a commit would do now.
     try {
       this.db.transaction(() => {
-        results = this.execute(mode, ops, input.actor_id);
+        results = this.execute(mode, ops, input.actor_id, input.project ?? null);
         throw new RolledBack(results);
       })();
     } catch (err) {
@@ -278,15 +306,17 @@ export class ApplyEngine {
     }
     const anyFailed = results.some((r) => r.status === 'failed');
     const blocked = anyFailed && mode === 'all_or_nothing';
-    const ttl = Math.min(Math.max(input.ttl_seconds ?? CONFIRM_TTL_DEFAULT_S, 1), CONFIRM_TTL_MAX_S);
+    const ttlIn = input.ttl_seconds;
+    const ttl = typeof ttlIn === 'number' && Number.isFinite(ttlIn) ? Math.min(Math.max(Math.trunc(ttlIn), 1), CONFIRM_TTL_MAX_S) : CONFIRM_TTL_DEFAULT_S;
     let token: string | null = null;
     let exp: string | null = null;
     if (!blocked) {
       const issued = this.now();
       exp = new Date(issued.getTime() + ttl * 1000).toISOString();
-      const body: TokenBody = {
-        v: 1,
+      const body: Binding = {
+        v: 2,
         plan_hash,
+        project: input.project ?? null,
         actor_id: input.actor_id,
         tenant: this.opts.tenant,
         sandbox: this.sandbox,
@@ -299,10 +329,10 @@ export class ApplyEngine {
         exp,
         idempotency_key: key,
       };
-      token = this.signToken(body);
+      token = this.tokenFor(body.nonce);
       this.db
-        .prepare(`INSERT INTO apply_confirmations (nonce, plan_hash, actor_id, issued_at, expires_at) VALUES (?, ?, ?, ?, ?)`)
-        .run(body.nonce, plan_hash, input.actor_id, issued.toISOString(), exp);
+        .prepare(`INSERT INTO apply_confirmations (nonce, plan_hash, actor_id, issued_at, expires_at, binding_json) VALUES (?, ?, ?, ?, ?, ?)`)
+        .run(body.nonce, plan_hash, input.actor_id, issued.toISOString(), exp, canonicalize(body as unknown as JsonValue));
     }
     return {
       status: blocked ? 'failed' : 'planned',
@@ -324,7 +354,7 @@ export class ApplyEngine {
   // ───────────────────────────── execution ─────────────────────────────
 
   /** Run the ops in order inside the caller's transaction. all_or_nothing stops at the first failure. */
-  private execute(mode: ApplyMode, ops: ApplyOp[], actor_id: string): OpResult[] {
+  private execute(mode: ApplyMode, ops: ApplyOp[], actor_id: string, project: { key: string; root: string } | null): OpResult[] {
     const out: OpResult[] = [];
     let stop = false;
     for (const op of ops) {
@@ -342,7 +372,7 @@ export class ApplyEngine {
           throw new ApplyError('version_conflict', `expect_version ${op.expect_version}, current revision is ${base.version_before ?? 'unknown'}`);
         }
         const diff = this.diffOf(op);
-        const after = this.write(op, actor_id);
+        const after = this.write(op, actor_id, project);
         const head = this.chain.head();
         return {
           ...base,
@@ -364,10 +394,10 @@ export class ApplyEngine {
     return out;
   }
 
-  private write(op: ApplyOp, actor_id: string): { doc_id: string; revision: number; block_id?: string } {
+  private write(op: ApplyOp, actor_id: string, project: { key: string; root: string } | null): { doc_id: string; revision: number; block_id?: string } {
     switch (op.op) {
       case 'put': {
-        const r = this.docs.putDocument({ slug: op.slug, title: op.title, markdown: op.markdown, actor_id, infer_lineage: false });
+        const r = this.docs.putDocument({ slug: op.slug, title: op.title, markdown: op.markdown, actor_id, infer_lineage: false, ...(project !== null ? { project } : {}) });
         return { doc_id: r.doc_id, revision: r.revision };
       }
       case 'supersede': {
@@ -433,47 +463,72 @@ export class ApplyEngine {
 
   // ───────────────────────────── confirm tokens ─────────────────────────────
 
-  private signToken(body: TokenBody): string {
-    const json = canonicalize(body as unknown as JsonValue);
-    const mac = createHmac('sha256', this.opts.secret).update(TOKEN_DOMAIN + json).digest();
-    return `${TOKEN_PREFIX}.${b64u(json)}.${b64u(mac)}`;
+  /** The token is only a handle: `klc2.<nonce>.<HMAC(secret, domain + nonce)>`. Everything it binds stays server-side. */
+  private tokenFor(nonce: string): string {
+    const mac = createHmac('sha256', this.opts.secret).update(TOKEN_DOMAIN + nonce).digest();
+    return `${TOKEN_PREFIX}.${nonce}.${b64u(mac)}`;
   }
 
-  private parseToken(token: string): TokenBody {
-    const [prefix, body, mac, extra] = token.split('.');
-    if (prefix !== TOKEN_PREFIX || !body || !mac || extra !== undefined) throw new ApplyError('confirm_invalid', 'confirm_token is malformed');
-    const json = Buffer.from(body, 'base64url').toString('utf8');
-    const want = createHmac('sha256', this.opts.secret).update(TOKEN_DOMAIN + json).digest();
+  /** The nonce of a token this store issued, or confirm_invalid. */
+  private parseToken(token: string): string {
+    const [prefix, nonce, mac, extra] = token.split('.');
+    if (prefix !== TOKEN_PREFIX || !nonce || !/^[0-9a-f]{32}$/.test(nonce) || !mac || extra !== undefined) throw new ApplyError('confirm_invalid', 'confirm_token is malformed');
+    const want = createHmac('sha256', this.opts.secret).update(TOKEN_DOMAIN + nonce).digest();
     const got = Buffer.from(mac, 'base64url');
-    if (got.length !== want.length || !timingSafeEqual(got, want)) throw new ApplyError('confirm_invalid', 'confirm_token signature does not verify (another store, or altered)');
-    return JSON.parse(json) as TokenBody;
+    if (got.length !== want.length || !timingSafeEqual(got, want)) throw new ApplyError('confirm_invalid', 'confirm_token does not verify (another store, or altered)');
+    return nonce;
   }
 
-  /** Everything the token binds, re-checked inside the commit transaction; consumes the nonce. */
-  private revalidate(t: TokenBody, now: { plan_hash: string; actor_id: string; key: string | null; ops: ApplyOp[] }): void {
-    if (t.v !== 1) throw new ApplyError('confirm_invalid', 'unknown confirm_token version');
-    if (Date.parse(t.exp) <= this.now().getTime()) throw new ApplyError('confirm_expired', `confirm_token expired at ${t.exp}`);
+  /** An unused, unexpired preview of this exact plan by this actor exists: its commit must present the token. */
+  private pendingConfirmation(plan_hash: string, actor_id: string): boolean {
+    return (
+      this.db
+        .prepare(`SELECT 1 FROM apply_confirmations WHERE plan_hash = ? AND actor_id = ? AND used_at IS NULL AND expires_at > ? LIMIT 1`)
+        .get(plan_hash, actor_id, this.now().toISOString()) !== undefined
+    );
+  }
+
+  /**
+   * Everything the confirmation binds, re-checked inside the commit
+   * transaction; consumes the nonce. `isOwner` fires once the caller is
+   * known to be the token's actor (only the owner's failed attempt burns it).
+   */
+  private revalidate(
+    nonce: string,
+    now: { plan_hash: string; actor_id: string; key: string | null; ops: ApplyOp[]; project: { key: string; root: string } | null },
+    isOwner: () => void,
+  ): void {
+    const row = this.db.prepare(`SELECT actor_id, used_at, expires_at, binding_json FROM apply_confirmations WHERE nonce = ?`).get(nonce) as
+      | { actor_id: string; used_at: string | null; expires_at: string; binding_json: string | null }
+      | undefined;
+    if (!row || row.binding_json === null) throw new ApplyError('confirm_invalid', 'confirm_token was not issued by this store');
     const mismatch = (what: string) => new ApplyError('confirm_mismatch', `confirm_token was issued for a different ${what}`);
+    if (row.actor_id !== now.actor_id) throw mismatch('actor');
+    isOwner();
+    if (row.used_at !== null) throw new ApplyError('confirm_used', 'confirm_token was already used (single use)');
+    const t = JSON.parse(row.binding_json) as Binding;
+    if (t.v !== 2 || t.nonce !== nonce) throw new ApplyError('confirm_invalid', 'unknown confirmation record');
+    if (Date.parse(row.expires_at) <= this.now().getTime()) throw new ApplyError('confirm_expired', `confirm_token expired at ${row.expires_at}`);
     if (t.plan_hash !== now.plan_hash) throw mismatch('plan');
-    if (t.actor_id !== now.actor_id) throw mismatch('actor');
     if (t.tenant !== this.opts.tenant) throw mismatch('tenant');
     if (t.sandbox !== this.sandbox || t.server !== 'kronicle-lite') throw mismatch('store');
     if (t.catalog_fingerprint !== this.catalog_fingerprint) throw mismatch('catalog (the server was upgraded since the preview)');
     if (t.policy_version !== this.policy_version) throw mismatch('policy version');
     if (t.idempotency_key !== now.key) throw mismatch('idempotency_key');
-    const used = this.db
-      .prepare(`UPDATE apply_confirmations SET used_at = ?, outcome = 'committed' WHERE nonce = ? AND plan_hash = ? AND used_at IS NULL`)
-      .run(this.now().toISOString(), t.nonce, t.plan_hash);
-    if (used.changes !== 1) {
-      const row = this.db.prepare(`SELECT used_at FROM apply_confirmations WHERE nonce = ?`).get(t.nonce);
-      throw row ? new ApplyError('confirm_used', 'confirm_token was already used (single use)') : new ApplyError('confirm_invalid', 'confirm_token was not issued by this store');
-    }
+    if (canonicalize((t.project ?? null) as JsonValue) !== canonicalize((now.project ?? null) as JsonValue)) throw mismatch('project');
+    const used = this.db.prepare(`UPDATE apply_confirmations SET used_at = ?, outcome = 'committed' WHERE nonce = ? AND used_at IS NULL`).run(this.now().toISOString(), nonce);
+    if (used.changes !== 1) throw new ApplyError('confirm_used', 'confirm_token was already used (single use)');
     const current = this.versionsOf(now.ops);
     const stale = Object.keys(t.versions).filter((k) => t.versions[k] !== current[k]);
     if (stale.length > 0 || canonicalize(Object.keys(current).sort()) !== canonicalize(t.resources)) {
       throw new ApplyError('stale_plan', `state changed since the preview: ${stale.join(', ') || 'resource set'}; preview again`);
     }
   }
+}
+
+/** The chain idempotency key of an apply commit: the `apply:` namespace is reserved (documents refuse it). */
+export function applyChainKey(idempotency_key: string): string {
+  return `apply:${sha256Hex(idempotency_key)}`;
 }
 
 class RolledBack extends Error {
