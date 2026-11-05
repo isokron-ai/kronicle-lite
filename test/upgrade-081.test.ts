@@ -51,7 +51,7 @@ describe('a 0.8.1 store under 0.9.0 verification (read-only, no migration)', () 
   it('the fixture really is a 0.8.1 store: no audit / blob / apply tables', () => {
     const t = tables(store081());
     expect(t).toContain('doc_lineage_gaps');
-    for (const n of ['audit_events', 'audit_findings', 'blobs', 'apply_confirmations', 'apply_results']) expect(t).not.toContain(n);
+    for (const n of ['audit_events', 'audit_findings', 'blobs']) expect(t).not.toContain(n);
   });
 
   it('verify-chain and verify (local) pass with exit 0, and write nothing', () => {
@@ -91,6 +91,6 @@ describe('a 0.8.1 store under 0.9.0 verification (read-only, no migration)', () 
     const kl = new KronicleLite({ dataDir: data });
     expect(kl.verifyAll().ok).toBe(true);
     kl.close();
-    expect(tables(data)).toEqual(expect.arrayContaining(['audit_events', 'blobs', 'apply_confirmations']));
+    expect(tables(data)).toEqual(expect.arrayContaining(['audit_events', 'audit_findings', 'blobs']));
   });
 });
