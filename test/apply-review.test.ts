@@ -6,7 +6,7 @@ import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { describe, expect, it } from 'vitest';
 
-import { ApplyEngine, type ApplyOp } from '../src/apply/apply.js';
+import { ApplyEngine, MAX_CONFIRMATIONS_PER_ACTOR, type ApplyOp } from '../src/apply/apply.js';
 import { sha256Hex } from '../src/crypto/hash.js';
 import { KronicleLite } from '../src/index.js';
 import { createServerFactory } from '../src/server.js';
@@ -176,5 +176,64 @@ describe('review #14: apply keeps project scoping', () => {
     await client.close();
     await h.close();
     store.close();
+  });
+});
+
+describe('re-review #14: confirmations are indexed, pruned and capped', () => {
+  it('apply_confirmations has an expiry index and an (actor, plan) index', () => {
+    const kl = new KronicleLite({ memory: true });
+    const idx = (kl.db.prepare(`SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'apply_confirmations'`).all() as { name: string; sql: string | null }[]).map((r) => r.sql ?? '');
+    expect(idx.some((s) => /\(expires_at\)/.test(s))).toBe(true);
+    expect(idx.some((s) => /\(actor_id, plan_hash/.test(s))).toBe(true);
+    kl.close();
+  });
+  it('expired rows are pruned on write, in bounded batches, until none are left', () => {
+    const { kl, port } = seeded();
+    const ins = kl.db.prepare(`INSERT INTO apply_confirmations (nonce, plan_hash, actor_id, issued_at, expires_at, binding_json) VALUES (?, 'p', 'old', '2020-01-01T00:00:00.000Z', '2020-01-01T00:05:00.000Z', '{}')`);
+    kl.db.transaction(() => {
+      for (let i = 0; i < 5000; i++) ins.run(i.toString(16).padStart(32, '0'));
+    })();
+    const expired = () => (kl.db.prepare(`SELECT COUNT(*) AS n FROM apply_confirmations WHERE expires_at < ?`).get(new Date().toISOString()) as { n: number }).n;
+    const ops: ApplyOp[] = [{ id: 'a', op: 'supersede', block_id: port, new_content: 'p.', reason: 'x' }];
+    kl.applier.apply({ actor_id: 'A', ops, dry_run: true });
+    const after1 = expired();
+    expect(after1).toBeLessThan(5000);
+    expect(after1).toBeGreaterThan(0); // bounded: one write never does unbounded work
+    for (let i = 0; i < 20 && expired() > 0; i++) kl.applier.apply({ actor_id: 'A', ops, dry_run: true });
+    expect(expired()).toBe(0);
+    kl.close();
+  });
+  it('each actor holds at most MAX_CONFIRMATIONS_PER_ACTOR live confirmations; the oldest is evicted', () => {
+    const { kl, port } = seeded();
+    const ops = (i: number): ApplyOp[] => [{ id: 'a', op: 'supersede', block_id: port, new_content: `p${i}.`, reason: 'x' }];
+    const first = kl.applier.apply({ actor_id: 'A', ops: ops(0), dry_run: true }).confirm_token!;
+    for (let i = 1; i <= MAX_CONFIRMATIONS_PER_ACTOR; i++) kl.applier.apply({ actor_id: 'A', ops: ops(i), dry_run: true });
+    const n = (kl.db.prepare(`SELECT COUNT(*) AS n FROM apply_confirmations WHERE actor_id = 'A'`).get() as { n: number }).n;
+    expect(n).toBeLessThanOrEqual(MAX_CONFIRMATIONS_PER_ACTOR);
+    expect(code(() => kl.applier.apply({ actor_id: 'A', ops: ops(0), confirm_token: first }))).toBe('confirm_invalid');
+    // Another actor is unaffected.
+    expect(kl.applier.apply({ actor_id: 'B', ops: ops(999), dry_run: true }).confirm_token).toBeTruthy();
+    kl.close();
+  });
+});
+
+describe('re-review #14: strict tokens and the project binding', () => {
+  it('a MAC with a trailing "=" (or any non-canonical base64url) is refused', () => {
+    const { kl, port } = seeded();
+    const ops: ApplyOp[] = [{ id: 'a', op: 'supersede', block_id: port, new_content: 'p.', reason: 'x' }];
+    const t = kl.applier.apply({ actor_id: 'A', ops, dry_run: true }).confirm_token!;
+    expect(code(() => kl.applier.apply({ actor_id: 'A', ops, confirm_token: t + '=' }))).toBe('confirm_invalid');
+    expect(code(() => kl.applier.apply({ actor_id: 'A', ops, confirm_token: t.replace(/.$/, (c) => (c === 'A' ? 'B' : 'A')) }))).toBe('confirm_invalid');
+    expect(code(() => kl.applier.apply({ actor_id: 'A', ops, confirm_token: t }))).toBe('ok:committed');
+    kl.close();
+  });
+  it('a token previewed for one project cannot commit into another', () => {
+    const { kl } = seeded();
+    const ops: ApplyOp[] = [{ id: 'a', op: 'put', slug: 'p', title: 'p', markdown: '# p\n\np.\n' }];
+    const t = kl.applier.apply({ actor_id: 'A', ops, dry_run: true, project: { key: 'proj-1', root: '/w/1' } }).confirm_token!;
+    expect(code(() => kl.applier.apply({ actor_id: 'A', ops, confirm_token: t, project: { key: 'proj-2', root: '/w/2' } }))).toBe('confirm_mismatch');
+    const t2 = kl.applier.apply({ actor_id: 'A', ops, dry_run: true, project: { key: 'proj-1', root: '/w/1' } }).confirm_token!;
+    expect(code(() => kl.applier.apply({ actor_id: 'A', ops, confirm_token: t2, project: null }))).toBe('confirm_mismatch');
+    kl.close();
   });
 });
