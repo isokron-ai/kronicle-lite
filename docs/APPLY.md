@@ -50,6 +50,14 @@ the nonce, and covers:
 | `idempotency_key` | the request's idempotency key |
 | `project` | the project a `put` records (the server's project, as for `put_document`) |
 
+**Housekeeping.**
+- **Tokens are strict.** The MAC must be exactly 43 base64url characters; a
+  trailing `=` is refused.
+- **Confirmations are indexed** by expiry and by actor and plan.
+- **Expired rows are pruned on every preview**, at most 1000 per call.
+- **Per-actor cap.** Each actor holds at most 100 live confirmations, and a new
+  preview evicts the oldest; that token then answers `confirm_invalid`.
+
 **When the token is required.**
 - **After a dry run.** Once a plan has been previewed, committing the same plan
   by the same actor without the token is `confirm_required`, until the preview

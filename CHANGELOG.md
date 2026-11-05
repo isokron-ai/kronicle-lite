@@ -90,6 +90,12 @@ uses semantic versioning once past 0.x.
   - **Project scope.** `put` ops keep the server's project scope.
   - **TTL.** A non-finite `ttl_seconds` gets the default; any value is capped
     at 900.
+  - **Bounded confirmations.** Before this, 5,000 expired dry runs left
+    3.4 MB in `apply_confirmations`. Confirmations are now indexed by expiry
+    and by actor and plan, expired rows are pruned on write (bounded batches),
+    and each actor holds at most 100 live ones.
+  - **Strict MAC.** The token's MAC must be exactly 43 base64url characters,
+    so a trailing `=` is refused.
 
 ### Changed
 

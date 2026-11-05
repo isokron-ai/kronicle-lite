@@ -43,6 +43,10 @@ export const APPLY_POLICY_VERSION = 'kl-apply-policy/1';
 export const MAX_APPLY_OPS = 50;
 export const CONFIRM_TTL_DEFAULT_S = 300;
 export const CONFIRM_TTL_MAX_S = 900;
+/** Most live (unused, unexpired) confirmations one actor may hold; a new preview evicts the oldest. */
+export const MAX_CONFIRMATIONS_PER_ACTOR = 100;
+/** Most expired confirmations one write prunes (bounded work per call). */
+export const PRUNE_BATCH = 1000;
 const TOKEN_PREFIX = 'klc2';
 const TOKEN_DOMAIN = 'kronicle-lite/apply-confirm/2\n';
 
@@ -330,6 +334,7 @@ export class ApplyEngine {
         idempotency_key: key,
       };
       token = this.tokenFor(body.nonce);
+      this.pruneConfirmations(input.actor_id, issued);
       this.db
         .prepare(`INSERT INTO apply_confirmations (nonce, plan_hash, actor_id, issued_at, expires_at, binding_json) VALUES (?, ?, ?, ?, ?, ?)`)
         .run(body.nonce, plan_hash, input.actor_id, issued.toISOString(), exp, canonicalize(body as unknown as JsonValue));
@@ -469,10 +474,31 @@ export class ApplyEngine {
     return `${TOKEN_PREFIX}.${nonce}.${b64u(mac)}`;
   }
 
+  /**
+   * Bounded housekeeping on every preview: drop up to PRUNE_BATCH expired
+   * confirmations (used or not; past expiry they can only fail), then keep
+   * this actor under MAX_CONFIRMATIONS_PER_ACTOR live ones by evicting the
+   * oldest (its token then answers confirm_invalid).
+   */
+  private pruneConfirmations(actor_id: string, now: Date): void {
+    const t = now.toISOString();
+    this.db.prepare(`DELETE FROM apply_confirmations WHERE nonce IN (SELECT nonce FROM apply_confirmations WHERE expires_at <= ? LIMIT ?)`).run(t, PRUNE_BATCH);
+    this.db
+      .prepare(
+        `DELETE FROM apply_confirmations WHERE nonce IN (
+           SELECT nonce FROM apply_confirmations WHERE actor_id = ? AND used_at IS NULL AND expires_at > ?
+            ORDER BY issued_at DESC, rowid DESC LIMIT -1 OFFSET ?)`,
+      )
+      .run(actor_id, t, MAX_CONFIRMATIONS_PER_ACTOR - 1);
+  }
+
   /** The nonce of a token this store issued, or confirm_invalid. */
   private parseToken(token: string): string {
     const [prefix, nonce, mac, extra] = token.split('.');
-    if (prefix !== TOKEN_PREFIX || !nonce || !/^[0-9a-f]{32}$/.test(nonce) || !mac || extra !== undefined) throw new ApplyError('confirm_invalid', 'confirm_token is malformed');
+    // Strict: exactly the canonical unpadded base64url of a 32-byte MAC (Buffer.from would ignore a trailing "=").
+    if (prefix !== TOKEN_PREFIX || !nonce || !/^[0-9a-f]{32}$/.test(nonce) || !mac || !/^[A-Za-z0-9_-]{43}$/.test(mac) || extra !== undefined) {
+      throw new ApplyError('confirm_invalid', 'confirm_token is malformed');
+    }
     const want = createHmac('sha256', this.opts.secret).update(TOKEN_DOMAIN + nonce).digest();
     const got = Buffer.from(mac, 'base64url');
     if (got.length !== want.length || !timingSafeEqual(got, want)) throw new ApplyError('confirm_invalid', 'confirm_token does not verify (another store, or altered)');

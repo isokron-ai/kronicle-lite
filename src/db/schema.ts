@@ -354,6 +354,8 @@ CREATE TABLE IF NOT EXISTS apply_confirmations (
   -- versions, policy, expiry, idempotency key): server-side, so the token is only nonce + MAC.
   binding_json TEXT
 );
+CREATE INDEX IF NOT EXISTS apply_confirmations_expiry_idx ON apply_confirmations (expires_at);
+CREATE INDEX IF NOT EXISTS apply_confirmations_actor_idx ON apply_confirmations (actor_id, plan_hash, expires_at);
 CREATE TABLE IF NOT EXISTS apply_results (
   idempotency_key TEXT PRIMARY KEY,
   request_hash    TEXT NOT NULL,
