@@ -30,6 +30,8 @@ const META = { 'io.modelcontextprotocol/protocolVersion': MODERN, 'io.modelconte
 const TOOL_NAMES = [
   'anchor_status',
   'audit_assumptions',
+  'audit_query',
+  'audit_record',
   'checkpoint_chain',
   'get_system_state',
   'put_document',
@@ -270,6 +272,35 @@ describe('MCP server (in-process, 2026-07-28 client via serveStdio over InMemory
     const doc = await client.readResource({ uri: 'kronicle://docs/runbook' });
     expect((doc.contents[0] as { text: string }).text).toContain('restart script');
     expect((doc.contents[0] as { text: string }).text).not.toContain('Page the on-call');
+  });
+
+  it('0.9.0: audit_record / audit_query over MCP, idempotent retry, typed errors; verify takes a batch', async () => {
+    const F = 'f'.repeat(64);
+    const ev = { kind: 'call_measured', event_key: 'mcp-c1', payload: { fingerprint: F, tool: 'x', status: '200', is_error: false, latency_ms: 3, bytes_out: 10 } };
+    const r1 = parse<{ recorded: { replayed: boolean; event_id: string }[] }>(await client.callTool({ name: 'audit_record', arguments: { audit_id: 'MCP', events: [ev] } }));
+    const r2 = parse<{ recorded: { replayed: boolean; event_id: string }[] }>(await client.callTool({ name: 'audit_record', arguments: { audit_id: 'MCP', events: [ev] } }));
+    expect(r1.recorded[0]!.replayed).toBe(false);
+    expect(r2.recorded[0]).toMatchObject({ replayed: true, event_id: r1.recorded[0]!.event_id });
+    const bad = (await client.callTool({ name: 'audit_record', arguments: { audit_id: 'MCP', events: [{ ...ev, payload: { ...ev.payload, latency_ms: 4 } }] } })) as ToolResult;
+    expect(bad.isError).toBe(true);
+    expect(JSON.parse(textOf(bad))).toMatchObject({ error: 'event_key_conflict', index: 0 });
+    const q = parse<{ events: { event_key: string; actor_id: string }[]; findings: unknown[] | null }>(await client.callTool({ name: 'audit_query', arguments: { fingerprint: F } }));
+    expect(q.events.map((e) => [e.event_key, e.actor_id])).toEqual([['mcp-c1', 'test-agent']]);
+    expect(q.findings).toBeNull();
+    const schemas = await client.readResource({ uri: 'kronicle://schemas/audit' });
+    expect(Object.keys(JSON.parse((schemas.contents[0] as { text: string }).text) as object).sort()).toEqual(
+      ['call_measured', 'catalog_snapshot', 'finding', 'fix_applied', 'gate_result', 'regression_result'],
+    );
+
+    store.docs.putDocument({ slug: 'batch-verify', title: 'b', markdown: '# B\n\nzebra crossing one.\n', actor_id: 'h' });
+    const hits = parse<{ hits: { receipt_id: string }[] }>(await client.callTool({ name: 'recall', arguments: { query: 'zebra crossing' } })).hits;
+    expect(hits.length).toBeGreaterThan(0);
+    const vr = await client.callTool({ name: 'verify', arguments: { receipt_ids: [hits[0]!.receipt_id, 'no-such-receipt'] } });
+    expect((vr as ToolResult).isError, textOf(vr)).toBeFalsy();
+    const v = parse<{ status: string; results: { status: string }[]; counts: Record<string, number> }>(vr);
+    expect(v.results.map((x) => x.status)).toEqual(['VERIFIED', 'UNVERIFIED']);
+    expect(v.status).toBe('UNVERIFIED'); // fail closed at top level
+    expect(v.counts['VERIFIED']).toBe(1);
   });
 
   it('pulse is cheap and surfaces drift after many events', async () => {

@@ -114,7 +114,7 @@ export function checkRevisionRow(chain: Chain, row: RevisionRowLike): RowProblem
 }
 
 export interface ProjectionMismatch {
-  table: 'documents' | 'document_revisions' | 'blocks' | 'doc_sources' | 'doc_lineage' | 'doc_lineage_gaps' | 'blocks_fts';
+  table: 'documents' | 'document_revisions' | 'blocks' | 'doc_sources' | 'doc_lineage' | 'doc_lineage_gaps' | 'blocks_fts' | 'audit_events';
   /** Primary key of the row (doc_id, doc_id@revision or block_id). */
   key: string;
   /** missing (in the chain, not stored) | extra (stored, not in the chain) | a column name | content_hash. */

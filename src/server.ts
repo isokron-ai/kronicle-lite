@@ -17,6 +17,8 @@ import { McpServer, ProtocolError, ResourceNotFoundError, ResourceTemplate, type
 import { z } from 'zod';
 
 import { anchorStatus, tryPushCheckpoint, verifyLastAnchor } from './anchor/anchor.js';
+import { AuditError, MAX_EVENTS_PER_CALL } from './audit/log.js';
+import { AUDIT_KINDS, AuditEventInputSchema, PAYLOAD_SCHEMAS } from './audit/schemas.js';
 import { ChainConflictError } from './chain/index.js';
 import { bindGit } from './git/binding.js';
 import type { BlockSummary, DocumentSource } from './docs/documents.js';
@@ -24,11 +26,14 @@ import { DocumentError } from './docs/documents.js';
 import { revisionBlocks } from './docs/put-blocks.js';
 import { checkRevisionRow } from './docs/integrity.js';
 import { FOCUSES, type ProjectScope } from './orient/orient.js';
+import { MAX_VERIFY_BATCH } from './recall/verify-receipt.js';
 import { renderSystemStateMarkdown } from './orient/render.js';
 import {
   lean,
   fullJsonSchema,
   AnchorStatusResultSchema,
+  AuditQueryResultSchema,
+  AuditRecordResultSchema,
   AuditSummarySchema,
   CheckpointSchema,
   PutDocumentResultSchema,
@@ -233,6 +238,9 @@ function errorResult(err: unknown): ToolResult {
     // Findings name the detector and line only; the secret is never echoed.
     return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err.code, message: err.message, findings: err.findings }) }] };
   }
+  if (err instanceof AuditError) {
+    return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err.code, message: err.message, ...(err.index !== undefined ? { index: err.index } : {}) }) }] };
+  }
   if (err instanceof DocumentError) {
     return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err.code, message: err.message }) }] };
   }
@@ -413,21 +421,37 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
   registerTool(
     'verify',
     {
-      title: 'Verify a retrieval receipt',
+      title: 'Verify retrieval receipts',
       description:
-        'Re-check a recall() receipt (object or receipt_id) against the store (signature, re-hashed block text, chain position, supersession): ' +
-        'VERIFIED | SUPERSEDED (see current_block_id) | TOMBSTONED | STALE_SOURCE | UNVERIFIED, with a reason. Fail-closed.',
+        'Re-check recall() receipts (receipt / receipt_id, or up to 100 as receipts / receipt_ids) against the store (signature, ' +
+        're-hashed block text, chain position, supersession): VERIFIED | SUPERSEDED (see current_block_id) | TOMBSTONED | ' +
+        'STALE_SOURCE | UNVERIFIED, with a reason. Fail-closed: with a batch, the top-level result is the first one not ' +
+        'VERIFIED and results[] has each in input order.',
       inputSchema: lean(
         z.object({
           receipt: z.record(z.string(), z.unknown()).optional().describe('The receipt object from recall().'),
           receipt_id: z.string().min(1).max(100).optional().describe('Or the receipt_id from recall().'),
+          receipts: z.array(z.record(z.string(), z.unknown())).min(1).max(MAX_VERIFY_BATCH).optional().describe('Batch: receipt objects.'),
+          receipt_ids: z.array(z.string().min(1).max(100)).min(1).max(MAX_VERIFY_BATCH).optional().describe('Batch: receipt ids.'),
         }),
         'input',
       ),
       outputSchema: lean(VerifyResultSchema, 'output'),
       annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
     },
-    (args) => json(store.verifier.verify(args.receipt ?? (args.receipt_id !== undefined ? store.recall.getReceipt(args.receipt_id) : null))),
+    (args) => {
+      const byId = (id: string) => store.recall.getReceipt(id);
+      const batch = [...(args.receipts ?? []), ...(args.receipt_ids ?? []).map(byId)];
+      if (batch.length === 0) return json(store.verifier.verify(args.receipt ?? (args.receipt_id !== undefined ? byId(args.receipt_id) : null)));
+      if (args.receipt !== undefined) batch.unshift(args.receipt);
+      if (args.receipt_id !== undefined) batch.unshift(byId(args.receipt_id));
+      try {
+        const r = store.verifier.verifyMany(batch);
+        return json({ ...r.worst, results: r.results, counts: r.counts });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
   );
 
   registerTool(
@@ -645,6 +669,70 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     },
   );
 
+  // ───────────────────────────── audit (0.9.0) ─────────────────────────────
+
+  registerTool(
+    'audit_record',
+    {
+      title: 'Record audit events',
+      description:
+        'Append MCP-audit evidence to the chain, all or nothing (≤ 500 per call). kind: catalog_snapshot | call_measured | ' +
+        'finding | gate_result | fix_applied | regression_result; payload per kind (kronicle://schemas/audit). Hashes and blob ' +
+        'refs only: artifacts go to the blob store (CLI audit put-blob). event_key is the stable id: a retry is a no-op, a ' +
+        'different payload under it is refused.',
+      inputSchema: lean(
+        z.object({
+          audit_id: z.string().min(1).max(128),
+          events: z.array(AuditEventInputSchema).min(1).max(MAX_EVENTS_PER_CALL),
+          actor_id: ACTOR,
+        }),
+        'input',
+      ),
+      outputSchema: lean(AuditRecordResultSchema, 'output'),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    (args) => {
+      try {
+        const recorded = store.audit.record(args.audit_id, args.events, actorOf(args.actor_id));
+        return json({ audit_id: args.audit_id, recorded, head: store.chain.head() });
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
+  registerTool(
+    'audit_query',
+    {
+      title: 'Query audit events and findings',
+      description:
+        'Audit events by audit_id and/or catalog fingerprint (optional kind, finding_id, after_seq, limit), ascending seq; ' +
+        'with audit_id, also the current state of each finding (discovered | refuted | reopened | accepted).',
+      inputSchema: lean(
+        z.object({
+          audit_id: z.string().min(1).max(128).optional(),
+          fingerprint: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+          kind: z.enum(AUDIT_KINDS).optional(),
+          finding_id: z.string().min(1).max(128).optional(),
+          after_seq: z.number().int().nonnegative().optional(),
+          limit: z.number().int().min(1).max(5000).default(200),
+        }),
+        'input',
+      ),
+      outputSchema: lean(AuditQueryResultSchema, 'output'),
+      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+    },
+    (args) => {
+      try {
+        const events = store.audit.query(args);
+        const findings = args.audit_id !== undefined ? store.audit.findings(args.audit_id) : null;
+        return json(scrubDeep({ events, findings }).value);
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
   // ───────────────────────────── resources ─────────────────────────────
 
   server.registerResource(
@@ -743,6 +831,27 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     (uri) => ({ contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(fullOutputSchemas(), null, 2) }] }),
   );
 
+  // 0.9.0: payload JSON Schema per audit event kind.
+  server.registerResource(
+    'audit-schemas',
+    'kronicle://schemas/audit',
+    {
+      title: 'Audit event payload schemas',
+      description: 'JSON Schema of each audit_record payload kind.',
+      mimeType: 'application/json',
+      cacheHint: CACHE_HINTS['resources/templates/list'],
+    },
+    (uri) => ({
+      contents: [
+        {
+          uri: uri.href,
+          mimeType: 'application/json',
+          text: JSON.stringify(Object.fromEntries(Object.entries(PAYLOAD_SCHEMAS).map(([k, v]) => [k, z.toJSONSchema(v)])), null, 2),
+        },
+      ],
+    }),
+  );
+
   return server;
 }
 
@@ -757,6 +866,8 @@ const OUTPUT_SCHEMAS = {
   put_document: PutDocumentResultSchema,
   supersede_block: SupersedeBlockResultSchema,
   tombstone_block: TombstoneBlockResultSchema,
+  audit_record: AuditRecordResultSchema,
+  audit_query: AuditQueryResultSchema,
 } as const;
 
 /** Every tool's full output JSON Schema, by tool name. */

@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-02T02:12:47.743Z",
+  "capturedAt": "2026-11-05T17:33:28.968Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -152,6 +152,159 @@
           "type": "object"
         },
         "title": "Grade beliefs against the chain"
+      },
+      {
+        "annotations": {
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": true
+        },
+        "description": "Audit events by audit_id and/or catalog fingerprint (optional kind, finding_id, after_seq, limit), ascending seq; with audit_id, also the current state of each finding (discovered | refuted | reopened | accepted).",
+        "inputSchema": {
+          "properties": {
+            "after_seq": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "audit_id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "finding_id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "fingerprint": {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "catalog_snapshot",
+                "call_measured",
+                "finding",
+                "gate_result",
+                "fix_applied",
+                "regression_result"
+              ],
+              "type": "string"
+            },
+            "limit": {
+              "default": 200,
+              "maximum": 5000,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        },
+        "name": "audit_query",
+        "outputSchema": {
+          "properties": {
+            "events": {
+              "type": "array"
+            },
+            "findings": {
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "events",
+            "findings"
+          ],
+          "type": "object"
+        },
+        "title": "Query audit events and findings"
+      },
+      {
+        "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "description": "Append MCP-audit evidence to the chain, all or nothing (≤ 500 per call). kind: catalog_snapshot | call_measured | finding | gate_result | fix_applied | regression_result; payload per kind (kronicle://schemas/audit). Hashes and blob refs only: artifacts go to the blob store (CLI audit put-blob). event_key is the stable id: a retry is a no-op, a different payload under it is refused.",
+        "inputSchema": {
+          "properties": {
+            "actor_id": {
+              "description": "Your agent id (default: server --actor). Cursors are bound to it.",
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "audit_id": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "events": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "event_key": {
+                    "description": "stable id of this logical event within the audit; a retry with the same key is a no-op",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$",
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "catalog_snapshot",
+                      "call_measured",
+                      "finding",
+                      "gate_result",
+                      "fix_applied",
+                      "regression_result"
+                    ],
+                    "type": "string"
+                  },
+                  "payload": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "event_key",
+                  "payload"
+                ],
+                "type": "object"
+              },
+              "maxItems": 500,
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "audit_id",
+            "events"
+          ],
+          "type": "object"
+        },
+        "name": "audit_record",
+        "outputSchema": {
+          "properties": {
+            "audit_id": {
+              "type": "string"
+            },
+            "head": {
+              "type": "object"
+            },
+            "recorded": {
+              "type": "array"
+            }
+          },
+          "required": [
+            "audit_id",
+            "recorded",
+            "head"
+          ],
+          "type": "object"
+        },
+        "title": "Record audit events"
       },
       {
         "annotations": {
@@ -922,7 +1075,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Re-check a recall() receipt (object or receipt_id) against the store (signature, re-hashed block text, chain position, supersession): VERIFIED | SUPERSEDED (see current_block_id) | TOMBSTONED | STALE_SOURCE | UNVERIFIED, with a reason. Fail-closed.",
+        "description": "Re-check recall() receipts (receipt / receipt_id, or up to 100 as receipts / receipt_ids) against the store (signature, re-hashed block text, chain position, supersession): VERIFIED | SUPERSEDED (see current_block_id) | TOMBSTONED | STALE_SOURCE | UNVERIFIED, with a reason. Fail-closed: with a batch, the top-level result is the first one not VERIFIED and results[] has each in input order.",
         "inputSchema": {
           "properties": {
             "receipt": {
@@ -934,6 +1087,26 @@
               "maxLength": 100,
               "minLength": 1,
               "type": "string"
+            },
+            "receipt_ids": {
+              "description": "Batch: receipt ids.",
+              "items": {
+                "maxLength": 100,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 100,
+              "minItems": 1,
+              "type": "array"
+            },
+            "receipts": {
+              "description": "Batch: receipt objects.",
+              "items": {
+                "type": "object"
+              },
+              "maxItems": 100,
+              "minItems": 1,
+              "type": "array"
             }
           },
           "type": "object"
@@ -952,6 +1125,22 @@
             },
             "checked_at": {
               "type": "string"
+            },
+            "counts": {
+              "additionalProperties": {
+                "type": "integer"
+              },
+              "propertyNames": {
+                "enum": [
+                  "VERIFIED",
+                  "SUPERSEDED",
+                  "TOMBSTONED",
+                  "UNVERIFIED",
+                  "STALE_SOURCE"
+                ],
+                "type": "string"
+              },
+              "type": "object"
             },
             "current_block_id": {
               "type": "string"
@@ -994,6 +1183,9 @@
                 "null"
               ]
             },
+            "results": {
+              "type": "array"
+            },
             "source_drift": {
               "type": "object"
             },
@@ -1027,7 +1219,7 @@
           ],
           "type": "object"
         },
-        "title": "Verify a retrieval receipt"
+        "title": "Verify retrieval receipts"
       },
       {
         "annotations": {
@@ -1105,7 +1297,7 @@
   "server": {
     "name": "kronicle-lite",
     "title": "kronicle-lite",
-    "version": "0.8.1"
+    "version": "0.9.0"
   },
-  "sha256": "4b199a3ac72302d43a9bddcfb32d252f95bcee8c6da773d090d3ad5e2be38c8e"
+  "sha256": "c91e266e583bb7c1239549c427ca3ae19011da42f6ed8c853d98481c41d86c33"
 }

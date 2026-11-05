@@ -536,13 +536,15 @@ recursion guard, reconciliation, per-project acknowledgement and client snippets
 | `get_system_state` | Orient. `since_cursor` → delta since then; drift banner; retractions with `old_text` / `new_text` / `diff`; your own notes written since (`carried_notes`); integrity pass; new cursor. Nothing new → a one-line answer. `focus`: `orientation` (default), `recent_changes`, `retractions`, `pulse`. `response_format`: `markdown` (default) or `json`. Scoped to this project (`all_projects` opts out); format-only edits under `format_only_edits` (`include_format_only` opts in). | no |
 | `audit_assumptions` | Grade claims `{symbol, value}` (block id, doc slug, or `head`) → `current \| stale \| contradicted \| retracted \| unknown \| stale_source` with the current truth and a reconcile line. | no |
 | `recall` | FTS5 bm25 search over live blocks; each hit carries a receipt v2 bound to the chain head and (0.6.0) `authority` / `authority_reason` / `authority_basis`; the result carries `authority_floor`, `absence` and, with `cursor`, an attention rerank (`already_read`). A block whose stored text no longer hashes to the chain is withheld (`withheld`), never served. Searches this project's documents and unscoped ones (`all_projects` opts out). Receipts come back as `receipt_id` (`receipts: "inline"` for the object). `top_k`, `include_tombstoned`, `include_receipts`, `receipts`, `max_chars` (default 4000), `all_projects`, `cursor`, `actor_id`. | no (stores receipts) |
-| `verify` | Re-derive a receipt (object or `receipt_id`) against the live store: signature, block existence, re-hashed block text vs the chain, chain binding, supersession walk, git-bound source → `VERIFIED \| SUPERSEDED \| TOMBSTONED \| UNVERIFIED \| STALE_SOURCE` + reason. | no |
+| `verify` | Re-derive a receipt (object or `receipt_id`; 0.9.0: up to 100 as `receipts` / `receipt_ids`, top level = first non-VERIFIED) against the live store: signature, block existence, re-hashed block text vs the chain, chain binding, supersession walk, git-bound source → `VERIFIED \| SUPERSEDED \| TOMBSTONED \| UNVERIFIED \| STALE_SOURCE` + reason. | no |
 | `verify_chain` | Recompute every hash and link in a range; first mismatch; checkpoint results; over the whole chain also the projection (every stored document and block re-derived and re-hashed). | no |
 | `checkpoint_chain` | Sign a Merkle root over a seq range with the local key; `push: true` also anchors it off-box. | no (checkpoints, anchors tables) |
 | `anchor_status` | Last off-box anchor, events since, and whether the local chain still matches it (`remote: true` asks the service). | no |
 | `put_document` | Create or re-put a Markdown document by slug. Unchanged blocks keep their ids; changed ones are superseded; removed ones tombstoned. `bind_git` + `source_path` bind it to a file's git blob. Refuses a detected secret (`secret_detected`); `redact_secrets: true` stores a redacted copy. | yes |
 | `supersede_block` | Replace one live block with new content and a reason (secret guard as for `put_document`). | yes |
 | `tombstone_block` | Retire one live block with a reason. | yes |
+| `audit_record` | 0.9.0: append MCP-audit evidence (`catalog_snapshot`, `call_measured`, `finding`, `gate_result`, `fix_applied`, `regression_result`), schema-validated, all or nothing, idempotent by `event_key`; hashes and blob refs only ([docs/AUDIT.md](docs/AUDIT.md)). | yes |
+| `audit_query` | 0.9.0: audit events by `audit_id` and/or catalog `fingerprint`, plus each finding's current state (discovered / refuted / reopened / accepted). | no |
 
 Every write tool accepts an optional `cursor` and returns the new chain head
 plus a `stale_write_advisory` (advisory only; the stale-write check never
@@ -559,6 +561,17 @@ with a JSON-RPC error while the server keeps serving.
 `supersede_block`, for small context windows: `tools/list` is 10.5 KB
 instead of 14.2 KB. Its catalog is pinned separately
 ([`.mcp-catalog/kronicle-lite-core.json`](.mcp-catalog/kronicle-lite-core.json)).
+
+### Audit evidence and bundles (0.9.0)
+
+`kronicle-lite audit put-blob | record | query | export` keep an MCP audit's
+evidence on the chain (artifacts in a content-addressed blob store beside it),
+and `audit export --audit-id A --out DIR` writes a deterministic evidence
+bundle that `kronicle-lite verify-bundle DIR` checks offline: canonical
+bytes, event hashes, chain continuity, the signed Merkle root, artifact
+hashes, refs and the redacted / missing lists. A pass proves the record is
+intact, not that the audit is right; an anchor of its root proves existence
+at a time. Procedure: [docs/EVIDENCE-BUNDLE.md](docs/EVIDENCE-BUNDLE.md).
 
 ### Honest labels (0.6.0)
 

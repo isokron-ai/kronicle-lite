@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-02T02:12:48.654Z",
+  "capturedAt": "2026-11-05T17:33:29.781Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -678,7 +678,7 @@
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Re-check a recall() receipt (object or receipt_id) against the store (signature, re-hashed block text, chain position, supersession): VERIFIED | SUPERSEDED (see current_block_id) | TOMBSTONED | STALE_SOURCE | UNVERIFIED, with a reason. Fail-closed.",
+        "description": "Re-check recall() receipts (receipt / receipt_id, or up to 100 as receipts / receipt_ids) against the store (signature, re-hashed block text, chain position, supersession): VERIFIED | SUPERSEDED (see current_block_id) | TOMBSTONED | STALE_SOURCE | UNVERIFIED, with a reason. Fail-closed: with a batch, the top-level result is the first one not VERIFIED and results[] has each in input order.",
         "inputSchema": {
           "properties": {
             "receipt": {
@@ -690,6 +690,26 @@
               "maxLength": 100,
               "minLength": 1,
               "type": "string"
+            },
+            "receipt_ids": {
+              "description": "Batch: receipt ids.",
+              "items": {
+                "maxLength": 100,
+                "minLength": 1,
+                "type": "string"
+              },
+              "maxItems": 100,
+              "minItems": 1,
+              "type": "array"
+            },
+            "receipts": {
+              "description": "Batch: receipt objects.",
+              "items": {
+                "type": "object"
+              },
+              "maxItems": 100,
+              "minItems": 1,
+              "type": "array"
             }
           },
           "type": "object"
@@ -708,6 +728,22 @@
             },
             "checked_at": {
               "type": "string"
+            },
+            "counts": {
+              "additionalProperties": {
+                "type": "integer"
+              },
+              "propertyNames": {
+                "enum": [
+                  "VERIFIED",
+                  "SUPERSEDED",
+                  "TOMBSTONED",
+                  "UNVERIFIED",
+                  "STALE_SOURCE"
+                ],
+                "type": "string"
+              },
+              "type": "object"
             },
             "current_block_id": {
               "type": "string"
@@ -750,6 +786,9 @@
                 "null"
               ]
             },
+            "results": {
+              "type": "array"
+            },
             "source_drift": {
               "type": "object"
             },
@@ -783,7 +822,7 @@
           ],
           "type": "object"
         },
-        "title": "Verify a retrieval receipt"
+        "title": "Verify retrieval receipts"
       }
     ]
   },
@@ -792,7 +831,7 @@
   "server": {
     "name": "kronicle-lite",
     "title": "kronicle-lite",
-    "version": "0.8.1"
+    "version": "0.9.0"
   },
-  "sha256": "ec93dac4d8bc4fbce394a1654d2fae0822ab6a46d5f7edcc0e006a04a4b3e3f2"
+  "sha256": "18a336bb3830da7d04420c2d3344b952603e51fd08941ab54bc0b79bda7a2da4"
 }
