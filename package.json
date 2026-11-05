@@ -68,6 +68,8 @@
     "@modelcontextprotocol/client": "^2.4.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.19.0",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
     "eslint": "^9.39.0",
     "mcp-catalog-snap": "^0.1.0",
     "tsup": "^8.5.0",

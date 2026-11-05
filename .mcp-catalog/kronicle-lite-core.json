@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-02T01:25:59.125Z",
+  "capturedAt": "2026-11-02T02:12:48.654Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -10,6 +10,13 @@
         "name": "document",
         "title": "Documents",
         "uriTemplate": "kronicle://docs/{slug}"
+      },
+      {
+        "description": "Every block of one document revision as put_document reports it (created / unchanged / tombstoned), 1000 per page; next is the following page.",
+        "mimeType": "application/json",
+        "name": "document-blocks",
+        "title": "Document blocks",
+        "uriTemplate": "kronicle://docs/{slug}/blocks/{revision}/{offset}"
       }
     ],
     "tools": [
@@ -141,6 +148,7 @@
             },
             "since_cursor": {
               "description": "cursor or cursor_compact from your last call",
+              "maxLength": 8192,
               "type": "string"
             }
           },
@@ -324,6 +332,7 @@
             },
             "cursor": {
               "description": "Your latest cursor (for the stale-write advisory).",
+              "maxLength": 8192,
               "type": "string"
             },
             "idempotency_key": {
@@ -366,8 +375,20 @@
         "name": "put_document",
         "outputSchema": {
           "properties": {
+            "block_counts": {
+              "type": "object"
+            },
             "blocks": {
               "type": "array"
+            },
+            "blocks_next": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "blocks_truncated": {
+              "type": "boolean"
             },
             "chain_seq": {
               "type": "integer"
@@ -414,6 +435,9 @@
             "chain_seq",
             "head",
             "blocks",
+            "block_counts",
+            "blocks_truncated",
+            "blocks_next",
             "events",
             "stale_write_advisory"
           ],
@@ -442,6 +466,7 @@
             },
             "cursor": {
               "description": "Your latest cursor (for the stale-write advisory).",
+              "maxLength": 8192,
               "type": "string"
             },
             "include_receipts": {
@@ -577,6 +602,7 @@
             },
             "cursor": {
               "description": "Your latest cursor (for the stale-write advisory).",
+              "maxLength": 8192,
               "type": "string"
             },
             "new_content": {
@@ -768,5 +794,5 @@
     "title": "kronicle-lite",
     "version": "0.8.1"
   },
-  "sha256": "aa72bb43f33c4a21d677133b3a412b17fe0fc11b0bb515092e01406300412060"
+  "sha256": "ec93dac4d8bc4fbce394a1654d2fae0822ab6a46d5f7edcc0e006a04a4b3e3f2"
 }

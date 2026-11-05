@@ -27,10 +27,11 @@
 
 import { createReadStream, createWriteStream, existsSync, readFileSync } from 'node:fs';
 import { text as readStreamText } from 'node:stream/consumers';
-import { basename } from 'node:path';
+import { basename, join } from 'node:path';
 
 import type { AnchorCallOptions } from './anchor/anchor.js';
-import { defaultDataDir } from './db/open.js';
+import { DB_FILE, defaultDataDir } from './db/open.js';
+import { checkWriters, describeWriters } from './db/writers.js';
 import { isValidSlug, type DocumentSource } from './docs/documents.js';
 import { describeProjection } from './docs/integrity.js';
 import type { LineageRef } from './docs/documents.js';
@@ -348,7 +349,7 @@ async function main(argv: string[]): Promise<number> {
         } else {
           const b = loadOrCreateBearer(dataDir);
           bearer = b.token;
-          bearerNote = `bearer from ${b.file}${b.created ? ' (created, mode 0600)' : ''}`;
+          bearerNote = `bearer from ${b.file}${b.created ? ' (created, mode 0600)' : ''}${b.tightened !== undefined ? ` (was mode 0${b.tightened.toString(8)}, readable by others; tightened to 0600)` : ''}`;
         }
         const allowedOrigins = list(flags['allow-origin']);
         const allowedHosts = list(flags['allow-host']);
@@ -377,7 +378,13 @@ async function main(argv: string[]): Promise<number> {
       }
       process.stderr.write(`kronicle-lite ${VERSION} serving on stdio; data dir ${dataDir}; key ${store.identity.signer.key_id}\n`);
       const { serveStdio } = await import('@modelcontextprotocol/server/stdio');
-      const handle = serveStdio(factory, { onerror: (err) => process.stderr.write(`stdio: ${err.message}\n`) });
+      // 0.8.1: our own wire (src/stdio.ts): JSON-RPC errors for malformed / oversize input, lifecycle checks, ping.
+      const { GuardedStdioTransport } = await import('./stdio.js');
+      const log = (line: string) => process.stderr.write(line + '\n');
+      const handle = serveStdio(factory, {
+        transport: new GuardedStdioTransport(process.stdin, process.stdout, { log }),
+        onerror: (err) => process.stderr.write(`stdio: ${err.message}\n`),
+      });
       // Keep the process alive until stdin closes, then release the store.
       await new Promise<void>((resolve) => {
         process.stdin.once('end', resolve);
@@ -388,7 +395,8 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case 'verify-chain': {
-      const store = new KronicleLite({ dataDir });
+      const store = openForVerify(dataDir);
+      if (typeof store === 'number') return store;
       try {
         return printVerifyAll(store, flags);
       } finally {
@@ -444,7 +452,8 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case 'verify': {
-      const store = new KronicleLite({ dataDir });
+      const store = flags['remote'] === true ? new KronicleLite({ dataDir }) : openForVerify(dataDir);
+      if (typeof store === 'number') return store;
       try {
         // Local verification; identical to verify-chain.
         if (flags['remote'] !== true) return printVerifyAll(store, flags);
@@ -701,6 +710,11 @@ async function main(argv: string[]): Promise<number> {
         full: flags['full'] === true,
       });
       process.stdout.write((flags['json'] ? JSON.stringify(report, null, 2) : renderDoctor(report)) + '\n');
+      // 0.8.1 (F12): 2 = the store could not be read at all (I/O), 1 = a check failed.
+      if (report.io_error !== undefined) {
+        process.stderr.write(`error: cannot read the kronicle-lite store in ${dataDir}: ${report.io_error}\n`);
+        return 2;
+      }
       return report.ok ? 0 : 1;
     }
     default:
@@ -709,19 +723,40 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
+/**
+ * 0.8.1 (F12): verify-chain / verify open the store read-only (a read-only or
+ * full data dir still verifies). Exit 2 with an I/O message when it cannot be
+ * read at all; 1 stays reserved for a real divergence. A missing store is
+ * created as before (an empty chain verifies).
+ */
+function openForVerify(dataDir: string): KronicleLite | number {
+  try {
+    return existsSync(join(dataDir, DB_FILE)) ? new KronicleLite({ dataDir, readOnly: true }) : new KronicleLite({ dataDir });
+  } catch (err) {
+    process.stderr.write(`error: cannot read the kronicle-lite store in ${dataDir} (I/O, not a chain divergence): ${err instanceof Error ? err.message : String(err)}\n`);
+    return 2;
+  }
+}
+
 /** verify-chain / verify (local): chain + projection; JSON on stdout, one summary line on stderr when it fails. */
 function printVerifyAll(store: KronicleLite, flags: Record<string, string | true>): number {
   const r = store.verifyAll(num(flags['from']) ?? 1, num(flags['to']), flags['full'] === true ? { projection: true } : {});
   process.stdout.write(JSON.stringify(r, null, 2) + '\n');
+  const lines: string[] = [];
   if (!r.ok) {
     const m = r.first_mismatch;
-    const lines = [
-      ...(m ? [`chain: ${m.kind} at seq ${m.seq}`] : []),
-      ...(r.projection && !r.projection.ok ? [`projection: ${describeProjection(r.projection)}; run kronicle-lite rebuild once the chain verifies`] : []),
-    ];
-    process.stderr.write(lines.join('\n') + '\n');
+    if (m) lines.push(`chain: ${m.kind} at seq ${m.seq}`);
+    if (r.projection && !r.projection.ok) lines.push(`projection: ${describeProjection(r.projection)}; run kronicle-lite rebuild once the chain verifies`);
   }
-  return r.ok ? 0 : 1;
+  // 0.8.1 (C2-01): the projection check does not cover project keys; an older writer's damage shows here.
+  let writersBad = false;
+  if (r.projection) {
+    const w = describeWriters(checkWriters(store.db));
+    if (w.status !== 'ok') lines.push(`writers: ${w.detail}`);
+    writersBad = w.status === 'fail';
+  }
+  if (lines.length > 0) process.stderr.write(lines.join('\n') + '\n');
+  return r.ok && !writersBad ? 0 : 1;
 }
 
 /** `--derived-from ID:HASH[,ID:HASH…]` (unreleased); undefined when absent, [] for an explicit empty value. */
@@ -859,6 +894,15 @@ async function watchCommand(dataDir: string, positional: string[], flags: Record
   watcher.close();
   store.close();
   return 0;
+}
+
+// 0.8.1 (F14): a reader that goes away (`export | head`) is not an error: stop quietly, exit 0.
+// `serve` keeps the SDK's own stdout handling (the client closing stdin ends it).
+if (process.argv[2] !== 'serve') {
+  process.stdout.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EPIPE') process.exit(0);
+    throw err;
+  });
 }
 
 main(process.argv.slice(2)).then(

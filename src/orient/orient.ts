@@ -15,7 +15,7 @@ import { GENESIS_HASH } from '../chain/genesis.js';
 import { canonicalize } from '../crypto/canonical.js';
 import { sha256Hex } from '../crypto/hash.js';
 import { isInstructionSlug, splitHeadingPath, type DocumentStore, type SourceDrift } from '../docs/documents.js';
-import { checkBlockRow } from '../docs/integrity.js';
+import { checkBlockLifecycle, checkBlockRow, checkFtsContent } from '../docs/integrity.js';
 import { CursorTokenError, parseAnyCursor, serializeCompactCursor, serializeCursor } from './cursor.js';
 import { foldDelta, rollupDelta, type PolicyOptions, type TypeGroup, type TypedDelta } from './delta.js';
 import {
@@ -28,11 +28,11 @@ import {
   type StaleWriteAdvisory,
 } from './drift.js';
 import { scrubDeep } from '../secrets/guard.js';
-import { FlightRecorder, type FlightRecord } from './flight-recorder.js';
+import { FlightRecorder } from './flight-recorder.js';
 import { __mutants, type FormatRule } from './cosmetic.js';
 import { computeRetractions, type Retraction } from './retraction.js';
 import { snippet, wordDiff } from './textdiff.js';
-import type { Lineage, PendingItem, StaleSource } from '../lineage/lineage.js';
+import { MAX_DERIVED_DEPTH, type Lineage, type PendingItem, type StaleSource } from '../lineage/lineage.js';
 
 export const FOCUSES = ['orientation', 'recent_changes', 'retractions', 'pulse'] as const;
 export type Focus = (typeof FOCUSES)[number];
@@ -76,6 +76,12 @@ export interface OrientInput {
   include_format_only?: boolean | undefined;
   /** @deprecated earlier name of include_format_only. */
   include_cosmetic?: boolean | undefined;
+  /**
+   * 0.8.1: false = do not record this briefing in the flight recorder (it
+   * then never becomes the actor's position). The pulse records only when it
+   * allows: a denial must not advance (C2-04). Default true.
+   */
+  record?: boolean | undefined;
   /**
    * Unreleased: whose reads `pending` is computed for (default: actor_id). A
    * hook that orients under its own actor (docs/PUSH.md) passes the agent's.
@@ -170,7 +176,7 @@ export interface SystemState {
   anchor: AnchorSummary | null;
   /** 0.4.0: git-bound documents whose source file changed or vanished; null for focus=pulse (and, unreleased/next, focus=retractions: not checked). */
   source_drift: SourceDrift[] | null;
-  /** 0.5.0: chain + live-block integrity over what this briefing read; null for focus=pulse. */
+  /** 0.5.0: chain + live-block integrity over what this briefing read (0.8.1: also for focus=pulse, and projection lifecycle + lineage rows against the chain). */
   integrity: IntegritySummary | null;
   /**
    * 0.5.0: project scoping applied to instruction retractions; null when unscoped.
@@ -220,6 +226,15 @@ export class Orient {
   readonly recorder: FlightRecorder;
   private readonly rules: DriftRules;
   private readonly policy: PolicyOptions;
+
+  /**
+   * 0.8.1 (L2-03): whether the store file on disk is still readable and sane
+   * (set by KronicleLite; see db/health.ts). A problem fails the integrity
+   * pass of every focus. null: not checked.
+   */
+  storeHealth: (() => string | null) | null = null;
+  private lastHead: ChainHead | null = null;
+  private projectionMemo: { key: string; problem: string | null; blocks_checked: number; fts: boolean } | null = null;
 
   constructor(
     private readonly db: Db,
@@ -299,56 +314,22 @@ export class Orient {
   }
 
   /**
-   * 0.8.1: where the actor's current SESSION began, for lineage inference:
-   * the first briefing of the cursor chain that leads to the briefing behind
-   * `cursor` (else to the actor's latest briefing). A briefing continues the
-   * session when it was served from a cursor the actor presented (recovery
-   * `presented` / `presented_compact`); one served without a usable cursor
-   * (flight recorder, genesis, a stale cursor) starts a new session. Before,
-   * inference started at the LATEST orient, so recall → orient → write (the
-   * wake contract: re-orient before writing) inferred no lineage. null when
-   * the actor never oriented.
+   * 0.8.1 (C2-05): the same session start as a CHAIN POSITION, for lineage
+   * inference: the seq of the cursor the actor presents (verified, issued to
+   * it), else of its latest briefing. Reads are placed by the chain head they
+   * were made at, so a skewed clock cannot drop them. null: never oriented.
    */
-  sessionOrigin(actor_id: string, cursor?: string | undefined): string | null {
-    let b: FlightRecord | null = null;
+  sessionStartSeq(actor_id: string, cursor?: string | undefined): number | null {
     if (cursor) {
       try {
         const parsed = parseAnyCursor(cursor, actor_id, this.secret);
-        if (parsed.form === 'full') {
-          if (parsed.body.actor_id === actor_id) {
-            b = this.recorder.briefingIssuedAt(actor_id, parsed.body.issued_at);
-            // A cursor whose briefing was not recorded (focus=pulse): its issue time is all we know.
-            if (!b) return parsed.body.issued_at;
-          }
-        } else {
-          b = this.recorder.briefingAt(actor_id, parsed.chain_seq);
-        }
+        if (parsed.form === 'compact') return parsed.chain_seq;
+        if (parsed.body.actor_id === actor_id) return parsed.body.chain_seq;
       } catch {
         // fall through to the flight recorder
       }
     }
-    b ??= this.recorder.latestForActor(actor_id);
-    if (!b) return null;
-    let origin = b.issued_at;
-    const seen = new Set<string>([b.briefing_id]);
-    for (let hops = 0; hops < 10_000; hops++) {
-      const rec = b.record['recovery'] as Partial<Recovery> | undefined;
-      if (!rec || (rec.method !== 'presented' && rec.method !== 'presented_compact')) break;
-      const prev: FlightRecord | null =
-        typeof rec.cursor_issued_at === 'string'
-          ? this.recorder.briefingIssuedAt(actor_id, rec.cursor_issued_at)
-          : typeof rec.from_seq === 'number'
-            ? this.recorder.briefingAtBefore(actor_id, rec.from_seq, b.issued_at, b.briefing_id)
-            : null;
-      if (!prev || seen.has(prev.briefing_id)) {
-        if (typeof rec.cursor_issued_at === 'string' && rec.cursor_issued_at < origin) origin = rec.cursor_issued_at;
-        break;
-      }
-      seen.add(prev.briefing_id);
-      b = prev;
-      if (b.issued_at < origin) origin = b.issued_at;
-    }
-    return origin;
+    return this.recorder.latestForActor(actor_id)?.to_seq ?? null;
   }
 
   recover(actor_id: string, since_cursor: string | undefined, head: ChainHead): Recovery {
@@ -501,10 +482,22 @@ export class Orient {
         const b = typeof succ === 'string' ? this.docs.getBlock(succ) : null;
         if (a && b && lineage.hopFormatOnly(a, b)) continue;
       }
-      for (const doc_id of notes) {
+      // 0.8.1 (R2-15): notes derived from a note that went stale over this change are stale too (bounded depth).
+      const inWalk = (s: StaleSource) => lineage.walk(s.source_block_id)?.blocks.some((b) => b.block_id === block_id) ?? false;
+      const queue: { doc_id: string; level: number }[] = notes.map((doc_id) => ({ doc_id, level: 0 }));
+      const visited = new Set(notes);
+      while (queue.length > 0) {
+        const { doc_id, level } = queue.shift()!;
         const stale = lineage.staleness(doc_id, memo);
-        const entry = stale.find((s) => !s.via && (lineage.walk(s.source_block_id)?.blocks.some((b) => b.block_id === block_id) ?? false));
+        const entry = (level === 0 ? stale.find((s) => !s.via && inWalk(s)) : undefined) ?? (level > 0 ? stale.find((s) => s.via !== undefined && inWalk(s)) : undefined);
         if (!entry) continue;
+        if (level < MAX_DERIVED_DEPTH) {
+          for (const d of lineage.notesDerivedFromDoc(doc_id)) {
+            if (visited.has(d)) continue;
+            visited.add(d);
+            queue.push({ doc_id: d, level: level + 1 });
+          }
+        }
         const key = `${doc_id}|${entry.source_block_id}`;
         if (seen.has(key)) continue;
         seen.add(key);
@@ -516,6 +509,7 @@ export class Orient {
         const cur = entry.current_block_id ? this.docs.getBlock(entry.current_block_id) : null;
         const removed = entry.current_block_id === null;
         const srcLoc = entry.source_doc_slug ? ` (${entry.source_doc_slug})` : '';
+        const via = entry.via ? `derived from note ${entry.via}, which was derived from ` : 'derived from ';
         const now = removed ? 'REMOVED' : entry.change === 'moved' ? `"${entry.new_text}" MOVED to another section` : `"${entry.new_text}"`;
         out.push({
           doc_id,
@@ -527,8 +521,8 @@ export class Orient {
             block_id: first?.block_id ?? null,
             doc_slug: note.slug,
             successor_block_id: null,
-            reason: `derived from ${entry.source_doc_slug ?? entry.source_block_id}, which changed`,
-            reason_line: `You previously relied on note ${noteText ? `"${noteText}" ` : ''}(${note.slug}), derived from "${entry.old_text ?? entry.source_block_id}"${srcLoc}; that source is now ${now} (seq ${ev.seq}). The note is STALE: re-derive it from the current source before acting.`,
+            reason: `${entry.via ? `derived from note ${entry.via}, ` : ''}derived from ${entry.source_doc_slug ?? entry.source_block_id}, which changed`,
+            reason_line: `You previously relied on note ${noteText ? `"${noteText}" ` : ''}(${note.slug}), ${via}"${entry.old_text ?? entry.source_block_id}"${srcLoc}; that source is now ${now} (seq ${ev.seq}). The note is STALE: re-derive it from the current source before acting.`,
             heading_path: first ? splitHeadingPath(first.heading_path) : null,
             old_text: noteText,
             new_text: null,
@@ -547,14 +541,17 @@ export class Orient {
    * newest live blocks against their chained block.created events. Cheap
    * enough for every orient; `verify-chain` / `doctor` do the full pass.
    */
-  quickIntegrity(from_seq: number, head: ChainHead, opts: { windowOnly?: boolean; eventsOnly?: boolean } = {}): IntegritySummary {
+  quickIntegrity(from_seq: number, head: ChainHead, opts: { windowOnly?: boolean; eventsOnly?: boolean; fts?: boolean } = {}): IntegritySummary {
     let problem: string | null = null;
     let seq: number | null = null;
     let events_checked = 0;
+    // 0.8.1 (L2-03): the store file itself (a page changed on disk under a long-lived connection's cache).
+    problem = this.storeHealth?.() ?? null;
+    if (problem) return { ok: false, events_checked, blocks_checked: 0, problem, seq };
     // windowOnly (focus=retractions, the per-tool-call push path): re-hash just
     // the events since the cursor instead of the last 1000. Full briefings keep
     // the wider event pass.
-    if (head.seq > 0 && (!opts.windowOnly || from_seq < head.seq)) {
+    if (!problem && head.seq > 0 && (!opts.windowOnly || from_seq < head.seq)) {
       const from = opts.windowOnly ? Math.max(1, from_seq + 1) : Math.max(1, Math.min(from_seq + 1, head.seq - 999));
       const r = this.chain.verify(from);
       events_checked = r.events_checked;
@@ -564,17 +561,97 @@ export class Orient {
       }
     }
     // Live blocks are always re-hashed (a tampered row must surface on every path, the push hook's too).
-    const blocks = opts.eventsOnly ? [] : this.docs.liveBlockRows(2000);
-    if (!problem) {
-      for (const b of blocks) {
-        const p = checkBlockRow(this.chain, b);
-        if (p) {
-          problem = `block ${b.block_id} (${p}): its stored text does not match the chain`;
-          break;
+    // 0.8.1: the projection part of the pass (live-block re-hash, lifecycle and lineage rows against
+    // the chain, the FTS index) is memoised per database state, so repeated pulses in a long-lived
+    // server cost a lookup: any write by this connection (total_changes) or another (data_version),
+    // or a new head, re-runs it.
+    let blocks_checked = 0;
+    if (!problem && !opts.eventsOnly) {
+      const memo = this.projectionMemo;
+      const fresh = memo !== null && memo.key === this.dbStateKey() && (!opts.fts || memo.fts);
+      if (fresh) {
+        problem = memo.problem;
+        blocks_checked = memo.blocks_checked;
+      } else {
+        const blocks = this.docs.liveBlockRows(2000);
+        blocks_checked = blocks.length;
+        for (const b of blocks) {
+          const p = checkBlockRow(this.chain, b);
+          if (p) {
+            problem = `block ${b.block_id} (${p}): its stored text does not match the chain`;
+            break;
+          }
         }
+        // 0.8.1 (R2-09): lifecycle and lineage rows of the projection against the chain (what
+        // recall, pending and the derived pass read), and (R2-17) the full-text index.
+        if (!problem) {
+          const lc = checkBlockLifecycle(this.db);
+          if (lc) problem = `projection: ${lc}`;
+        }
+        if (!problem && this.lineage) {
+          const lp = this.lineage.checkProjection();
+          if (lp) problem = `projection: ${lp}`;
+        }
+        if (!problem && opts.fts) {
+          const f = checkFtsContent(this.db);
+          if (f) problem = f;
+        }
+        // Keyed after the checks (the FTS check itself counts as a change).
+        this.projectionMemo = { key: this.dbStateKey(), problem, blocks_checked, fts: opts.fts === true };
       }
     }
-    return { ok: problem === null, events_checked, blocks_checked: blocks.length, problem, seq };
+    return { ok: problem === null, events_checked, blocks_checked, problem, seq };
+  }
+
+  /** This connection's view of the database state: another connection's commit, this one's writes, the head. */
+  private dbStateKey(): string {
+    const dv = String(this.db.pragma('data_version', { simple: true }));
+    const tc = (this.db.prepare('SELECT total_changes() AS n').get() as { n: number }).n;
+    return `${dv}:${tc}:${this.chain.head().seq}`;
+  }
+
+  /**
+   * 0.8.1 (L2-03): a store that cannot be read (SQLITE_CORRUPT, NOTADB, I/O
+   * error…) answers with integrity ok:false and the error, never with a
+   * clean briefing. The cursor does not move.
+   */
+  private unreadableState(input: OrientInput, err: unknown, now: Date): SystemState {
+    const focus: Focus = input.focus ?? 'orientation';
+    const code = (err as { code?: unknown })?.code;
+    const problem = `the store could not be read (${typeof code === 'string' ? code + ': ' : ''}${err instanceof Error ? err.message : String(err)})`;
+    const head = this.lastHead ?? { seq: 0, hash: GENESIS_HASH };
+    const recovery: Recovery = { method: 'genesis', from_seq: 0, reason: `store unreadable: ${problem}`, cursor_error: null, cursor_issued_at: null };
+    const signals: DriftSignals = { events_since_last_orient: null, seconds_since_last_orient: null };
+    const drift_banner = composeDriftBanner(signals, this.rules);
+    const integrity: IntegritySummary = { ok: false, events_checked: 0, blocks_checked: 0, problem, seq: null };
+    return {
+      format: 'kronicle-lite/1',
+      briefing_id: randomUUID(),
+      issued_at: now.toISOString(),
+      actor_id: input.actor_id,
+      focus,
+      head,
+      cursor: input.since_cursor ?? '',
+      cursor_compact: input.since_cursor ?? '',
+      recovery,
+      drift_banner,
+      stale_write_advisory: composeStaleWriteAdvisory(signals, this.rules),
+      anchor: null,
+      source_drift: null,
+      integrity,
+      scope: null,
+      delta: null,
+      retractions: null,
+      format_only_edits: null,
+      cosmetic_edits: null,
+      carried_notes: null,
+      pending: null,
+      pending_count: null,
+      pending_actor: null,
+      pending_hidden: null,
+      digest: null,
+      next_steps: nextSteps({ focus, recovery, drift_banner, retractions: null, source_drift: null, integrity, scope: null, pending_count: null, changed_since_cursor: null }),
+    };
   }
 
   /** True when the actor has any read or receipt on record (it may have relied on something). */
@@ -620,9 +697,43 @@ export class Orient {
   }
 
   getSystemState(input: OrientInput, now = new Date()): SystemState {
+    try {
+      return this.systemState(input, now);
+    } catch (err) {
+      const code = (err as { code?: unknown })?.code;
+      if (typeof code === 'string' && code.startsWith('SQLITE_')) return this.unreadableState(input, err, now);
+      throw err;
+    }
+  }
+
+  /** 0.8.1: record a briefing served with `record: false` (the pulse, once it allows). */
+  recordBriefing(state: SystemState, budget_tokens = 3000): void {
+    this.recorder.record({
+      briefing_id: state.briefing_id,
+      actor_id: state.actor_id,
+      issued_at: state.issued_at,
+      from_seq: state.recovery.from_seq,
+      to_seq: state.head.seq,
+      head_hash: state.head.hash,
+      focus: state.focus,
+      delta_hash: sha256Hex(canonicalize(state.delta ?? {})),
+      record: {
+        recovery: state.recovery,
+        by_type: state.delta?.by_type ?? {},
+        retraction_count: state.retractions?.length ?? 0,
+        format_only_count: state.format_only_edits?.length ?? 0,
+        drift_surfaced: state.drift_banner.surfaced,
+        pending_count: state.pending_count ?? 0,
+        budget_tokens,
+      },
+    });
+  }
+
+  private systemState(input: OrientInput, now: Date): SystemState {
     const focus: Focus = input.focus ?? 'orientation';
     const budget = input.budget_tokens ?? 3000;
     const head = this.chain.head();
+    this.lastHead = head;
     const issued_at = now.toISOString();
     const briefing_id = randomUUID();
 
@@ -723,15 +834,13 @@ export class Orient {
       if (focus === 'orientation' || recovery.method === 'genesis') digest = scrubDeep(this.digest(keys ? [...keys] : null)).value;
       // The retractions focus is the per-tool-call push contract (docs/PUSH.md): no git calls (null = not checked).
       source_drift = focus === 'retractions' ? null : this.docs.listSourceDrift();
-      integrity = this.quickIntegrity(recovery.from_seq, head, { windowOnly: focus === 'retractions' });
+      integrity = this.quickIntegrity(recovery.from_seq, head, { windowOnly: focus === 'retractions', fts: focus !== 'retractions' });
     }
 
-    // Unreleased: pulse re-hashes the events since the cursor too (cheap), so a
-    // corrupt or edited event is never answered with "within threshold".
-    if (focus === 'pulse' && recovery.from_seq < head.seq) {
-      const pi = this.quickIntegrity(recovery.from_seq, head, { windowOnly: true, eventsOnly: true });
-      if (!pi.ok) integrity = pi;
-    }
+    // 0.8.1 (L2-01): the pulse runs the same integrity pass as focus=retractions
+    // (events since the cursor, live blocks, projection cross-checks) and always
+    // reports it: a tampered store is never answered with "proceed".
+    if (focus === 'pulse') integrity = this.quickIntegrity(Math.max(recovery.from_seq, head.seq - 1000), head, { windowOnly: true });
     // Unreleased: version-bound reconciliation, every focus (pulse included).
     let pending: PendingItem[] | null = null;
     let pending_count: number | null = null;
@@ -745,7 +854,10 @@ export class Orient {
       pending_count = p.count;
       pending_hidden = p.hidden;
     }
-    const next_steps = nextSteps({ focus, recovery, drift_banner, retractions, source_drift, integrity, scope, pending_count });
+    // 0.8.1 (R2-08): what changed since the cursor PRESENTED (never since the actor's latest briefing,
+    // which another session with the same actor id may have taken); null = no usable cursor.
+    const changed_since_cursor = cursorPos ? Math.max(0, head.seq - cursorPos.chain_seq) : null;
+    const next_steps = nextSteps({ focus, recovery, drift_banner, retractions, source_drift, integrity, scope, pending_count, changed_since_cursor });
     const lastAnchor = this.chain.lastAnchor();
     const anchor: AnchorSummary | null = lastAnchor
       ? {
@@ -787,27 +899,7 @@ export class Orient {
       next_steps,
     };
 
-    if (focus !== 'pulse') {
-      this.recorder.record({
-        briefing_id,
-        actor_id: input.actor_id,
-        issued_at,
-        from_seq: recovery.from_seq,
-        to_seq: head.seq,
-        head_hash: head.hash,
-        focus,
-        delta_hash: sha256Hex(canonicalize(delta ?? {})),
-        record: {
-          recovery,
-          by_type: delta?.by_type ?? {},
-          retraction_count: retractions?.length ?? 0,
-          format_only_count: format_only_edits?.length ?? 0,
-          drift_surfaced: drift_banner.surfaced,
-          pending_count: pending_count ?? 0,
-          budget_tokens: budget,
-        },
-      });
-    }
+    if (focus !== 'pulse' && input.record !== false) this.recordBriefing(state, budget);
     return state;
   }
 }
@@ -821,6 +913,8 @@ function nextSteps(args: {
   integrity: IntegritySummary | null;
   scope?: SystemState['scope'];
   pending_count?: number | null;
+  /** 0.8.1: events since the cursor presented; null when no usable cursor was presented. */
+  changed_since_cursor?: number | null;
 }): string[] {
   const steps: string[] = [];
   const pendingStep =
@@ -840,7 +934,7 @@ function nextSteps(args: {
     // when something changed: "proceed" only when nothing changed and nothing
     // is pending (stress/bench finding: agents deployed on "within threshold").
     const integrityBad = !!args.integrity && !args.integrity.ok;
-    const changed = (args.drift_banner.events_since_last_orient ?? 0) > 0;
+    const changed = (args.changed_since_cursor ?? 0) > 0;
     if (pendingStep) {
       steps.push(pendingStep);
       steps.push('Do NOT run deploy/migrate/publish/push until every pending item is re-read. Carry the new cursor.');
@@ -850,8 +944,10 @@ function nextSteps(args: {
       steps.push('Drift threshold crossed: call get_system_state with focus=retractions (or recent_changes) to read what changed before acting.');
     } else if (changed) {
       steps.push(
-        `${args.drift_banner.events_since_last_orient} change(s) since your last look; a pulse does not list retractions. Before a world-changing action (deploy, migrate, publish, push) call get_system_state with focus=retractions. Carry the new cursor.`,
+        `${args.changed_since_cursor} change(s) since your cursor; a pulse does not list retractions. Before a world-changing action (deploy, migrate, publish, push) call get_system_state with focus=retractions. Carry the new cursor.`,
       );
+    } else if (args.changed_since_cursor == null) {
+      steps.push('No valid cursor was presented, so a pulse cannot tell what changed since your last look. Before a world-changing action call get_system_state with focus=retractions. Carry the new cursor.');
     } else {
       steps.push('No changes since your last look; proceed. Carry the new cursor.');
     }

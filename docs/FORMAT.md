@@ -175,7 +175,7 @@ text, because "Allowed › X" and "Forbidden › X" mean different things.
 
 | event_type | payload fields |
 |---|---|
-| `document.put` | `doc_id, slug, title, revision, markdown, markdown_hash (BLAKE3), block_ids[], carried[{block_id, ordinal, heading_path}]`, optional `source` (0.4.0, §3.4), optional `project` (0.7.0, §3.7), optional `derived_from[]` / `derived_from_inferred[]` / `derived_from_inferred_truncated` (0.8.0, §3.10) |
+| `document.put` | `doc_id, slug, title, revision, markdown, markdown_hash (BLAKE3), block_ids[], carried[{block_id, ordinal, heading_path}]`, optional `source` (0.4.0, §3.4), optional `project` (0.7.0, §3.7), optional `derived_from[]` / `derived_from_inferred[]` / `derived_from_inferred_truncated` (0.8.0, §3.10), optional `derived_from_released[]` (0.8.1, §3.10) |
 | `document.revised` | `doc_id, slug, title, revision, markdown, markdown_hash, cause` |
 | `block.created` | `block_id, doc_id, doc_slug, revision, ordinal, kind, level, heading_path[], content, content_hash`; from `supersede_block`, optional `derived_from[]` / `derived_from_inferred[]` / `derived_from_inferred_truncated` (0.8.0, §3.10) |
 | `block.superseded` | `block_id, successor_block_id, doc_id, doc_slug, revision, reason` |
@@ -431,21 +431,36 @@ A note written from other blocks records which exact versions it rests on:
   be that block's (a block id names one version); unknown blocks or a wrong
   hash are refused with `invalid_lineage`, nothing chained. A block that is
   no longer live is accepted (the note is stale from the start).
-- `derived_from_inferred` — every block the writing actor read (recall hits,
-  document reads; its own writes excluded) since its session began, outside
-  the document being written. The session (0.8.1) is the cursor chain behind
-  the cursor it passes (else behind its latest orient): from that briefing
-  back through every briefing served from a cursor the actor presented, to
-  the first one served without a usable cursor (flight recorder, genesis).
-  Before 0.8.1 it began at the latest orient, so recall → orient → write
-  (the wake contract) inferred nothing. Sorted by `block_id`, deduplicated by block and by
-  lineage (two versions of one block read: only the later one).
-  Instruction-file imports infer nothing.
-- No session (the actor never oriented): never "everything ever read", but
-  the most recently read blocks within the last 24 hours, at most 200
-  (whichever set is smaller). When that bound leaves out any block the actor
-  ever read, the payload carries `derived_from_inferred_truncated: true`
-  (present only when true; the write's reply says the same in `lineage`).
+- `derived_from_inferred` — the blocks the writing actor read (recall hits,
+  document reads; its own writes excluded) outside the document being
+  written, within a bound that is the union of (0.8.1):
+  - its **session**: every read made at or after the chain position of the
+    cursor it passes, else of its latest briefing. Reads are placed by the
+    chain head they were made at (`reads.head_seq`, `receipts.chain_seq`),
+    never by wall clock, so a skewed clock cannot drop them;
+  - the most recently read blocks within the last **24 hours**, at most
+    **200**, whatever briefings came in between (0.8.0 started the bound at
+    the latest briefing, so recall → orient → write lost the read). The
+    24 h test is a coarse wall-clock cap.
+
+  Sorted by `block_id`, deduplicated by block and by lineage (two versions
+  of one block read: only the later one). Instruction-file imports infer
+  nothing.
+- `derived_from_inferred_truncated: true` (present only when true; the
+  write's reply says the same in `lineage`) when the bound left reads out:
+  the 200 cap cut a read of the window, or the actor read blocks that
+  neither bound covers while there was no session or nothing was read in
+  it. The note's sources are then undetermined (0.8.1: recall never labels
+  it `can_act`, docs/HONESTY.md `lineage_unknown`) until an explicit
+  `derived_from` states them.
+- `derived_from_released` (0.8.1, `document.put` only) — earlier inferred
+  edges of this note to sources that were REMOVED (the source's lineage
+  ends in a tombstone: deleted, or moved to another document), which this
+  put re-derives past: the author read the source's document after the
+  removal, or rewrote the note (new markdown) from current material it read
+  after the removal. A removed source has no current version to re-derive
+  from, so before 0.8.1 such a note stayed stale until an explicit
+  `derived_from` replaced its lineage.
 
 Both fields are present only when non-empty, except that an explicit
 `derived_from: []` on a `document.put` is kept: it says "derives from
@@ -456,7 +471,14 @@ chain_seq)`, compared by the projection check like every other table):
 - `document.put` with `derived_from` present (even `[]`): the document's
   rows are replaced by it plus `derived_from_inferred`;
 - any other `document.put`, and `block.created` with lineage fields: rows are
-  added (`INSERT OR IGNORE`; the first recording seq is kept).
+  added (`INSERT OR IGNORE`; the first recording seq is kept); 0.8.1: the
+  inferred rows named by `derived_from_released` are deleted first.
+- 0.8.1: `doc_lineage_gaps(doc_id, chain_seq)` holds the latest
+  `derived_from_inferred_truncated` write of a document without an explicit
+  statement (a `derived_from`, even `[]`, clears it). Backfilled from the
+  chain once on upgrade (meta `migration.lineage_gaps`). Both tables are
+  compared with the chain by every orient focus (a replay of the indexed
+  lineage-bearing events) and per hit by recall (src/lineage `checkProjection`).
 
 Read-time evaluation (src/lineage/lineage.ts; no chain change): an edge is
 **fresh** when its source block's supersession lineage (§3.3) reaches a live

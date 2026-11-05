@@ -12,6 +12,8 @@ import { canonicalize } from '../crypto/canonical.js';
 import type { Signer } from '../crypto/keys.js';
 import { verifyEd25519 } from '../crypto/keys.js';
 import type { Db } from '../db/open.js';
+import { markWriter } from '../db/storage.js';
+import { VERSION } from '../version.js';
 import {
   computeEventHash,
   envelopeCanonical,
@@ -263,6 +265,7 @@ export class Chain {
           input.idempotency_key ?? null,
         );
       this.db.prepare(`UPDATE chain_head SET seq = ?, hash = ? WHERE id = 1`).run(seq, this_hash);
+      markWriter(this.db, seq, VERSION);
       const event: ChainEvent = {
         seq,
         event_id,
@@ -316,6 +319,7 @@ export class Chain {
           ev.idempotency_key,
         );
       this.db.prepare(`UPDATE chain_head SET seq = ?, hash = ? WHERE id = 1`).run(ev.seq, ev.this_hash);
+      markWriter(this.db, ev.seq, VERSION);
     });
     run.immediate();
   }

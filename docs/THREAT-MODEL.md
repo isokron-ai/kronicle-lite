@@ -25,7 +25,15 @@ with a bug, a partial restore from backup, disk corruption):
   against the chain's `block.superseded` / `block.tombstoned` events
   (`UNVERIFIED / projection_mismatch`); the `kronicle://docs/{slug}`
   resource refuses a revision whose markdown does not match; orient's
-  integrity pass re-hashes the newest 2000 live blocks. `verify-chain` over
+  integrity pass re-hashes the newest 2000 live blocks. 0.8.1: every orient
+  focus (pulse included) and recall also cross-check block lifecycle
+  (no live row the chain retired, no retired row it did not, block and
+  retirement counts, supersession pointers) and the lineage rows
+  (`doc_lineage`, `doc_lineage_gaps`) against the chain; recall withholds
+  a mismatching hit (`projection_mismatch`, `lineage_mismatch`), checks the
+  full-text index against the stored text before it certifies absence, and
+  a long-lived server re-checks the store file (`PRAGMA quick_check`) when
+  it changed on disk under its page cache (`store_damaged`). `verify-chain` over
   the whole chain (or with `--full`), the MCP `verify_chain` tool over the
   whole chain and `doctor` replay every event into a scratch copy and
   compare every stored row column by column, so a changed lifecycle column,

@@ -159,7 +159,7 @@ describe('C2-09: upgrade from a 0.8.0 store (forward-only)', () => {
   const allBlocks = (kl: KronicleLite) => (kl.db.prepare(`SELECT block_id FROM blocks ORDER BY block_id`).all() as { block_id: string }[]).map((r) => r.block_id);
   const sameAnswers = (kl: KronicleLite, ignore: readonly string[] = []) => {
     for (const [actor, want] of Object.entries(answers.pending)) expect(kl.lineage.pending(actor, { limit: 50 }), actor).toEqual(want);
-    expect(kl.lineage.infer('agent', '1970-01-01T00:00:00.000Z', null)).toEqual(answers.infer_agent);
+    expect(kl.lineage.infer('agent', 0, null)).toEqual(answers.infer_agent);
     expect(kl.lineage.readersOf(allBlocks(kl)).filter((a) => !ignore.includes(a))).toEqual(answers.readers);
   };
 

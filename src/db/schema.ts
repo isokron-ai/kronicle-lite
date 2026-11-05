@@ -6,6 +6,33 @@
 export const SCHEMA_VERSION = 1;
 
 /**
+ * 0.8.1: one-time data migrations, forward-only, each guarded by a `meta`
+ * key and run inside open()'s setup transaction. They only derive projection
+ * rows from the chain (never touch events), so re-running one is harmless.
+ */
+export const DATA_MIGRATIONS: readonly { key: string; sql: string }[] = [
+  {
+    // doc_lineage_gaps for notes written by 0.8.0 (lineageEffects in SQL): the
+    // latest truncated inference per document, unless a later put declared
+    // an explicit derived_from.
+    key: 'migration.lineage_gaps',
+    sql: `DELETE FROM doc_lineage_gaps;
+      INSERT INTO doc_lineage_gaps (doc_id, chain_seq)
+        SELECT json_extract(payload_canonical, '$.doc_id') AS d, MAX(seq) FROM events
+         WHERE event_type IN ('document.put', 'block.created') AND instr(payload_canonical, '"derived_from') > 0
+           AND json_valid(payload_canonical) AND json_extract(payload_canonical, '$.derived_from_inferred_truncated') = 1
+           AND (CASE WHEN event_type = 'document.put' THEN json_type(payload_canonical, '$.derived_from') IS NOT 'array'
+                     ELSE coalesce(json_array_length(payload_canonical, '$.derived_from'), 0) = 0 END)
+           AND json_type(payload_canonical, '$.doc_id') = 'text'
+         GROUP BY d;
+      DELETE FROM doc_lineage_gaps WHERE EXISTS (
+        SELECT 1 FROM events e WHERE e.event_type = 'document.put' AND instr(e.payload_canonical, '"derived_from') > 0 AND json_valid(e.payload_canonical)
+           AND json_extract(e.payload_canonical, '$.doc_id') = doc_lineage_gaps.doc_id
+           AND json_type(e.payload_canonical, '$.derived_from') = 'array' AND e.seq > doc_lineage_gaps.chain_seq);`,
+  },
+];
+
+/**
  * Columns added to existing tables after 0.3.0; `openDatabase` adds them to
  * older databases (ALTER TABLE … ADD COLUMN), then creates their indexes.
  */
@@ -221,6 +248,15 @@ CREATE TABLE IF NOT EXISTS doc_lineage (
   PRIMARY KEY (doc_id, source_block_id, inferred)
 );
 CREATE INDEX IF NOT EXISTS doc_lineage_source_idx ON doc_lineage (source_block_id);
+-- 0.8.1, additive projection: a note whose inferred lineage the bound cut
+-- short (\`derived_from_inferred_truncated\` without an explicit statement):
+-- its sources are undetermined, so recall never labels it can_act. Cleared by
+-- an explicit \`derived_from\`. Rebuilt from the chain like the rest
+-- (src/docs/documents.ts lineageEffects); backfilled once on upgrade.
+CREATE TABLE IF NOT EXISTS doc_lineage_gaps (
+  doc_id    TEXT PRIMARY KEY,
+  chain_seq INTEGER NOT NULL
+);
 
 -- Unreleased, additive, local only (never chained or hashed, like
 -- receipts.actor_id): which version of what each actor read or wrote, for
@@ -254,4 +290,9 @@ CREATE INDEX IF NOT EXISTS blocks_superseded_by_idx ON blocks (superseded_by) WH
 CREATE INDEX IF NOT EXISTS events_retired_block_idx
   ON events ((CASE WHEN json_valid(payload_canonical) THEN json_extract(payload_canonical, '$.block_id') END))
   WHERE event_type IN ('block.superseded', 'block.tombstoned');
+-- 0.8.1: the events that carry lineage fields (the integrity pass replays them
+-- against doc_lineage). An index, not chain data.
+CREATE INDEX IF NOT EXISTS events_lineage_idx
+  ON events (seq)
+  WHERE event_type IN ('document.put', 'block.created') AND instr(payload_canonical, '"derived_from') > 0;
 `;

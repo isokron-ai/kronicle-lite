@@ -90,10 +90,9 @@ verify unchanged.
   derived from a stale note. Cut-short results are no longer reused.
 - **L4.** Lineage inference began at the actor's LATEST orient, so recall →
   orient → write — what the wake contract tells agents to do — inferred no
-  lineage. It now begins at the first briefing of the cursor chain (each
-  orient that presented the actor's previous cursor continues the session;
-  one without a usable cursor starts a new one). Recall's attention rerank
-  keeps using the latest briefing.
+  lineage. Fixed by R2-04 / C2-05 below (session as a chain position, unioned
+  with the 24 h / 200 most-recent-reads window); the interim cursor-chain
+  walk by briefing time was dropped (it compared wall clocks, C2-05).
 
 ### Fixed — robustness
 
@@ -354,6 +353,258 @@ data dir prints `note: pinned 1 anchor service key(s) … on first use`;
   inside the write transaction; a put with lineage, an idempotency key, or
   any recorded difference appends as before. Instruction import reports such
   a put as `unchanged`.
+
+### Fixed — MCP protocol and real clients (hardening round 2, track 4: P2-02 … P2-14)
+
+- **`put_document` no longer kills the client after the write committed
+  (P2-02, S3).** It echoed every block, pretty-printed in the text block on
+  top of `structuredContent`: a 90 kB document of 30 000 paragraphs answered
+  with a > 10 MiB line, the TS SDK stdio client (v1 and v2, 10 MiB
+  `ReadBuffer`) closed the connection and the agent saw a failure for a write
+  that had landed. **Compatible result change:** every existing field keeps
+  its name, type and order; `blocks` lists at most the first 100 entries
+  (and 64 KiB of them). New fields: `block_counts {total, listed, added,
+  kept, retired}` over every block, `blocks_truncated`, and `blocks_next`, a
+  resource URI `kronicle://docs/{slug}/blocks/{revision}/{offset}` that pages
+  the rest (1 000 per page, `next` links). A document of ≤ 100 blocks
+  answers exactly as before plus the new fields. The CLI `put --json` still
+  prints every block. The text block of every tool result is now compact
+  JSON (same value as `structuredContent`), and every tool result is held to
+  an 8 MiB budget (`result_too_large` tool error instead of a dead
+  connection). Consumers checked: cc-anchor (uses the CLI `put`), sea-lite
+  (does not call `put_document`), isokron-plugins `verify.mjs` and the bench
+  arm (read the result generically).
+- **`get_system_state` results validate against the full served schema
+  (P2-04, S3).** `integrity.seq` was missing from the schema at
+  `kronicle://schemas/tools` (`additionalProperties: false`), so every JSON
+  result failed it. A test now validates random calls of every tool, full and
+  `--core`, against both the advertised and the served schema with ajv.
+- **Oversize input is answered, not fatal (P2-05 / F11, S3).** One line over
+  10 MiB made the server exit 0 with no JSON-RPC error, and a schema-valid
+  `put_document` (1.9 M × U+0001 escapes to 11 MiB) reached it. The stdio
+  wire is now kronicle-lite's own (`src/stdio.ts`, under the SDK's
+  `serveStdio`): a line over the limit is discarded as it streams in and
+  answered `-32600 "Message too large"` with its id (when the id is among the
+  first 64 KiB, else `null`); the server keeps serving. One inbound limit for
+  stdio and HTTP: **16 MiB** (`KRONICLE_LITE_MAX_MESSAGE_BYTES`), above every
+  schema-valid `put_document` (2 000 000 characters × 6 bytes escaped).
+  `markdown` is also bounded in wire bytes: over 8 MiB as JSON →
+  `document_too_large`, nothing written, so reading a document back always
+  fits a 10 MiB client buffer. Cursors (`since_cursor`, `cursor`) are now
+  `maxLength: 8192`. An outbound line over 9 MiB is replaced by a JSON-RPC
+  error for its id. Calls that can still exceed 16 MiB while schema-valid
+  (`audit_assumptions` with 100 claims of 200 000 characters each, a huge
+  free-form `verify.receipt`) get the `-32600` answer, never a dead server.
+- **Malformed input is answered (P2-06, S3).** Parse errors → `-32700`; a
+  UTF-8 BOM is stripped; an invalid request with a usable id (`params` an
+  array or string, numeric `method`, `jsonrpc` "1.0" or missing, a
+  fractional id) → `-32600` with that id; a batch → an array of `-32600`
+  ("batches are not supported", removed in 2025-06-18), an empty batch →
+  one `-32600`. Before, the SDK logged a zod dump and the client hung.
+- **One body limit for both transports (P2-08, S4).** HTTP used the SDK's
+  4 MiB default (a schema-max CJK document got 413 over HTTP, accepted over
+  stdio); both now use the 16 MiB limit.
+- **Host header with userinfo → 400 (P2-09, S4)**, not the SDK's 500.
+- **Missing resource is "resource not found" (P2-10, S4)**, not `-32603`
+  internal error. It is the SDK's `ResourceNotFoundError`: code `-32602` with
+  `data.uri`, which is what the 2026-07-28 spec requires (clients SHOULD also
+  accept the older `-32002`; SDK 2.4 re-encodes a thrown `-32002` as
+  `-32602` on every revision, so `-32002` cannot be sent through it).
+- **Lifecycle and ping on stdio (P2-11, S4).** A request before the
+  handshake that is neither `initialize` nor a 2026-07-28 request carrying
+  the `_meta` envelope → `-32600 "Server not initialized"` (a `tools/call`
+  sent first no longer writes); a notification before it is dropped, so it
+  cannot pin a 2025-era connection without its handshake. `ping` is answered
+  before the handshake and on 2026-07-28 connections (was `-32601`). On a
+  2026-07-28 stdio connection every request must carry the envelope: none →
+  `-32602`, an unsupported version → `-32022` (the SDK checked only the
+  opening request).
+- **Existing `http-bearer.token` readable by others is tightened to 0600
+  (P2-13, S4)** and the start-up line says so.
+- **Schema-valid ids and ranges (P2-14, S4).** `block_id` accepts every
+  8-4-4-4-12 hex id the published `format: uuid` admits (it required an
+  RFC 4122 version nibble); `checkpoint_chain` with `to_seq` beyond the head
+  → `invalid_params`, not `internal`.
+
+SDK-only limits left: the SDK's own stdio transport still behaves as before
+for embedders that call `serveStdio` without kronicle-lite's transport; see
+the PR for the upstream issue text.
+
+### Fixed — storage: read-only / full data dirs, readers behind writers, older writers (F12, F14, C2-08, C2-01)
+
+- **Readers never queue behind a writer (C2-08, S3).** `openDatabase()` ran
+  its schema setup in `BEGIN IMMEDIATE` on every open, so `pulse`,
+  `pending`, `orient` and `get` waited for the write lock: a writer holding
+  it 14 s made the pulse exit 3 and the shim's 10 s timeout run the command
+  unchecked (likely the 0.8.0 "1 pulse in 80 took ≥ 10 s" open item). Setup
+  now runs only when something is missing (first start, upgrade: a
+  read-only check of every schema object, column and seed row); a current
+  store opens with plain WAL reads. The orient flight-recorder row waits at
+  most 1 s for the lock, then is skipped. The concurrent-first-start path is
+  unchanged. (sea-lite's `scope-check` gets this when it bundles 0.8.1.)
+- **A read-only or full data dir is still read (F12, S3).** `verify-chain`,
+  `doctor`, `orient`, `pending`, `get` and `pulse` failed ("unable to open
+  database file"; even a read-only handle cannot open a WAL database without
+  its `-shm`). The store now falls back to a read-only open, then a private
+  snapshot (database + WAL copied to a 0700 temp dir), then an in-memory
+  image when there is no WAL to lose; read-path bookkeeping (briefing row,
+  read log) is skipped there, and any real write fails loudly
+  (`SQLITE_READONLY`). A store that exists but cannot be read at all raises
+  `StoreUnreadableError`: the pulse refuses it as `unreadable` (the 0.8.1
+  shim classification, exit 77 in deny mode). `verify-chain` / `verify` open
+  read-only and exit **2** with "I/O, not a chain divergence" when the store
+  cannot be read (1 stays a real divergence); `doctor` exits 2 then (new
+  `db-open` check), and on a read-only open no longer reports the FTS index
+  as inconsistent (FTS5's integrity-check is an INSERT command: skipped and
+  said so).
+- **`export | head` (F14, S4)** ends quietly with exit 0 instead of an
+  unhandled EPIPE stack trace and exit 1 (every command but `serve`).
+- **Older writers (C2-01, S3).** Nothing recorded the writer, so 0.5.0–0.7.0
+  opened and wrote 0.8.x stores silently; `0.5.0/0.6.0 rebuild` nulled every
+  `project_key` (one project's notes recalled from another) and no check
+  noticed. Now:
+  - every append records `meta.writer_version` / `meta.writer_head_seq` in
+    its transaction;
+  - `doctor` (new `writers` check) and `verify-chain` (whole chain) report
+    project keys the chain does not derive (fail; `kronicle-lite rebuild`
+    repairs) and events appended after the last 0.8.1+ append (warn: an older
+    version wrote since);
+  - a guard trigger makes the rebuild of 0.7.0 and older fail with "no such
+    function: kl_writer_guard" and roll back (only rebuild deletes document
+    revisions; normal puts by older versions, e.g. sea-lite 0.6.0's bundled
+    kronicle-lite 0.7.0, are unaffected);
+  - `meta.min_writer_generation` (now 1): a future version that bumps it
+    makes this one refuse to write that store with a clear message.
+  Old versions check neither `user_version` nor `schema_version`, so their
+  normal writes cannot be refused; they are detected afterwards.
+
+Lineage, pulse/pending, integrity and secret-guard fixes from
+agent-memory-bench hardening round 2, track 1 (`hardening-retractions`
+@ 3eb7bd0: R2-04, -05, -07..-11, -14, -15, -17 and two mutation-run test
+gaps), the live-agent track (`hardening-live`: L2-01, L2-03 kl side, L2-07)
+and the chaos track (`hard-chaos`: C2-03, -04, -05). Every item has a
+regression test (test/lineage-integrity.test.ts) and its probe now passes.
+
+### Fixed — a pulse never says "proceed" on a damaged or tampered store (L2-01, L2-03, R2-09)
+
+- `get_system_state` with `focus: "pulse"` returned `integrity: null` and
+  "No changes since your last look; proceed" on a store whose `blocks` rows
+  were edited; the other foci reported `ok: false`. Live agents deployed
+  from a tampered store 5/6 times. The pulse now runs the same integrity
+  pass as `focus=retractions` and always reports it.
+- The integrity pass (every focus) and recall now cross-check the
+  projection against the chain, cheaply (index lookups and counts, plus a
+  replay of the indexed lineage-bearing events cached per process): no live
+  row the chain retired, retired/tombstoned/block counts, supersession
+  pointers, and `doc_lineage` / `doc_lineage_gaps` rows. Before, a
+  superseded row made live again (a partial restore of `blocks`) or deleted
+  lineage rows left `integrity.ok` true: recall served the old text,
+  `pending` dropped to 0 and a stale note read fresh. Recall now withholds
+  such hits (`projection_mismatch`, `lineage_mismatch`).
+- A long-lived server (MCP) whose store file changed on disk under its
+  SQLite page cache (a zeroed page) kept answering every focus from the
+  cache, "proceed" included. Each integrity pass now stats the file; when it
+  changed, the cache is dropped and `PRAGMA quick_check` runs. A damaged
+  file, or any SQLite error during orient (`SQLITE_CORRUPT`, `NOTADB`, I/O),
+  is `integrity.ok: false` with the error and an unmoved cursor; recall
+  withholds every hit (`store_damaged`). (The shim's fail-open on an
+  unreadable store is fixed on the shim side.)
+
+### Fixed — absence is never certified from an index that disagrees with the text (R2-17)
+
+- A rewritten full-text row let recall certify `absent_in_searched` with
+  `index_fresh: true` for a term a live block holds, while orient,
+  `verifyAll` and `doctor` all passed. Before certifying absence, recall now
+  runs FTS5's content check (`integrity-check` with rank 1, cached until the
+  database changes) and answers `cannot_certify` on a mismatch; orient
+  (`orientation` / `recent_changes`), `verifyAll` / `verify-chain` (table
+  `blocks_fts`) and `doctor`'s `fts` check report it.
+
+### Fixed — lineage (R2-04, R2-05, R2-14, R2-15, C2-05)
+
+- Inference counted only reads since the actor's LATEST briefing, so
+  recall → orient → write (what the wake contract asks) left the note with
+  no lineage, and a file-backed note stayed `can_act` after its source
+  changed. The bound is now the union of the session and the last 24 h / 200
+  most recent reads, whatever briefings came in between.
+- The session is a chain position (the cursor's seq, else the latest
+  briefing's), never a wall-clock comparison: a briefing clock 3 s ahead
+  dropped every read (0 edges, `truncated: false`, no `derived` retraction).
+  An inference that finds nothing while the actor did read blocks outside
+  every bound is flagged `derived_from_inferred_truncated`.
+- A note whose sources cannot be determined (inference cut short by the
+  bound, or more than 4 notes below its sources) is never `can_act`: new
+  honesty cap `inspect_only` / `lineage_unknown`. Projected as
+  `doc_lineage_gaps`.
+- `Lineage.staleness` memoised results cut short by a cycle or the depth
+  bound, so in one recall a stale note could be served unmarked
+  (`inspect_only / no_source`) after its cycle partner or a deeper note was
+  evaluated. Cut-short results are memoised only at the root; a note in a
+  cycle with a stale member is `never_act`.
+- A note derived from a source that was later removed (or moved to another
+  document) stayed stale forever unless lineage was re-declared explicitly.
+  A put that re-derives (the author read the source's document after the
+  removal, or rewrote the note from material read after it) records
+  `derived_from_released` and drops those edges.
+- `derived` retractions were listed only for notes with a direct edge to
+  the changed block; a note derived from a stale note now gets its own
+  (`derived_from_change.via`), within the depth bound.
+
+### Fixed — the pulse gate and wording (R2-07, R2-08, C2-03, C2-04)
+
+- With no stored shim position (new worktree, wiped state), or one that
+  does not decode or verify (junk bytes, a regenerated `cursor-secret`, a
+  chain rolled back below it), `pulse --pending-actor A -- git push` seeded
+  or re-seeded and allowed although A had an unreconciled change. It now
+  asks A's `pending` and refuses (`reason: "pending"`, exit 77) without
+  seeding. A regenerated `cursor-secret` is reported on stderr and flagged
+  on the identity.
+- A denial was recorded as the shim actor's briefing, so after a rollback
+  the plain retry recovered from the denial itself and was allowed. Pulse
+  briefings are recorded only when the pulse allows.
+- A pulse counted changes since the actor's latest briefing, not since the
+  cursor it was given: another session with the same actor id could turn an
+  old-cursor pulse into "proceed". It now counts from the presented cursor;
+  with no valid cursor it never says "proceed".
+
+### Fixed — secret guard (R2-10, R2-11)
+
+- A PEM private key whose body lines are indented or prefixed (YAML block
+  scalar, list item, block quote, comment) passed the write guard.
+- `db_password: …`, `"dbPassword": "…"`, `db-password=…`, `apiToken: …`
+  were neither refused nor scrubbed. New `password_assignment` detector
+  (write and read): a key containing password/passwd or ending in
+  pwd/secret/token, in snake, camel or kebab case, with `:`, `=` or a JSON
+  pair and a real-looking value. Placeholders (`${ENV}`, `<redacted>`,
+  `changeme`, `example`, `example-password-1`) still pass; a value that
+  merely contains "example" no longer does.
+- A soft hyphen or zero-width character inside a token no longer hides it
+  (normalised for detection only; never for storage).
+
+### Changed
+
+- skills/orient: orient (`focus=retractions`) before release-type wrappers
+  (`make release`, `npm run release/deploy/ship`, deploy scripts) and again
+  after a change lands during a world-changing step; recommend the shims or
+  the git hook for wrappers (L2-07).
+- Recall `withheld[].problem` adds `projection_mismatch`,
+  `lineage_mismatch`, `store_damaged`; `authority_reason` adds
+  `lineage_unknown`; pulse `reason` adds `pending` (with `pending[]`), and
+  in actor mode the invoking actor's `pending` gates a pulse that has no
+  usable position.
+- Cost: the projection half of the integrity pass (live-block re-hash,
+  lifecycle and lineage rows, FTS content) is memoised per database state
+  (`data_version`, this connection's `total_changes`, chain head), so repeated
+  pulses on a long-lived server cost a lookup; any write by any connection
+  re-runs it. The lifecycle check uses `IN` over the retired ids instead of a
+  correlated `EXISTS` (seconds → milliseconds on a 1k-document store).
+
+### Migration
+
+- Forward-only and safe on existing stores: a new projection table
+  `doc_lineage_gaps`, a partial index `events_lineage_idx`, and a one-time
+  backfill of the gaps from the chain (meta `migration.lineage_gaps`). No
+  event is touched; `rebuild` re-derives both.
 
 ## [0.8.0] — 2026-11-01
 

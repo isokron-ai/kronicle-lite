@@ -4,6 +4,7 @@
  * operator can see exactly what an agent was told and when.
  */
 
+import { boundedBookkeepingWrite } from '../db/storage.js';
 import type { Db } from '../db/open.js';
 
 export interface FlightRecord {
@@ -40,6 +41,12 @@ export class FlightRecorder {
   constructor(private readonly db: Db) {}
 
   record(rec: FlightRecord): void {
+    // 0.8.1: a read-only or full store still briefs; the briefing is just not kept. Behind
+    // another process's long write it waits at most 1 s (C2-08), then skips the row.
+    boundedBookkeepingWrite(this.db, 1000, () => this.insert(rec));
+  }
+
+  private insert(rec: FlightRecord): void {
     this.db
       .prepare(
         `INSERT INTO flight_recorder (briefing_id, actor_id, issued_at, from_seq, to_seq, head_hash, focus, delta_hash, record_json)
@@ -70,22 +77,6 @@ export class FlightRecorder {
     const r = this.db
       .prepare(`SELECT * FROM flight_recorder WHERE actor_id = ? AND to_seq = ? ORDER BY issued_at DESC, rowid DESC LIMIT 1`)
       .get(actor_id, to_seq) as Row | undefined;
-    return r ? fromRow(r) : null;
-  }
-
-  /** 0.8.1: the actor's briefing issued at exactly `issued_at` (what a full cursor names). */
-  briefingIssuedAt(actor_id: string, issued_at: string): FlightRecord | null {
-    const r = this.db
-      .prepare(`SELECT * FROM flight_recorder WHERE actor_id = ? AND issued_at = ? ORDER BY rowid DESC LIMIT 1`)
-      .get(actor_id, issued_at) as Row | undefined;
-    return r ? fromRow(r) : null;
-  }
-
-  /** 0.8.1: the actor's latest briefing at head `to_seq` issued no later than `before`, other than `not_id` (a compact cursor's issuer). */
-  briefingAtBefore(actor_id: string, to_seq: number, before: string, not_id: string): FlightRecord | null {
-    const r = this.db
-      .prepare(`SELECT * FROM flight_recorder WHERE actor_id = ? AND to_seq = ? AND issued_at <= ? AND briefing_id != ? ORDER BY issued_at DESC, rowid DESC LIMIT 1`)
-      .get(actor_id, to_seq, before, not_id) as Row | undefined;
     return r ? fromRow(r) : null;
   }
 
