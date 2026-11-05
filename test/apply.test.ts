@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { ApplyEngine, ApplyError, type ApplyOp } from '../src/apply/apply.js';
+import { ApplyEngine, type ApplyError, type ApplyOp } from '../src/apply/apply.js';
 import { KronicleLite } from '../src/index.js';
 
 function seeded() {
