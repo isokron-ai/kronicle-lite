@@ -4,5 +4,6 @@ export default defineConfig({
   test: {
     include: ['test/**/*.test.ts'],
     testTimeout: 20_000,
+    setupFiles: ['test/helpers/yield.ts'],
   },
 });
