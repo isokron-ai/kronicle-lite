@@ -6,15 +6,22 @@ uses semantic versioning once past 0.x.
 
 ## [0.8.1] — 2026-11-01
 
-Safety patch from agent-memory-bench hardening round 2 (branch
-`hardening-retractions`, findings R2-01..03, R2-06, R2-12, R2-13, R2-16;
-the last four were first filed as leads L2, L5, L1, L6 below), two more
-leads from the same review (L3, L4) and one live-agent finding (L2-09),
-each reproduced on 0.8.0 before it was fixed, plus the anchor-client
-hardening (track 6, A2-*) and the exec-time shim hardening (track 3,
-H2-*) below. No hash recipe,
-receipt, cursor or event layout changed; stores written by 0.8.0 open and
-verify unchanged.
+Safety patch from agent-memory-bench hardening round 2. Every item was
+reproduced on 0.8.0 before it was fixed and has a regression test.
+
+- Track 1 (`hardening-retractions`): R2-01..17, including the leads first
+  filed as L1–L6.
+- Track 2 (scale): C2-09, C2-10.
+- Track 3 (exec-time shims): H2-*.
+- Track 4 (MCP protocol and storage): P2-02..14, F11, F12, F14, C2-01,
+  C2-08.
+- Track 6 (anchor client): A2-*.
+- Live-agent track: L2-01, L2-03, L2-07, L2-09.
+- Chaos track: C2-03..05.
+
+No hash recipe, receipt, cursor or event layout changed. Stores written by
+0.8.0 open and verify unchanged; the forward-only migrations are listed
+under Migration.
 
 ### Fixed — format-only is now RAW-TEXT equivalence (R2-01, R2-02, R2-03)
 
@@ -82,18 +89,6 @@ verify unchanged.
   CommonMark. A stored heading that lost its `#` gets one retraction the
   next time its file is put.
 
-### Fixed — lineage
-
-- **L3.** `Lineage.staleness` memoized results cut short by the depth bound
-  (4) or by a cycle, so in one read (recall, orient, pending) a note
-  evaluated after its descendant or cycle partner could show fresh while
-  derived from a stale note. Cut-short results are no longer reused.
-- **L4.** Lineage inference began at the actor's LATEST orient, so recall →
-  orient → write — what the wake contract tells agents to do — inferred no
-  lineage. Fixed by R2-04 / C2-05 below (session as a chain position, unioned
-  with the 24 h / 200 most-recent-reads window); the interim cursor-chain
-  walk by briefing time was dropped (it compared wall clocks, C2-05).
-
 ### Fixed — robustness
 
 - **R2-12 (S3; lead L5).** The `likely_typo` hint ran an O(m·n) edit distance on the one
@@ -110,26 +105,6 @@ verify unchanged.
   when the change lies beyond the first 160. A whitespace-only change is
   shown visibly (`[-··-]{+·+}`, `→` tab, `⏎` newline), never as an empty
   marker.
-
-### Tests
-
-- Both bench corpora are permanent tests (`test/stress-corpus.test.ts`):
-  round 1 false format-only 0/38; round 2 (69 cases) every real change a
-  retraction, 0/61 hidden (W01 two spaces → one and W06 tab → space
-  included). The
-  R2-01..03 and L2 repros run through the CLI (orient / pending / pulse
-  exit 77) with a temp HOME and data dir (`test/fix-081.test.ts`), with
-  L1–L6. Two new mutants (emphasis-marker folding, list renumbering) join
-  the six; all eight are killed.
-
-### Bench (agent-memory-bench Track A, branch `kl-0.8.1`, 20 seeds)
-
-- S7 benign-edit quiet rate **10/20 (0.8.0) → 4/20 (0.8.1)**, by design:
-  only `whitespace_trim` and `line_ending_norm` stay quiet;
-  `whitespace_double`, `numbered_list_renumber` and `markdown_emphasis` are
-  now delivered as retractions (the typo, comma, quote, period and hyphen
-  templates already were). S1, S5, S8 and S11: grades and flags identical
-  on every seed.
 
 ### Fixed — anchor chain listing always paged; 429 honoured (anchor re-review)
 
@@ -478,13 +453,6 @@ the PR for the upstream issue text.
   Old versions check neither `user_version` nor `schema_version`, so their
   normal writes cannot be refused; they are detected afterwards.
 
-Lineage, pulse/pending, integrity and secret-guard fixes from
-agent-memory-bench hardening round 2, track 1 (`hardening-retractions`
-@ 3eb7bd0: R2-04, -05, -07..-11, -14, -15, -17 and two mutation-run test
-gaps), the live-agent track (`hardening-live`: L2-01, L2-03 kl side, L2-07)
-and the chaos track (`hard-chaos`: C2-03, -04, -05). Every item has a
-regression test (test/lineage-integrity.test.ts) and its probe now passes.
-
 ### Fixed — a pulse never says "proceed" on a damaged or tampered store (L2-01, L2-03, R2-09)
 
 - `get_system_state` with `focus: "pulse"` returned `integrity: null` and
@@ -520,7 +488,7 @@ regression test (test/lineage-integrity.test.ts) and its probe now passes.
   (`orientation` / `recent_changes`), `verifyAll` / `verify-chain` (table
   `blocks_fts`) and `doctor`'s `fts` check report it.
 
-### Fixed — lineage (R2-04, R2-05, R2-14, R2-15, C2-05)
+### Fixed — lineage (R2-04, R2-05, R2-14, R2-15, C2-05; leads L3, L4)
 
 - Inference counted only reads since the actor's LATEST briefing, so
   recall → orient → write (what the wake contract asks) left the note with
@@ -549,6 +517,15 @@ regression test (test/lineage-integrity.test.ts) and its probe now passes.
 - `derived` retractions were listed only for notes with a direct edge to
   the changed block; a note derived from a stale note now gets its own
   (`derived_from_change.via`), within the depth bound.
+- **L3.** `Lineage.staleness` memoized results cut short by the depth bound
+  (4) or by a cycle, so in one read (recall, orient, pending) a note
+  evaluated after its descendant or cycle partner could show fresh while
+  derived from a stale note. Cut-short results are no longer reused.
+- **L4.** Lineage inference began at the actor's LATEST orient, so recall →
+  orient → write — what the wake contract tells agents to do — inferred no
+  lineage. Fixed by R2-04 / C2-05 below (session as a chain position, unioned
+  with the 24 h / 200 most-recent-reads window); the interim cursor-chain
+  walk by briefing time was dropped (it compared wall clocks, C2-05).
 
 ### Fixed — the pulse gate and wording (R2-07, R2-08, C2-03, C2-04)
 
@@ -605,6 +582,26 @@ regression test (test/lineage-integrity.test.ts) and its probe now passes.
   `doc_lineage_gaps`, a partial index `events_lineage_idx`, and a one-time
   backfill of the gaps from the chain (meta `migration.lineage_gaps`). No
   event is touched; `rebuild` re-derives both.
+
+### Tests
+
+- Both bench corpora are permanent tests (`test/stress-corpus.test.ts`):
+  round 1 false format-only 0/38; round 2 (69 cases) every real change a
+  retraction, 0/61 hidden (W01 two spaces → one and W06 tab → space
+  included). The
+  R2-01..03 and L2 repros run through the CLI (orient / pending / pulse
+  exit 77) with a temp HOME and data dir (`test/fix-081.test.ts`), with
+  L1–L6. Two new mutants (emphasis-marker folding, list renumbering) join
+  the six; all eight are killed.
+
+### Bench (agent-memory-bench Track A, branch `kl-0.8.1`, 20 seeds)
+
+- S7 benign-edit quiet rate **10/20 (0.8.0) → 4/20 (0.8.1)**, by design:
+  only `whitespace_trim` and `line_ending_norm` stay quiet;
+  `whitespace_double`, `numbered_list_renumber` and `markdown_emphasis` are
+  now delivered as retractions (the typo, comma, quote, period and hyphen
+  templates already were). S1, S5, S8 and S11: grades and flags identical
+  on every seed.
 
 ## [0.8.0] — 2026-11-01
 
