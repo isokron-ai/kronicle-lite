@@ -16,7 +16,8 @@ import type { Chain, ChainEvent } from '../chain/index.js';
 import { canonicalize } from '../crypto/canonical.js';
 import { sha256Hex } from '../crypto/hash.js';
 import type { Db } from '../db/open.js';
-import { redactSecrets, scanForSecrets, scanValue, SecretDetectedError } from '../secrets/guard.js';
+import { redactSecrets, scanValue, SecretDetectedError } from '../secrets/guard.js';
+import { scanBlob } from './blob-scan.js';
 import {
   auditEventType,
   auditIdentity,
@@ -96,6 +97,8 @@ export interface BlobRow {
   size: number;
   media_type: string | null;
   bytes: Buffer;
+  /** 'unscanned_encoding' when a view could not be decoded within the scan cap. */
+  flags: string | null;
 }
 
 /** sha256 hex of raw bytes (blob ids). */
@@ -109,37 +112,62 @@ export class AuditLog {
     private readonly chain: Chain,
   ) {}
 
+  /**
+   * Whether this store has the 0.9.0 audit tables. A store made by 0.8.x and
+   * opened read-only (verify-chain, verify, doctor, a read-only medium) is
+   * never migrated: it has no audit events, so every read answers empty and
+   * the projection check passes; nothing is ever written to make the tables.
+   */
+  private tables(): boolean {
+    return this.db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'audit_events'`).get() !== undefined;
+  }
+
   // ───────────────────────────── blobs ─────────────────────────────
 
   /**
    * Store an artifact by content; returns its ref. Re-putting the same bytes
-   * is a no-op. The write-time secret guard runs over the bytes (as latin1,
-   * so binary is scanned byte-for-byte): a match is refused
-   * (SecretDetectedError, nothing stored) unless `secrets: 'redact'`, which
-   * stores a copy with each match replaced by `[REDACTED:<detector>]` and
-   * returns the count as `redactions` (the ref is the redacted copy's hash).
+   * is a no-op. The write-time secret guard runs over the bytes and their
+   * decoded views (src/audit/blob-scan.ts: gzip/deflate, UTF-16LE, base64,
+   * base64url, nested): a match is refused (SecretDetectedError, nothing
+   * stored). `secrets: 'redact'` stores a copy with each RAW match replaced by
+   * `[REDACTED:<detector>]` and returns the count as `redactions` (the ref is
+   * the redacted copy's hash); a match only visible after decoding cannot be
+   * redacted in place and is refused in either mode. A view that cannot be
+   * decoded within the cap is stored, flagged `unscanned: ['unscanned_encoding']`
+   * (also in the blobs table and the bundle manifest).
    */
-  putBlob(bytes: Uint8Array, media_type?: string, opts: { secrets?: 'refuse' | 'redact' } = {}): { sha256: string; size: number; media_type?: string; redactions?: number } {
+  putBlob(
+    bytes: Uint8Array,
+    media_type?: string,
+    opts: { secrets?: 'refuse' | 'redact' } = {},
+  ): { sha256: string; size: number; media_type?: string; redactions?: number; unscanned?: ['unscanned_encoding'] } {
     if (bytes.byteLength > MAX_BLOB_BYTES) throw new AuditError('blob_too_large', `blob is ${bytes.byteLength} bytes; the limit is ${MAX_BLOB_BYTES}`);
     let body = Buffer.from(bytes);
     let redactions = 0;
-    const text = body.toString('latin1');
-    const found = scanForSecrets(text, 'blob');
-    if (found.length > 0) {
-      if (opts.secrets !== 'redact') throw new SecretDetectedError(found, 'this blob', 'redact it first, or put it with secrets: "redact" (CLI --redact-secrets)');
-      const r = redactSecrets(text, 'blob');
+    const scan = scanBlob(body);
+    if (scan.encoded.length > 0) throw new SecretDetectedError(scan.encoded, 'this blob (inside an encoding)', 'decode and redact it before storing; an encoded secret cannot be redacted in place');
+    if (scan.raw.length > 0) {
+      if (opts.secrets !== 'redact') throw new SecretDetectedError(scan.raw, 'this blob', 'redact it first, or put it with secrets: "redact" (CLI --redact-secrets)');
+      const r = redactSecrets(body.toString('latin1'), 'blob');
       body = Buffer.from(r.text, 'latin1');
       redactions = r.findings.length;
     }
     const sha256 = blobHash(body);
     this.db
-      .prepare(`INSERT OR IGNORE INTO blobs (sha256, size, media_type, bytes, created_at) VALUES (?, ?, ?, ?, ?)`)
-      .run(sha256, body.byteLength, media_type ?? null, body, new Date().toISOString());
-    return { sha256, size: body.byteLength, ...(media_type !== undefined ? { media_type } : {}), ...(redactions > 0 ? { redactions } : {}) };
+      .prepare(`INSERT OR IGNORE INTO blobs (sha256, size, media_type, bytes, created_at, flags) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(sha256, body.byteLength, media_type ?? null, body, new Date().toISOString(), scan.unscanned_encoding ? 'unscanned_encoding' : null);
+    return {
+      sha256,
+      size: body.byteLength,
+      ...(media_type !== undefined ? { media_type } : {}),
+      ...(redactions > 0 ? { redactions } : {}),
+      ...(scan.unscanned_encoding ? { unscanned: ['unscanned_encoding'] as ['unscanned_encoding'] } : {}),
+    };
   }
 
   getBlob(sha256: string): BlobRow | null {
-    return (this.db.prepare(`SELECT sha256, size, media_type, bytes FROM blobs WHERE sha256 = ?`).get(sha256) as BlobRow | undefined) ?? null;
+    if (!this.tables()) return null;
+    return (this.db.prepare(`SELECT sha256, size, media_type, bytes, flags FROM blobs WHERE sha256 = ?`).get(sha256) as BlobRow | undefined) ?? null;
   }
 
   hasBlob(sha256: string): boolean {
@@ -270,6 +298,7 @@ export class AuditLog {
   /** null when the projection matches the chain's audit events (count and ids), else the problem. */
   checkProjection(): string | null {
     const chainN = (this.db.prepare(`SELECT COUNT(*) AS n FROM events WHERE event_type LIKE 'audit.%'`).get() as { n: number }).n;
+    if (!this.tables()) return chainN === 0 ? null : `the chain has ${chainN} audit events but the store has no audit_events table`;
     const projN = (this.db.prepare(`SELECT COUNT(*) AS n FROM audit_events`).get() as { n: number }).n;
     if (chainN !== projN) return `audit_events has ${projN} rows; the chain has ${chainN} audit events`;
     const stray = this.db
@@ -281,12 +310,14 @@ export class AuditLog {
   // ───────────────────────────── queries ─────────────────────────────
 
   finding(audit_id: string, finding_id: string): FindingState | null {
+    if (!this.tables()) return null;
     return (
       (this.db.prepare(`SELECT * FROM audit_findings WHERE audit_id = ? AND finding_id = ?`).get(audit_id, finding_id) as FindingState | undefined) ?? null
     );
   }
 
   findings(audit_id: string, status?: FindingStatus): FindingState[] {
+    if (!this.tables()) return [];
     return (
       status
         ? this.db.prepare(`SELECT * FROM audit_findings WHERE audit_id = ? AND status = ? ORDER BY opened_seq`).all(audit_id, status)
@@ -297,6 +328,7 @@ export class AuditLog {
   /** Audit events matching every given filter, ascending seq. At least audit_id or fingerprint is required. */
   query(q: AuditQuery): AuditEventView[] {
     if (q.audit_id === undefined && q.fingerprint === undefined) throw new AuditError('invalid_audit_event', 'query needs audit_id or fingerprint');
+    if (!this.tables()) return [];
     const where: string[] = ['a.seq > ?'];
     const after = Number.isSafeInteger(q.after_seq) ? Math.max(q.after_seq!, 0) : 0;
     const args: (string | number)[] = [after];
@@ -323,6 +355,7 @@ export class AuditLog {
 
   /** Every seq of an audit's events, ascending (bundle export). */
   seqsOf(audit_id: string): number[] {
+    if (!this.tables()) return [];
     return (this.db.prepare(`SELECT seq FROM audit_events WHERE audit_id = ? ORDER BY seq`).all(audit_id) as { seq: number }[]).map((r) => r.seq);
   }
 
