@@ -295,4 +295,45 @@ CREATE INDEX IF NOT EXISTS events_retired_block_idx
 CREATE INDEX IF NOT EXISTS events_lineage_idx
   ON events (seq)
   WHERE event_type IN ('document.put', 'block.created') AND instr(payload_canonical, '"derived_from') > 0;
+
+-- 0.9.0: content-addressed artifact store for audit evidence (traces, responses,
+-- transcripts, reports). OUTSIDE the chain: events carry {sha256, size} refs only.
+-- Never projection: rebuild does not touch it.
+CREATE TABLE IF NOT EXISTS blobs (
+  sha256     TEXT PRIMARY KEY,
+  size       INTEGER NOT NULL,
+  media_type TEXT,
+  bytes      BLOB NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+-- 0.9.0: audit event projection (re-derived from audit.* events by rebuild).
+CREATE TABLE IF NOT EXISTS audit_events (
+  seq        INTEGER PRIMARY KEY,
+  event_id   TEXT NOT NULL UNIQUE,
+  audit_id   TEXT NOT NULL,
+  kind       TEXT NOT NULL,
+  event_key  TEXT NOT NULL,
+  finding_id TEXT,
+  UNIQUE (audit_id, event_key)
+);
+CREATE INDEX IF NOT EXISTS audit_events_audit_idx ON audit_events (audit_id, kind, seq);
+CREATE INDEX IF NOT EXISTS audit_events_finding_idx ON audit_events (audit_id, finding_id, seq);
+CREATE TABLE IF NOT EXISTS audit_event_fingerprints (
+  fingerprint TEXT NOT NULL,
+  seq         INTEGER NOT NULL,
+  PRIMARY KEY (fingerprint, seq)
+);
+-- Current state of each finding: a projection of its immutable events.
+CREATE TABLE IF NOT EXISTS audit_findings (
+  audit_id   TEXT NOT NULL,
+  finding_id TEXT NOT NULL,
+  status     TEXT NOT NULL,
+  title      TEXT,
+  severity   TEXT,
+  opened_seq INTEGER NOT NULL,
+  last_seq   INTEGER NOT NULL,
+  events     INTEGER NOT NULL,
+  PRIMARY KEY (audit_id, finding_id)
+);
 `;

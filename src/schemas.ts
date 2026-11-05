@@ -23,6 +23,7 @@
 import { z } from 'zod';
 
 import { VERIFY_REASONS, VERIFY_STATUSES } from './recall/verify-receipt.js';
+import { AUDIT_KINDS, FINDING_STATUSES } from './audit/schemas.js';
 import { AUDIT_VERDICTS } from './orient/audit.js';
 import { ReceiptSchema } from './recall/receipt.js';
 import { FOCUSES, RECOVERY_METHODS } from './orient/orient.js';
@@ -442,7 +443,7 @@ export const RecallResultSchema = z.object({
     .describe('Project scoping applied (all_projects=false); null when every project was searched.'),
 });
 
-export const VerifyResultSchema = z.object({
+const VerifyOneSchema = z.object({
   status: z.enum(VERIFY_STATUSES),
   reason: z.enum(VERIFY_REASONS),
   receipt_id: z.string().nullable(),
@@ -455,6 +456,61 @@ export const VerifyResultSchema = z.object({
   integrity_problem: z.enum(ROW_PROBLEMS).optional(),
   checked_at: z.string(),
   chain_head: ChainHeadSchema,
+});
+
+/** verify(): one result; with a batch (0.9.0) the first non-VERIFIED one at top level, plus every result. */
+export const VerifyResultSchema = VerifyOneSchema.extend({
+  results: z.array(VerifyOneSchema).optional().describe('Batch: one result per receipt, in input order.'),
+  counts: z.record(z.enum(VERIFY_STATUSES), z.number().int().nonnegative()).optional().describe('Batch: results per status.'),
+});
+
+/** 0.9.0: audit_record result. */
+export const AuditRecordResultSchema = z.object({
+  audit_id: z.string(),
+  recorded: z.array(
+    z.object({
+      index: z.number().int().nonnegative(),
+      event_id: z.string(),
+      seq: z.number().int().positive(),
+      this_hash: HEX64,
+      kind: z.enum(AUDIT_KINDS),
+      event_key: z.string(),
+      replayed: z.boolean().describe('true: this event_key was already recorded with the same payload; nothing appended.'),
+    }),
+  ),
+  head: ChainHeadSchema,
+});
+
+/** 0.9.0: audit_query result. */
+export const AuditQueryResultSchema = z.object({
+  events: z.array(
+    z.object({
+      seq: z.number().int().positive(),
+      event_id: z.string(),
+      this_hash: HEX64,
+      kind: z.enum(AUDIT_KINDS),
+      audit_id: z.string(),
+      event_key: z.string(),
+      actor_id: z.string(),
+      occurred_at: z.string(),
+      payload: z.record(z.string(), z.unknown()),
+    }),
+  ),
+  findings: z
+    .array(
+      z.object({
+        audit_id: z.string(),
+        finding_id: z.string(),
+        status: z.enum(FINDING_STATUSES),
+        title: z.string().nullable(),
+        severity: z.string().nullable(),
+        opened_seq: z.number().int(),
+        last_seq: z.number().int(),
+        events: z.number().int(),
+      }),
+    )
+    .nullable()
+    .describe('Current state per finding (a projection of its events); null without audit_id.'),
 });
 
 export const CheckpointResultSchema = z.object({

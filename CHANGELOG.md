@@ -4,6 +4,43 @@ All notable changes to kronicle-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
+## [Unreleased] — 0.9.0
+
+### Added — audit events, batch verify, evidence bundles (MCP audit toolkit)
+
+- **Audit event types on the chain** (`audit.catalog_snapshot`,
+  `audit.call_measured`, `audit.finding`, `audit.gate_result`,
+  `audit.fix_applied`, `audit.regression_result`): schema-validated per
+  kind, hashes and blob refs only, write-time secret guard, all or nothing
+  per call (≤ 500). Ingest is idempotent by a stable id: `(audit_id,
+  event_key)` fixes the chain idempotency key and a UUID-shaped `event_id`;
+  a retry replays, a different payload under the same key is
+  `event_key_conflict`. New tools `audit_record`, `audit_query`; resource
+  `kronicle://schemas/audit`; CLI `audit put-blob | record | query`.
+- **Content-addressed blob store** (`blobs` table, outside the chain; never
+  touched by `rebuild`). Refs must resolve unless declared `redacted`.
+- **Projection** (`audit_events`, `audit_event_fingerprints`,
+  `audit_findings`): query by audit id and by catalog fingerprint (incl.
+  before/after); per-finding state discovered / refuted / reopened /
+  accepted with enforced transitions. `rebuild` and `import` re-derive it;
+  `verify-chain` reports a projection that disagrees with the chain.
+- **Batch `verify`**: `receipts` / `receipt_ids`, up to 100; `results[]` in
+  input order and `counts`; the top level is the first non-VERIFIED result
+  (fail closed for single-status readers).
+- **Evidence bundles**: `audit export --audit-id A --out DIR` (manifest,
+  events with link stubs for unrelated events, blobs, redacted / missing
+  lists, store-signed Merkle root = a stored checkpoint) and
+  `verify-bundle DIR [--key PEM]`, offline. Deterministic canonical JSON.
+  docs/EVIDENCE-BUNDLE.md is the verification procedure; a pass (or an
+  anchor) proves integrity and existence, not that the audit is correct.
+
+### Changed
+
+- Catalog: two new tools and a batch-capable `verify` (full and core
+  catalogs re-snapshotted; `CATALOG_VERSION` 0.9.0). Existing tools,
+  hashes, receipts and cursors are unchanged; stores from 0.8.x open and
+  gain the new tables on first open.
+
 ## [0.8.1] — 2026-11-01
 
 Safety patch from agent-memory-bench hardening round 2. Every item was

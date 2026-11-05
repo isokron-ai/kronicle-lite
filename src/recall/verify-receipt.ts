@@ -29,6 +29,9 @@ import { ReceiptSchema, verifyReceiptSignature, type Receipt } from './receipt.j
  * document is git-bound and its source file no longer has the bound blob.
  */
 export type VerifyStatus = 'VERIFIED' | 'SUPERSEDED' | 'TOMBSTONED' | 'UNVERIFIED' | 'STALE_SOURCE';
+/** 0.9.0: most receipts one verify() call checks. */
+export const MAX_VERIFY_BATCH = 100;
+
 export const VERIFY_STATUSES = ['VERIFIED', 'SUPERSEDED', 'TOMBSTONED', 'UNVERIFIED', 'STALE_SOURCE'] as const;
 
 export const VERIFY_REASONS = [
@@ -75,6 +78,19 @@ export class ReceiptVerifier {
     private readonly chain: Chain,
     private readonly docs: DocumentStore,
   ) {}
+
+  /**
+   * 0.9.0: verify up to MAX_VERIFY_BATCH receipts in one call, in input
+   * order. `worst` is the first result that is not VERIFIED (else the first
+   * result): a caller that only reads one status fails closed.
+   */
+  verifyMany(inputs: readonly unknown[]): { results: VerifyResult[]; worst: VerifyResult; counts: Record<VerifyStatus, number> } {
+    if (inputs.length === 0 || inputs.length > MAX_VERIFY_BATCH) throw new Error(`verify: 1..${MAX_VERIFY_BATCH} receipts per call (got ${inputs.length})`);
+    const results = inputs.map((i) => this.verify(i));
+    const counts = Object.fromEntries(VERIFY_STATUSES.map((st) => [st, 0])) as Record<VerifyStatus, number>;
+    for (const r of results) counts[r.status]++;
+    return { results, worst: results.find((r) => r.status !== 'VERIFIED') ?? results[0]!, counts };
+  }
 
   verify(input: unknown): VerifyResult {
     const checked_at = new Date().toISOString();

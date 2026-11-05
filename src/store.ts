@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 
+import { AuditLog } from './audit/log.js';
 import { Chain, ChainEventSchema, type ChainEvent, type VerifyChainResult } from './chain/index.js';
 import type { ServerIdentity } from './crypto/keys.js';
 import { StoreFileHealth } from './db/health.js';
@@ -43,6 +44,8 @@ export class KronicleLite {
   /** 0.8.1: how a read-only store was opened (in place, a private snapshot, an in-memory image). */
   readonly openedVia: 'read-write' | 'read-only' | 'snapshot' | 'memory-image';
   private readonly cleanup: (() => void) | undefined;
+  /** 0.9.0: audit events, their projection and the blob store. */
+  readonly audit: AuditLog;
 
   constructor(opts: KronicleLiteOptions = {}) {
     const opened = openDatabase(opts);
@@ -66,6 +69,7 @@ export class KronicleLite {
     this.orient.storeHealth = () => health.check();
     this.recall.storeHealth = () => health.check();
     this.auditor = new AssumptionAuditor(this.chain, this.docs);
+    this.audit = new AuditLog(this.db, this.chain);
   }
 
   close(): void {
@@ -82,8 +86,15 @@ export class KronicleLite {
   verifyAll(from_seq = 1, to_seq?: number, opts: { projection?: boolean } = {}): VerifyChainResult & { projection: ProjectionResult | null } {
     const chain = this.chain.verify(from_seq, to_seq);
     const whole = from_seq === 1 && (to_seq === undefined || to_seq >= chain.head.seq);
-    const projection = (opts.projection ?? whole) ? verifyProjection(this.db, this.chain) : null;
+    const projection = (opts.projection ?? whole) ? this.withAuditCheck(verifyProjection(this.db, this.chain)) : null;
     return { ...chain, ok: chain.ok && (projection?.ok ?? true), projection };
+  }
+
+  /** 0.9.0: the audit projection (audit_events) against the chain's audit.* events. */
+  private withAuditCheck(p: ProjectionResult): ProjectionResult {
+    const problem = this.audit.checkProjection();
+    if (!problem) return p;
+    return { ...p, ok: false, mismatch_count: p.mismatch_count + 1, mismatches: [...p.mismatches, { table: 'audit_events', key: 'count', field: 'rows', detail: problem }] };
   }
 
   /**
@@ -97,9 +108,10 @@ export class KronicleLite {
       const m = chain.first_mismatch!;
       throw new Error(`chain does not verify (${m.kind} at seq ${m.seq}); restore the events table from an export or backup first`);
     }
-    const before = verifyProjection(this.db, this.chain);
+    const before = this.withAuditCheck(verifyProjection(this.db, this.chain));
     const { events } = rebuildProjection(this.db, this.chain);
-    return { events, before, after: verifyProjection(this.db, this.chain) };
+    this.db.transaction(() => this.audit.rebuildProjection(this.chain.iterate())).immediate();
+    return { events, before, after: this.withAuditCheck(verifyProjection(this.db, this.chain)) };
   }
 
   /** Write every event as one JSON line, ascending seq. First line is a header. */
@@ -181,6 +193,7 @@ export class KronicleLite {
       for (const ev of events) {
         this.chain.appendVerbatim(ev);
         this.docs.applyEvent(ev);
+        this.audit.applyEvent(ev);
       }
     });
     tx.immediate();
