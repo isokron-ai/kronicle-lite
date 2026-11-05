@@ -302,6 +302,130 @@ data dir prints `note: pinned 1 anchor service key(s) … on first use`;
   `ambiguous-store`; nothing was renamed or removed. `kronicle-lite pulse`
   without `--state` (a hook's own call) still exits 3 without a store.
 
+### Fixed — MCP protocol and real clients (hardening round 2, track 4: P2-02 … P2-14)
+
+- **`put_document` no longer kills the client after the write committed
+  (P2-02, S3).** It echoed every block, pretty-printed in the text block on
+  top of `structuredContent`: a 90 kB document of 30 000 paragraphs answered
+  with a > 10 MiB line, the TS SDK stdio client (v1 and v2, 10 MiB
+  `ReadBuffer`) closed the connection and the agent saw a failure for a write
+  that had landed. **Compatible result change:** every existing field keeps
+  its name, type and order; `blocks` lists at most the first 100 entries
+  (and 64 KiB of them). New fields: `block_counts {total, listed, added,
+  kept, retired}` over every block, `blocks_truncated`, and `blocks_next`, a
+  resource URI `kronicle://docs/{slug}/blocks/{revision}/{offset}` that pages
+  the rest (1 000 per page, `next` links). A document of ≤ 100 blocks
+  answers exactly as before plus the new fields. The CLI `put --json` still
+  prints every block. The text block of every tool result is now compact
+  JSON (same value as `structuredContent`), and every tool result is held to
+  an 8 MiB budget (`result_too_large` tool error instead of a dead
+  connection). Consumers checked: cc-anchor (uses the CLI `put`), sea-lite
+  (does not call `put_document`), isokron-plugins `verify.mjs` and the bench
+  arm (read the result generically).
+- **`get_system_state` results validate against the full served schema
+  (P2-04, S3).** `integrity.seq` was missing from the schema at
+  `kronicle://schemas/tools` (`additionalProperties: false`), so every JSON
+  result failed it. A test now validates random calls of every tool, full and
+  `--core`, against both the advertised and the served schema with ajv.
+- **Oversize input is answered, not fatal (P2-05 / F11, S3).** One line over
+  10 MiB made the server exit 0 with no JSON-RPC error, and a schema-valid
+  `put_document` (1.9 M × U+0001 escapes to 11 MiB) reached it. The stdio
+  wire is now kronicle-lite's own (`src/stdio.ts`, under the SDK's
+  `serveStdio`): a line over the limit is discarded as it streams in and
+  answered `-32600 "Message too large"` with its id (when the id is among the
+  first 64 KiB, else `null`); the server keeps serving. One inbound limit for
+  stdio and HTTP: **16 MiB** (`KRONICLE_LITE_MAX_MESSAGE_BYTES`), above every
+  schema-valid `put_document` (2 000 000 characters × 6 bytes escaped).
+  `markdown` is also bounded in wire bytes: over 8 MiB as JSON →
+  `document_too_large`, nothing written, so reading a document back always
+  fits a 10 MiB client buffer. Cursors (`since_cursor`, `cursor`) are now
+  `maxLength: 8192`. An outbound line over 9 MiB is replaced by a JSON-RPC
+  error for its id. Calls that can still exceed 16 MiB while schema-valid
+  (`audit_assumptions` with 100 claims of 200 000 characters each, a huge
+  free-form `verify.receipt`) get the `-32600` answer, never a dead server.
+- **Malformed input is answered (P2-06, S3).** Parse errors → `-32700`; a
+  UTF-8 BOM is stripped; an invalid request with a usable id (`params` an
+  array or string, numeric `method`, `jsonrpc` "1.0" or missing, a
+  fractional id) → `-32600` with that id; a batch → an array of `-32600`
+  ("batches are not supported", removed in 2025-06-18), an empty batch →
+  one `-32600`. Before, the SDK logged a zod dump and the client hung.
+- **One body limit for both transports (P2-08, S4).** HTTP used the SDK's
+  4 MiB default (a schema-max CJK document got 413 over HTTP, accepted over
+  stdio); both now use the 16 MiB limit.
+- **Host header with userinfo → 400 (P2-09, S4)**, not the SDK's 500.
+- **Missing resource is "resource not found" (P2-10, S4)**, not `-32603`
+  internal error. It is the SDK's `ResourceNotFoundError`: code `-32602` with
+  `data.uri`, which is what the 2026-07-28 spec requires (clients SHOULD also
+  accept the older `-32002`; SDK 2.4 re-encodes a thrown `-32002` as
+  `-32602` on every revision, so `-32002` cannot be sent through it).
+- **Lifecycle and ping on stdio (P2-11, S4).** A request before the
+  handshake that is neither `initialize` nor a 2026-07-28 request carrying
+  the `_meta` envelope → `-32600 "Server not initialized"` (a `tools/call`
+  sent first no longer writes); a notification before it is dropped, so it
+  cannot pin a 2025-era connection without its handshake. `ping` is answered
+  before the handshake and on 2026-07-28 connections (was `-32601`). On a
+  2026-07-28 stdio connection every request must carry the envelope: none →
+  `-32602`, an unsupported version → `-32022` (the SDK checked only the
+  opening request).
+- **Existing `http-bearer.token` readable by others is tightened to 0600
+  (P2-13, S4)** and the start-up line says so.
+- **Schema-valid ids and ranges (P2-14, S4).** `block_id` accepts every
+  8-4-4-4-12 hex id the published `format: uuid` admits (it required an
+  RFC 4122 version nibble); `checkpoint_chain` with `to_seq` beyond the head
+  → `invalid_params`, not `internal`.
+
+SDK-only limits left: the SDK's own stdio transport still behaves as before
+for embedders that call `serveStdio` without kronicle-lite's transport; see
+the PR for the upstream issue text.
+
+### Fixed — storage: read-only / full data dirs, readers behind writers, older writers (F12, F14, C2-08, C2-01)
+
+- **Readers never queue behind a writer (C2-08, S3).** `openDatabase()` ran
+  its schema setup in `BEGIN IMMEDIATE` on every open, so `pulse`,
+  `pending`, `orient` and `get` waited for the write lock: a writer holding
+  it 14 s made the pulse exit 3 and the shim's 10 s timeout run the command
+  unchecked (likely the 0.8.0 "1 pulse in 80 took ≥ 10 s" open item). Setup
+  now runs only when something is missing (first start, upgrade: a
+  read-only check of every schema object, column and seed row); a current
+  store opens with plain WAL reads. The orient flight-recorder row waits at
+  most 1 s for the lock, then is skipped. The concurrent-first-start path is
+  unchanged. (sea-lite's `scope-check` gets this when it bundles 0.8.1.)
+- **A read-only or full data dir is still read (F12, S3).** `verify-chain`,
+  `doctor`, `orient`, `pending`, `get` and `pulse` failed ("unable to open
+  database file"; even a read-only handle cannot open a WAL database without
+  its `-shm`). The store now falls back to a read-only open, then a private
+  snapshot (database + WAL copied to a 0700 temp dir), then an in-memory
+  image when there is no WAL to lose; read-path bookkeeping (briefing row,
+  read log) is skipped there, and any real write fails loudly
+  (`SQLITE_READONLY`). A store that exists but cannot be read at all raises
+  `StoreUnreadableError`: the pulse refuses it as `unreadable` (the 0.8.1
+  shim classification, exit 77 in deny mode). `verify-chain` / `verify` open
+  read-only and exit **2** with "I/O, not a chain divergence" when the store
+  cannot be read (1 stays a real divergence); `doctor` exits 2 then (new
+  `db-open` check), and on a read-only open no longer reports the FTS index
+  as inconsistent (FTS5's integrity-check is an INSERT command: skipped and
+  said so).
+- **`export | head` (F14, S4)** ends quietly with exit 0 instead of an
+  unhandled EPIPE stack trace and exit 1 (every command but `serve`).
+- **Older writers (C2-01, S3).** Nothing recorded the writer, so 0.5.0–0.7.0
+  opened and wrote 0.8.x stores silently; `0.5.0/0.6.0 rebuild` nulled every
+  `project_key` (one project's notes recalled from another) and no check
+  noticed. Now:
+  - every append records `meta.writer_version` / `meta.writer_head_seq` in
+    its transaction;
+  - `doctor` (new `writers` check) and `verify-chain` (whole chain) report
+    project keys the chain does not derive (fail; `kronicle-lite rebuild`
+    repairs) and events appended after the last 0.8.1+ append (warn: an older
+    version wrote since);
+  - a guard trigger makes the rebuild of 0.7.0 and older fail with "no such
+    function: kl_writer_guard" and roll back (only rebuild deletes document
+    revisions; normal puts by older versions, e.g. sea-lite 0.6.0's bundled
+    kronicle-lite 0.7.0, are unaffected);
+  - `meta.min_writer_generation` (now 1): a future version that bumps it
+    makes this one refuse to write that store with a clear message.
+  Old versions check neither `user_version` nor `schema_version`, so their
+  normal writes cannot be refused; they are detected afterwards.
+
 Lineage, pulse/pending, integrity and secret-guard fixes from
 agent-memory-bench hardening round 2, track 1 (`hardening-retractions`
 @ 3eb7bd0: R2-04, -05, -07..-11, -14, -15, -17 and two mutation-run test

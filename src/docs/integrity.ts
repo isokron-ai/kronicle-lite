@@ -372,6 +372,10 @@ export function checkBlockLifecycle(db: Db): string | null {
  * reports that), else the problem in words.
  */
 export function checkFtsContent(db: Db): string | null {
+  // FTS5's integrity-check is issued as an INSERT: a read-only connection (verify-chain, doctor, a
+  // read-only medium: 0.8.1 F12) cannot run it. Not run is not a mismatch here; recall, which
+  // certifies absence from the index, refuses to certify on such a connection instead.
+  if (db.readonly) return null;
   try {
     db.prepare(`INSERT INTO blocks_fts(blocks_fts, rank) VALUES('integrity-check', 1)`).run();
     return null;

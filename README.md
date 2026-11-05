@@ -547,7 +547,12 @@ recursion guard, reconciliation, per-project acknowledgement and client snippets
 Every write tool accepts an optional `cursor` and returns the new chain head
 plus a `stale_write_advisory` (advisory only; the stale-write check never
 blocks; the secret guard does). The `kronicle://docs/{slug}` resource serves
-a document's current revision.
+a document's current revision. `put_document` lists at most the first 100
+blocks with `block_counts` over all of them; `blocks_next`
+(`kronicle://docs/{slug}/blocks/{revision}/{offset}`) pages the rest. Every
+tool result stays under 8 MiB; one message (stdio line or HTTP body) may be
+up to 16 MiB (`KRONICLE_LITE_MAX_MESSAGE_BYTES`), and a larger one is answered
+with a JSON-RPC error while the server keeps serving.
 
 **`serve --core`** (0.6.0) serves only `get_system_state`,
 `audit_assumptions`, `recall`, `verify`, `put_document` and

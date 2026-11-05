@@ -17,10 +17,11 @@
 import { createMcpHandler, type McpServerFactory } from '@modelcontextprotocol/server';
 import { hostHeaderValidation, originValidation, toNodeHandler } from '@modelcontextprotocol/node';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmodSync, readFileSync } from 'node:fs';
+import { chmodSync, readFileSync, statSync } from 'node:fs';
 import { createServer as createHttpServer, type IncomingMessage, type Server as NodeHttpServer, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
 
+import { maxMessageBytes } from './stdio.js';
 import { CorruptFileError, readOrCreateOnce } from './util/once-file.js';
 
 export const DEFAULT_HTTP_PORT = 7417;
@@ -40,6 +41,8 @@ export interface HttpServeOptions {
   allowedHosts?: string[];
   /** 0.5.0: refuse 2025-era clients (-32022) instead of serving them statelessly. Default false. */
   modernOnly?: boolean;
+  /** 0.8.1: request body limit in bytes (default: the shared stdio/HTTP limit, 16 MiB). */
+  maxMessageBytes?: number;
   onerror?: (err: Error) => void;
 }
 
@@ -58,7 +61,7 @@ const LOOPBACK = ['localhost', '127.0.0.1', '[::1]'];
  * 256-bit one with mode 0600 when absent. Returns the token and whether it was
  * just created.
  */
-export function loadOrCreateBearer(dataDir: string): { token: string; created: boolean; file: string } {
+export function loadOrCreateBearer(dataDir: string): { token: string; created: boolean; file: string; tightened?: number } {
   const file = join(dataDir, BEARER_FILE_NAME);
   let r: { value: string; created: boolean };
   try {
@@ -68,14 +71,26 @@ export function loadOrCreateBearer(dataDir: string): { token: string; created: b
     if (err instanceof CorruptFileError) throw new Error(`${file} is empty; delete it to regenerate or pass --bearer`);
     throw err;
   }
+  let tightened: number | undefined;
   if (r.created) {
     try {
       chmodSync(file, 0o600);
     } catch {
       // best effort (no-op on Windows)
     }
+  } else if (process.platform !== 'win32') {
+    // 0.8.1 (P2-13): an existing token file others can read is tightened back to 0600 (and reported).
+    try {
+      const mode = statSync(file).mode & 0o777;
+      if ((mode & 0o077) !== 0) {
+        chmodSync(file, 0o600);
+        tightened = mode;
+      }
+    } catch {
+      // best effort
+    }
   }
-  return { token: r.value, created: r.created, file };
+  return { token: r.value, created: r.created, file, ...(tightened !== undefined ? { tightened } : {}) };
 }
 
 export function readBearerFile(file: string): string {
@@ -116,11 +131,15 @@ export function createHttpListener(opts: HttpServeOptions): {
   const validateHost = hostHeaderValidation(allowedHosts);
   const validateOrigin = originValidation(allowedOrigins);
 
+  // 0.8.1 (P2-08): one inbound limit for both transports (src/stdio.ts MAX_MESSAGE_BYTES, 16 MiB);
+  // every schema-valid request fits under it.
+  const maxRequestBodySize = opts.maxMessageBytes ?? maxMessageBytes();
   const handler = createMcpHandler(opts.factory, {
     legacy: opts.modernOnly === true ? 'reject' : 'stateless',
+    maxRequestBodySize,
     ...(opts.onerror ? { onerror: opts.onerror } : {}),
   });
-  const node = toNodeHandler(handler, opts.onerror ? { onerror: opts.onerror } : {});
+  const node = toNodeHandler(handler, { maxRequestBodySize, ...(opts.onerror ? { onerror: opts.onerror } : {}) });
 
   const listener = (req: IncomingMessage, res: ServerResponse): void => {
     const url = new URL(req.url ?? '/', 'http://localhost');
@@ -129,6 +148,13 @@ export function createHttpListener(opts: HttpServeOptions): {
       return;
     }
     // Order: Host (rebinding) → Origin (browser cross-site) → bearer → MCP.
+    // 0.8.1 (P2-09): a Host with userinfo (`evil.com:1@127.0.0.1`) parses as a loopback URL in the
+    // SDK's check, then fails Request construction (500). No real client sends one: 400.
+    const hostHeader = req.headers['host'];
+    if (typeof hostHeader === 'string' && hostHeader.includes('@')) {
+      reject(res, 400, 'invalid Host header');
+      return;
+    }
     if (!validateHost(req, res)) return;
     if (!validateOrigin(req, res)) return;
     const presented = bearerOf(req);

@@ -19,6 +19,9 @@ import { CATALOG_FINGERPRINT, CATALOG_VERSION, liveCatalogFingerprint } from './
 import { Chain, type AnchorRecord, type Checkpoint } from './chain/chain.js';
 import type { Signer } from './crypto/keys.js';
 import { describeProjection, verifyProjection } from './docs/integrity.js';
+import { openDbReadOnly } from './db/open.js';
+import { isStorageWriteError } from './db/storage.js';
+import { checkWriters, describeWriters } from './db/writers.js';
 import { VERSION } from './version.js';
 
 export type CheckStatus = 'ok' | 'warn' | 'fail' | 'skip';
@@ -38,6 +41,8 @@ export interface DoctorReport {
   ok: boolean;
   summary: Record<CheckStatus, number>;
   checks: DoctorCheck[];
+  /** 0.8.1 (F12): set when the store exists but could not be read at all (the CLI exits 2). */
+  io_error?: string;
 }
 
 export interface DoctorOptions {
@@ -211,16 +216,29 @@ function checkProjection(db: Database.Database): DoctorCheck {
   }
 }
 
+/** 0.8.1 (C2-01): an older kronicle-lite wrote or rebuilt this store (project keys, unrecorded appends). */
+function checkWriterHistory(db: Database.Database): DoctorCheck {
+  try {
+    const r = checkWriters(db);
+    const d = describeWriters(r);
+    return { id: 'writers', status: d.status, detail: d.detail, data: { ...r } };
+  } catch (e) {
+    return { id: 'writers', status: 'warn', detail: `writer check failed: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
 function checkFts(db: Database.Database): DoctorCheck {
   try {
     if (!tableExists(db, 'blocks_fts')) return { id: 'fts', status: 'fail', detail: 'blocks_fts is missing' };
     const blocks = (db.prepare('SELECT COUNT(*) AS n FROM blocks').get() as { n: number }).n;
     const indexed = (db.prepare('SELECT COUNT(*) AS n FROM blocks_fts_docsize').get() as { n: number }).n;
-    // 0.8.1 (R2-17): rank 1 also compares the index with the stored block text.
-    db.prepare(`INSERT INTO blocks_fts(blocks_fts, rank) VALUES('integrity-check', 1)`).run();
     if (blocks !== indexed) {
       return { id: 'fts', status: 'fail', detail: `blocks_fts indexes ${indexed} row(s) but blocks has ${blocks}; rebuild with: INSERT INTO blocks_fts(blocks_fts) VALUES('rebuild')` };
     }
+    // FTS5's integrity-check is issued as an INSERT: a read-only connection cannot run it (0.8.1, F12).
+    if (db.readonly) return { id: 'fts', status: 'ok', detail: `${indexed} block(s) indexed, matching blocks (read-only open: FTS5 integrity-check not run)` };
+    // 0.8.1 (R2-17): rank 1 also compares the index with the stored block text.
+    db.prepare(`INSERT INTO blocks_fts(blocks_fts, rank) VALUES('integrity-check', 1)`).run();
     return { id: 'fts', status: 'ok', detail: `FTS5 integrity-check ok (index matches the stored text); ${indexed} block(s) indexed` };
   } catch (e) {
     return {
@@ -511,21 +529,53 @@ export async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
   }
 
   const dbPath = join(dataDir, 'kronicle-lite.db');
+  let io_error: string | undefined;
   if (exists && existsSync(dbPath)) {
-    let db: Database.Database | null = null;
+    let opened: { db: Database.Database; via: string; cleanup?: () => void } | null = null;
     try {
-      db = new Database(dbPath, { fileMustExist: true });
-      db.pragma('busy_timeout = 2000');
-      checks.push(checkIntegrity(db));
-      checks.push(checkChain(db, opts.full === true));
-      checks.push(checkProjection(db));
-      checks.push(checkFts(db));
-      checks.push(cfg!.check);
-      checks.push(await checkAnchorLocal(db, dataDir, cfg!.anchorUrl));
+      // Doctor changes nothing; a writable handle only lets it run FTS5's integrity-check (an INSERT command).
+      const db = new Database(dbPath, { fileMustExist: true });
+      try {
+        db.pragma('busy_timeout = 2000');
+        db.prepare('SELECT seq FROM chain_head WHERE id = 1').get();
+        opened = { db, via: 'read-write' };
+      } catch (e) {
+        db.close();
+        throw e;
+      }
     } catch (e) {
-      checks.push({ id: 'db-integrity', status: 'fail', detail: `cannot open ${dbPath}: ${e instanceof Error ? e.message : String(e)}` });
-    } finally {
-      db?.close();
+      if (!isStorageWriteError(e)) {
+        io_error = e instanceof Error ? e.message : String(e);
+      }
+    }
+    if (!opened && io_error === undefined) {
+      try {
+        // 0.8.1 (F12): a read-only or full data dir is checked read-only (or from a private snapshot).
+        opened = openDbReadOnly(dbPath);
+      } catch (e) {
+        io_error = e instanceof Error ? e.message : String(e);
+      }
+    }
+    if (!opened) {
+      checks.push({ id: 'db-open', status: 'fail', detail: `cannot read the database (I/O, not a chain divergence): ${io_error}` });
+    }
+    if (opened) {
+      const db = opened.db;
+      try {
+        if (opened.via === 'snapshot' || opened.via === 'memory-image') checks.push({ id: 'db-open', status: 'warn', detail: `the data dir cannot hold the WAL index (read-only or full?); checked a private ${opened.via}` });
+        checks.push(checkIntegrity(db));
+        checks.push(checkChain(db, opts.full === true));
+        checks.push(checkProjection(db));
+        checks.push(checkFts(db));
+        checks.push(checkWriterHistory(db));
+        checks.push(cfg!.check);
+        checks.push(await checkAnchorLocal(db, dataDir, cfg!.anchorUrl));
+      } catch (e) {
+        checks.push({ id: 'db-integrity', status: 'fail', detail: `cannot check ${dbPath}: ${e instanceof Error ? e.message : String(e)}` });
+      } finally {
+        db.close();
+        opened.cleanup?.();
+      }
     }
   } else {
     for (const id of ['db-integrity', 'chain', 'projection', 'fts']) checks.push({ id, status: 'skip', detail: 'no database yet' });
@@ -556,7 +606,7 @@ export async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
 
   const summary: Record<CheckStatus, number> = { ok: 0, warn: 0, fail: 0, skip: 0 };
   for (const c of checks) summary[c.status]++;
-  return { version: VERSION, node: nodeVersion, platform, data_dir: dataDir, ok: summary.fail === 0, summary, checks };
+  return { version: VERSION, node: nodeVersion, platform, data_dir: dataDir, ok: summary.fail === 0, summary, checks, ...(io_error !== undefined ? { io_error } : {}) };
 }
 
 export function renderDoctor(r: DoctorReport): string {

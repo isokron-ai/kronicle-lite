@@ -335,6 +335,7 @@ export class Recall {
 
   /** checkFtsContent, re-run only when this connection or another one changed the database since. */
   private ftsContent(): string | null {
+    if (this.db.readonly) return 'the full-text index check cannot run on a read-only store';
     const key = () => `${String(this.db.pragma('data_version', { simple: true }))}:${String((this.db.prepare('SELECT total_changes() AS n').get() as { n: number }).n)}`;
     if (this.ftsChecked?.key === key()) return this.ftsChecked.problem;
     const problem = checkFtsContent(this.db);
