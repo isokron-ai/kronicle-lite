@@ -49,6 +49,17 @@ uses semantic versioning once past 0.x.
     second refuting `gate_result` is allowed.
   - **Reserved keys:** the `audit:` and `apply:` idempotency-key prefixes are
     reserved, and `put_document` refuses them (`reserved_key`).
+  - **0.8.x stores:** verification works on a 0.8.x store without migrating
+    it. Before this fix, `verify-chain` / `verify` on a 0.8.1 store failed
+    with "no such table: audit_events" and exit 1, the divergence code. The
+    test uses a real 0.8.1 store (`test/fixtures/store-0.8.1.db.gz`) and a
+    read-only medium.
+  - **Safe export:** `--out` must be new or empty and free of symlinks, and
+    every file is created with `O_EXCL|O_NOFOLLOW`, so no symlink planted in
+    `--out` is written through.
+  - **Encoded secrets:** the blob scan decodes gzip / deflate, UTF-16LE,
+    base64 and base64url (nested). Anything it cannot decode within the cap
+    is flagged `unscanned_encoding`.
 
 ### Added — `apply`: transactional batch writes with preview
 

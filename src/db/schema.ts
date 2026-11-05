@@ -304,7 +304,9 @@ CREATE TABLE IF NOT EXISTS blobs (
   size       INTEGER NOT NULL,
   media_type TEXT,
   bytes      BLOB NOT NULL,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  -- 'unscanned_encoding': a view (gzip, deflate…) could not be decoded within the scan cap.
+  flags      TEXT
 );
 
 -- 0.9.0: audit event projection (re-derived from audit.* events by rebuild).

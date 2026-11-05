@@ -4,8 +4,9 @@
  * hostile bundles, secrets in blobs, reserved idempotency keys, __proto__,
  * repeated refutation, and guards that must each be load-bearing.
  */
-import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { deflateSync, gzipSync } from 'node:zlib';
 
 import { describe, expect, it } from 'vitest';
 
@@ -284,6 +285,100 @@ describe('review #13: ingest hardening', () => {
       expect(() => kl.docs.putDocument({ slug: 'sq', title: 'sq', markdown: '# s\n\ns.\n', actor_id: 'evil', idempotency_key: k })).toThrow(/reserved/);
     }
     expect(kl.audit.record('A', [{ kind: 'finding', event_key: 'future', payload: { finding_id: 'V6', status: 'discovered' } }], 'x')[0]!.replayed).toBe(false);
+    kl.close();
+  });
+});
+
+describe('re-review #13: export never writes through planted symlinks', () => {
+  const POSIX = process.platform !== 'win32';
+  it('refuses a non-empty --out directory', () => {
+    const { kl } = build();
+    const out = tempDir('rev-out-');
+    writeFileSync(join(out, 'keep.txt'), 'x');
+    expect(() => exportBundle({ chain: kl.chain, audit: kl.audit, signer: kl.identity.signer, audit_id: 'A1', dir: out })).toThrow(/not empty/);
+    kl.close();
+  });
+  it.skipIf(!POSIX)('refuses an --out that is a symlink, or whose parent is', () => {
+    const { kl } = build();
+    const real = tempDir('rev-real-');
+    const base = tempDir('rev-base-');
+    symlinkSync(real, join(base, 'link'));
+    expect(() => exportBundle({ chain: kl.chain, audit: kl.audit, signer: kl.identity.signer, audit_id: 'A1', dir: join(base, 'link') })).toThrow(/symlink/);
+    expect(() => exportBundle({ chain: kl.chain, audit: kl.audit, signer: kl.identity.signer, audit_id: 'A1', dir: join(base, 'link', 'sub') })).toThrow(/symlink/);
+    kl.close();
+  });
+  it.skipIf(!POSIX)('symlinks planted as manifest.json / events.jsonl / blobs/<sha> in an empty-looking dir are never followed; victims unchanged', () => {
+    const { kl, resp } = build();
+    const victims = tempDir('rev-victim-');
+    const vm = join(victims, 'manifest-victim');
+    const ve = join(victims, 'events-victim');
+    const vb = join(victims, 'blob-victim');
+    for (const v of [vm, ve, vb]) writeFileSync(v, 'precious');
+    // The planted links make the dir non-empty: refused before anything is written.
+    const out = tempDir('rev-out-');
+    symlinkSync(vm, join(out, 'manifest.json'));
+    symlinkSync(ve, join(out, 'events.jsonl'));
+    mkdirSync(join(out, 'blobs'));
+    symlinkSync(vb, join(out, 'blobs', resp.sha256));
+    expect(() => exportBundle({ chain: kl.chain, audit: kl.audit, signer: kl.identity.signer, audit_id: 'A1', dir: out })).toThrow();
+    for (const v of [vm, ve, vb]) expect(readFileSync(v, 'utf8')).toBe('precious');
+    kl.close();
+  });
+  it('writes into a fresh directory it creates', () => {
+    const { kl } = build();
+    const out = join(tempDir('rev-new-'), 'bundle');
+    exportBundle({ chain: kl.chain, audit: kl.audit, signer: kl.identity.signer, audit_id: 'A1', dir: out });
+    expect(verifyBundle(out).ok).toBe(true);
+    kl.close();
+  });
+});
+
+describe('re-review #13: verify-bundle never follows a symlinked blob', () => {
+  it.skipIf(process.platform === 'win32')('a blob that is a symlink to the right bytes still fails artifacts', () => {
+    const { kl, dir, resp } = build();
+    const elsewhere = join(tempDir('rev-ln-'), 'b');
+    writeFileSync(elsewhere, readFileSync(join(dir, 'blobs', resp.sha256)));
+    unlinkSync(join(dir, 'blobs', resp.sha256));
+    symlinkSync(elsewhere, join(dir, 'blobs', resp.sha256));
+    expect(failed(dir)).toEqual(['artifacts']);
+    kl.close();
+  });
+});
+
+describe('re-review #13: the blob secret scan sees through common encodings', () => {
+  const body = `Authorization: Bearer ${GHP}\n`;
+  const cases: [string, Buffer][] = [
+    ['gzip', gzipSync(Buffer.from(body))],
+    ['deflate', deflateSync(Buffer.from(body))],
+    ['utf-16le', Buffer.from(body, 'utf16le')],
+    ['utf-16le with BOM', Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(body, 'utf16le')])],
+    ['base64', Buffer.from(`{"body":"${Buffer.from(body).toString('base64')}"}`)],
+    ['base64url', Buffer.from(`data=${Buffer.from(`x-api-key: ${AWS} and more padding text`).toString('base64url')}`)],
+    ['gzip inside base64', Buffer.from(`payload: ${gzipSync(Buffer.from(body)).toString('base64')}`)],
+  ];
+  for (const [name, bytes] of cases) {
+    it(`${name}: refused`, () => {
+      const kl = new KronicleLite({ memory: true });
+      expect(() => kl.audit.putBlob(bytes, 'application/octet-stream')).toThrow(SecretDetectedError);
+      expect((kl.db.prepare('SELECT COUNT(*) AS n FROM blobs').get() as { n: number }).n).toBe(0);
+      kl.close();
+    });
+  }
+  it('clean encoded bodies are stored; one that cannot be decoded within the cap is stored flagged unscanned_encoding', () => {
+    const kl = new KronicleLite({ memory: true });
+    expect(kl.audit.putBlob(gzipSync(Buffer.from('hello world\n')), 'application/gzip').unscanned).toBeUndefined();
+    // A gzip bomb: decompresses past the cap.
+    const bomb = gzipSync(Buffer.alloc(80 * 1024 * 1024, 0x41));
+    const r = kl.audit.putBlob(bomb, 'application/gzip');
+    expect(r.unscanned).toEqual(['unscanned_encoding']);
+    // A truncated gzip stream cannot be decoded either.
+    const cut = gzipSync(Buffer.from('a'.repeat(5000))).subarray(0, 30);
+    expect(kl.audit.putBlob(cut, 'application/gzip').unscanned).toEqual(['unscanned_encoding']);
+    kl.close();
+  });
+  it('redact mode refuses what it cannot redact in place (an encoded secret)', () => {
+    const kl = new KronicleLite({ memory: true });
+    expect(() => kl.audit.putBlob(gzipSync(Buffer.from(body)), 'application/gzip', { secrets: 'redact' })).toThrow(SecretDetectedError);
     kl.close();
   });
 });

@@ -17,8 +17,8 @@
  * docs/EVIDENCE-BUNDLE.md is the format and the verification procedure.
  */
 
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readdirSync, writeSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 
 import type { Chain, ChainEvent } from '../chain/index.js';
 import { canonicalize, type JsonValue } from '../crypto/canonical.js';
@@ -48,7 +48,7 @@ export interface BundleManifest {
   events: { seq: number; event_id: string; event_type: string; this_hash: string }[];
   /** Events in range that are stubs (other events; payload withheld), with the hash each one must carry. */
   stubs: { seq: number; this_hash: string }[];
-  blobs: { sha256: string; size: number; media_type: string | null }[];
+  blobs: { sha256: string; size: number; media_type: string | null; unscanned_encoding?: true }[];
   /** Refs declared `redacted: true` at record time: deliberately never stored. */
   redacted: { sha256: string; size: number; referenced_by: string[] }[];
   /** Refs to blobs the store no longer holds (should be empty; listed, never hidden). */
@@ -85,9 +85,48 @@ export interface ExportResult {
 /** Canonical bytes of a JSON value plus a trailing newline (the on-disk form of every bundle file). */
 export const canonicalLine = (v: unknown): string => canonicalize(v as JsonValue) + '\n';
 
+/**
+ * The output directory, made safe to write into: it must not exist yet or be
+ * an empty real directory; neither it nor any existing ancestor may be a
+ * symlink (a planted link would redirect the writes). Created fresh (0700).
+ */
+function prepareOut(dir: string): string {
+  const abs = resolve(dir);
+  for (let p = abs; ; p = dirname(p)) {
+    let st: ReturnType<typeof lstatSync> | null = null;
+    try {
+      st = lstatSync(p);
+    } catch {
+      // does not exist (yet)
+    }
+    if (st?.isSymbolicLink()) throw new AuditError('invalid_audit_event', `refusing to export through a symlink: ${p} (pass the real path)`);
+    if (dirname(p) === p) break;
+  }
+  if (existsSync(abs)) {
+    if (!lstatSync(abs).isDirectory()) throw new AuditError('invalid_audit_event', `--out ${abs} exists and is not a directory`);
+    if (readdirSync(abs).length > 0) throw new AuditError('invalid_audit_event', `--out ${abs} is not empty; export into a new or empty directory`);
+  } else {
+    mkdirSync(abs, { recursive: true, mode: 0o700 });
+  }
+  mkdirSync(join(abs, 'blobs'), { mode: 0o700 });
+  return abs;
+}
+
+/** Create a NEW file (never an existing one, never through a symlink) and write it. */
+function writeNew(path: string, data: string | Buffer): void {
+  // why: O_EXCL refuses any existing entry, a symlink included; O_NOFOLLOW is belt and braces where it exists.
+  const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o644);
+  try {
+    writeSync(fd, typeof data === 'string' ? Buffer.from(data, 'utf8') : data);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 export function exportBundle(args: { chain: Chain; audit: AuditLog; signer: Signer; audit_id: string; dir: string }): ExportResult {
   const seqs = args.audit.seqsOf(args.audit_id);
   if (seqs.length === 0) throw new AuditError('invalid_audit_event', `no audit events for "${args.audit_id}"`);
+  const dir = prepareOut(args.dir);
   const from = seqs[0]!;
   const to = seqs[seqs.length - 1]!;
   const mine = new Set(seqs);
@@ -117,7 +156,6 @@ export function exportBundle(args: { chain: Chain; audit: AuditLog; signer: Sign
   const blobs: BundleManifest['blobs'] = [];
   const redacted: BundleManifest['redacted'] = [];
   const missing: BundleManifest['missing'] = [];
-  mkdirSync(join(args.dir, 'blobs'), { recursive: true });
   for (const [sha256, r] of [...refs.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     const by = [...r.by].sort();
     if (r.redacted) {
@@ -129,11 +167,11 @@ export function exportBundle(args: { chain: Chain; audit: AuditLog; signer: Sign
       missing.push({ sha256, size: r.size, referenced_by: by });
       continue;
     }
-    writeFileSync(join(args.dir, 'blobs', sha256), b.bytes);
-    blobs.push({ sha256, size: b.size, media_type: b.media_type });
+    writeNew(join(dir, 'blobs', sha256), b.bytes);
+    blobs.push({ sha256, size: b.size, media_type: b.media_type, ...(b.flags === 'unscanned_encoding' ? { unscanned_encoding: true as const } : {}) });
   }
   const eventsText = lines.map(canonicalLine).join('');
-  writeFileSync(join(args.dir, 'events.jsonl'), eventsText);
+  writeNew(join(dir, 'events.jsonl'), eventsText);
   const manifest: BundleManifest = signManifest({
     format: BUNDLE_FORMAT,
     audit_id: args.audit_id,
@@ -147,6 +185,6 @@ export function exportBundle(args: { chain: Chain; audit: AuditLog; signer: Sign
     root: { root: cp.root, leaf_count: cp.leaf_count, key_id: cp.key_id, public_key_pem: args.signer.public_key_pem, signature: cp.signature },
   }, args.signer);
   const manifestText = canonicalLine(manifest);
-  writeFileSync(join(args.dir, 'manifest.json'), manifestText);
-  return { dir: args.dir, manifest_sha256: sha256Hex(manifestText), manifest };
+  writeNew(join(dir, 'manifest.json'), manifestText);
+  return { dir, manifest_sha256: sha256Hex(manifestText), manifest };
 }

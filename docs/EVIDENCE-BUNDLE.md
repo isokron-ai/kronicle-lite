@@ -48,6 +48,9 @@ audit was right, complete, or honest.
 - **Range:** the audit's first event to its last.
 - **Why stubs:** they keep the hash links continuous without disclosing other
   documents or other audits.
+- **Safe export:** `--out` must be a new or empty directory, and neither it nor
+  any existing parent may be a symlink. Every file is created new with
+  `O_CREAT|O_EXCL|O_NOFOLLOW`, so a planted link is never written through.
 - **Determinism:** every byte is a function of the chain and the blob store, so
   exporting twice gives identical files. The SHA-256 of `manifest.json` is the
   bundle's identity (printed as `manifest sha256`).

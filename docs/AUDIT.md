@@ -15,12 +15,20 @@ Source: `src/audit/`. Bundles: [EVIDENCE-BUNDLE.md](EVIDENCE-BUNDLE.md).
 ## Blobs
 
 `audit put-blob FILE` stores an artifact by content.
-- **Secret guard.** The write-time secret guard runs over the bytes, read as
-  latin1 so binary is scanned byte for byte. A match is refused and nothing is
-  stored.
+- **Secret guard.** The write-time secret guard runs over the raw bytes (as
+  latin1) and over their decoded views: gzip and deflate (each view capped at
+  16 MB), UTF-16LE (BOM or NUL high bytes), and base64 / base64url segments.
+  Encodings nest up to three levels, so gzip inside base64 is caught. A match
+  is refused and nothing is stored.
 - **Redaction.** `--redact-secrets` (API `secrets: 'redact'`) stores a copy with
-  each match replaced by `[REDACTED:<detector>]` and returns `redactions: n`.
-  The ref is the hash of the redacted copy.
+  each raw match replaced by `[REDACTED:<detector>]` and returns
+  `redactions: n`. The ref is the hash of the redacted copy. A match that is
+  only visible after decoding cannot be redacted in place, so it is refused in
+  either mode.
+- **Undecodable views.** A view that cannot be decoded within the cap (a gzip
+  bomb, a truncated stream) is scanned as raw bytes only. The blob is stored
+  flagged `unscanned: ["unscanned_encoding"]`, and the bundle manifest marks it
+  with `unscanned_encoding: true`.
 
 ## Recording
 
@@ -67,6 +75,11 @@ is `{sha256, size, media_type?, redacted?: true}`.
 | `regression_result` | `fingerprint_before`, `fingerprint_after`, `verdict` (improved \| regressed \| unchanged), `deltas{name: number}` | `finding_id`, `report` (ref), `evidence[]` |
 
 The full JSON Schemas are served at `kronicle://schemas/audit`.
+
+**0.8.x stores.** A store made by 0.8.x gains the tables on its first
+read-write open. Opened read-only (`verify-chain`, `verify`, `doctor`, a
+read-only medium), it is never migrated: it has no audit events, its audit
+queries answer empty, and verification passes.
 
 **Reserved keys.** The chain idempotency keys `audit:…` and `apply:…` are
 reserved. `put_document` refuses them (`reserved_key`), so no document write
