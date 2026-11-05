@@ -90,10 +90,9 @@ verify unchanged.
   derived from a stale note. Cut-short results are no longer reused.
 - **L4.** Lineage inference began at the actor's LATEST orient, so recall →
   orient → write — what the wake contract tells agents to do — inferred no
-  lineage. It now begins at the first briefing of the cursor chain (each
-  orient that presented the actor's previous cursor continues the session;
-  one without a usable cursor starts a new one). Recall's attention rerank
-  keeps using the latest briefing.
+  lineage. Fixed by R2-04 / C2-05 below (session as a chain position, unioned
+  with the 24 h / 200 most-recent-reads window); the interim cursor-chain
+  walk by briefing time was dropped (it compared wall clocks, C2-05).
 
 ### Fixed — robustness
 
@@ -426,6 +425,134 @@ the PR for the upstream issue text.
     makes this one refuse to write that store with a clear message.
   Old versions check neither `user_version` nor `schema_version`, so their
   normal writes cannot be refused; they are detected afterwards.
+
+Lineage, pulse/pending, integrity and secret-guard fixes from
+agent-memory-bench hardening round 2, track 1 (`hardening-retractions`
+@ 3eb7bd0: R2-04, -05, -07..-11, -14, -15, -17 and two mutation-run test
+gaps), the live-agent track (`hardening-live`: L2-01, L2-03 kl side, L2-07)
+and the chaos track (`hard-chaos`: C2-03, -04, -05). Every item has a
+regression test (test/lineage-integrity.test.ts) and its probe now passes.
+
+### Fixed — a pulse never says "proceed" on a damaged or tampered store (L2-01, L2-03, R2-09)
+
+- `get_system_state` with `focus: "pulse"` returned `integrity: null` and
+  "No changes since your last look; proceed" on a store whose `blocks` rows
+  were edited; the other foci reported `ok: false`. Live agents deployed
+  from a tampered store 5/6 times. The pulse now runs the same integrity
+  pass as `focus=retractions` and always reports it.
+- The integrity pass (every focus) and recall now cross-check the
+  projection against the chain, cheaply (index lookups and counts, plus a
+  replay of the indexed lineage-bearing events cached per process): no live
+  row the chain retired, retired/tombstoned/block counts, supersession
+  pointers, and `doc_lineage` / `doc_lineage_gaps` rows. Before, a
+  superseded row made live again (a partial restore of `blocks`) or deleted
+  lineage rows left `integrity.ok` true: recall served the old text,
+  `pending` dropped to 0 and a stale note read fresh. Recall now withholds
+  such hits (`projection_mismatch`, `lineage_mismatch`).
+- A long-lived server (MCP) whose store file changed on disk under its
+  SQLite page cache (a zeroed page) kept answering every focus from the
+  cache, "proceed" included. Each integrity pass now stats the file; when it
+  changed, the cache is dropped and `PRAGMA quick_check` runs. A damaged
+  file, or any SQLite error during orient (`SQLITE_CORRUPT`, `NOTADB`, I/O),
+  is `integrity.ok: false` with the error and an unmoved cursor; recall
+  withholds every hit (`store_damaged`). (The shim's fail-open on an
+  unreadable store is fixed on the shim side.)
+
+### Fixed — absence is never certified from an index that disagrees with the text (R2-17)
+
+- A rewritten full-text row let recall certify `absent_in_searched` with
+  `index_fresh: true` for a term a live block holds, while orient,
+  `verifyAll` and `doctor` all passed. Before certifying absence, recall now
+  runs FTS5's content check (`integrity-check` with rank 1, cached until the
+  database changes) and answers `cannot_certify` on a mismatch; orient
+  (`orientation` / `recent_changes`), `verifyAll` / `verify-chain` (table
+  `blocks_fts`) and `doctor`'s `fts` check report it.
+
+### Fixed — lineage (R2-04, R2-05, R2-14, R2-15, C2-05)
+
+- Inference counted only reads since the actor's LATEST briefing, so
+  recall → orient → write (what the wake contract asks) left the note with
+  no lineage, and a file-backed note stayed `can_act` after its source
+  changed. The bound is now the union of the session and the last 24 h / 200
+  most recent reads, whatever briefings came in between.
+- The session is a chain position (the cursor's seq, else the latest
+  briefing's), never a wall-clock comparison: a briefing clock 3 s ahead
+  dropped every read (0 edges, `truncated: false`, no `derived` retraction).
+  An inference that finds nothing while the actor did read blocks outside
+  every bound is flagged `derived_from_inferred_truncated`.
+- A note whose sources cannot be determined (inference cut short by the
+  bound, or more than 4 notes below its sources) is never `can_act`: new
+  honesty cap `inspect_only` / `lineage_unknown`. Projected as
+  `doc_lineage_gaps`.
+- `Lineage.staleness` memoised results cut short by a cycle or the depth
+  bound, so in one recall a stale note could be served unmarked
+  (`inspect_only / no_source`) after its cycle partner or a deeper note was
+  evaluated. Cut-short results are memoised only at the root; a note in a
+  cycle with a stale member is `never_act`.
+- A note derived from a source that was later removed (or moved to another
+  document) stayed stale forever unless lineage was re-declared explicitly.
+  A put that re-derives (the author read the source's document after the
+  removal, or rewrote the note from material read after it) records
+  `derived_from_released` and drops those edges.
+- `derived` retractions were listed only for notes with a direct edge to
+  the changed block; a note derived from a stale note now gets its own
+  (`derived_from_change.via`), within the depth bound.
+
+### Fixed — the pulse gate and wording (R2-07, R2-08, C2-03, C2-04)
+
+- With no stored shim position (new worktree, wiped state), or one that
+  does not decode or verify (junk bytes, a regenerated `cursor-secret`, a
+  chain rolled back below it), `pulse --pending-actor A -- git push` seeded
+  or re-seeded and allowed although A had an unreconciled change. It now
+  asks A's `pending` and refuses (`reason: "pending"`, exit 77) without
+  seeding. A regenerated `cursor-secret` is reported on stderr and flagged
+  on the identity.
+- A denial was recorded as the shim actor's briefing, so after a rollback
+  the plain retry recovered from the denial itself and was allowed. Pulse
+  briefings are recorded only when the pulse allows.
+- A pulse counted changes since the actor's latest briefing, not since the
+  cursor it was given: another session with the same actor id could turn an
+  old-cursor pulse into "proceed". It now counts from the presented cursor;
+  with no valid cursor it never says "proceed".
+
+### Fixed — secret guard (R2-10, R2-11)
+
+- A PEM private key whose body lines are indented or prefixed (YAML block
+  scalar, list item, block quote, comment) passed the write guard.
+- `db_password: …`, `"dbPassword": "…"`, `db-password=…`, `apiToken: …`
+  were neither refused nor scrubbed. New `password_assignment` detector
+  (write and read): a key containing password/passwd or ending in
+  pwd/secret/token, in snake, camel or kebab case, with `:`, `=` or a JSON
+  pair and a real-looking value. Placeholders (`${ENV}`, `<redacted>`,
+  `changeme`, `example`, `example-password-1`) still pass; a value that
+  merely contains "example" no longer does.
+- A soft hyphen or zero-width character inside a token no longer hides it
+  (normalised for detection only; never for storage).
+
+### Changed
+
+- skills/orient: orient (`focus=retractions`) before release-type wrappers
+  (`make release`, `npm run release/deploy/ship`, deploy scripts) and again
+  after a change lands during a world-changing step; recommend the shims or
+  the git hook for wrappers (L2-07).
+- Recall `withheld[].problem` adds `projection_mismatch`,
+  `lineage_mismatch`, `store_damaged`; `authority_reason` adds
+  `lineage_unknown`; pulse `reason` adds `pending` (with `pending[]`), and
+  in actor mode the invoking actor's `pending` gates a pulse that has no
+  usable position.
+- Cost: the projection half of the integrity pass (live-block re-hash,
+  lifecycle and lineage rows, FTS content) is memoised per database state
+  (`data_version`, this connection's `total_changes`, chain head), so repeated
+  pulses on a long-lived server cost a lookup; any write by any connection
+  re-runs it. The lifecycle check uses `IN` over the retired ids instead of a
+  correlated `EXISTS` (seconds → milliseconds on a 1k-document store).
+
+### Migration
+
+- Forward-only and safe on existing stores: a new projection table
+  `doc_lineage_gaps`, a partial index `events_lineage_idx`, and a one-time
+  backfill of the gaps from the chain (meta `migration.lineage_gaps`). No
+  event is touched; `rebuild` re-derives both.
 
 ## [0.8.0] — 2026-11-01
 

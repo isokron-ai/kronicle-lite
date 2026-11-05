@@ -172,7 +172,10 @@ describe('MCP surface', () => {
     const s = store.orient.getSystemState({ actor_id: 'b' });
     expect(s.integrity).toMatchObject({ ok: false, problem: 'chain hash_mismatch at seq 1' });
     expect(s.next_steps[0]).toMatch(/^INTEGRITY FAILURE/);
-    expect(store.orient.getSystemState({ actor_id: 'b', focus: 'pulse' }).integrity).toBeNull();
+    // 0.8.1 (L2-01): the pulse runs the integrity pass too and never says proceed on a failure.
+    const p = store.orient.getSystemState({ actor_id: 'c', focus: 'pulse' });
+    expect(p.integrity).toMatchObject({ ok: false, problem: 'chain hash_mismatch at seq 1' });
+    expect(p.next_steps.join(' ')).not.toMatch(/proceed/i);
     store.close();
   });
 });

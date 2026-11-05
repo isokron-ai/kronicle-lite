@@ -237,8 +237,9 @@ function checkFts(db: Database.Database): DoctorCheck {
     }
     // FTS5's integrity-check is issued as an INSERT: a read-only connection cannot run it (0.8.1, F12).
     if (db.readonly) return { id: 'fts', status: 'ok', detail: `${indexed} block(s) indexed, matching blocks (read-only open: FTS5 integrity-check not run)` };
-    db.prepare(`INSERT INTO blocks_fts(blocks_fts) VALUES('integrity-check')`).run();
-    return { id: 'fts', status: 'ok', detail: `FTS5 integrity-check ok; ${indexed} block(s) indexed` };
+    // 0.8.1 (R2-17): rank 1 also compares the index with the stored block text.
+    db.prepare(`INSERT INTO blocks_fts(blocks_fts, rank) VALUES('integrity-check', 1)`).run();
+    return { id: 'fts', status: 'ok', detail: `FTS5 integrity-check ok (index matches the stored text); ${indexed} block(s) indexed` };
   } catch (e) {
     return {
       id: 'fts',

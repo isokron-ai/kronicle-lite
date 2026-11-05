@@ -39,7 +39,11 @@ kronicle-lite orient --data-dir DIR --actor push-hook --json --cwd PROJECT --cur
     kronicle-lite: do not rely on recalled text") and make a pre-command
     pulse BLOCK world-changing commands until the operator runs
     `kronicle-lite verify-chain`. Orient never throws on a bad row; every
-    focus, `pulse` included, reports it.
+    focus, `pulse` included, reports it (0.8.1: the pulse runs the same pass
+    as `focus=retractions` — events since the cursor, live blocks, the
+    projection's block lifecycle and lineage rows against the chain — and a
+    store file that is damaged or cannot be read, `SQLITE_CORRUPT` included,
+    is `integrity.ok: false` with the error, never a cached "proceed").
 - **A bad, foreign or missing cursor never fails.** Check
   `recovery.method`: `presented` / `presented_compact` means the delta is
   since your cursor. `flight_recorder` means it is since this actor's last
@@ -504,6 +508,16 @@ Then:
   runs.
 - **Integrity failure**: refused in both modes, whatever was read (fail
   closed).
+- (0.8.1) **No usable stored position** — none yet (a new worktree, a
+  wiped state dir), or one that does not decode or verify (junk bytes, a
+  regenerated `cursor-secret`, a chain rolled back below it): the
+  version-bound gate does not need a cursor, so the pending actors'
+  `pending` (the configured ones, else the invoking actor) is still asked
+  and any unreconciled change refuses
+  (`reason: "pending"`, nothing seeded, a plain retry is refused again).
+  A regenerated `cursor-secret` is reported on stderr when the store opens.
+- (0.8.1) A denial is never recorded as the shim actor's briefing, so it
+  can never become the position a later pulse recovers from.
 
 ### `kronicle-lite pulse` (the check itself)
 
@@ -522,7 +536,8 @@ cursors itself. `--json` prints one object:
 | field | meaning |
 |---|---|
 | `decision` | `allow` \| `deny` \| `warn` \| `seed` |
-| `reason` | `clear` \| `retractions` \| `integrity` \| `seeded` \| `genesis` (unreadable cursor: re-seeded) \| `target` (0.8.1: the command names a directory that does not resolve; refused) |
+| `reason` | `clear` \| `retractions` \| `integrity` \| `seeded` \| `genesis` (unreadable cursor: re-seeded) \| `target` (0.8.1: the command names a directory that does not resolve; refused) \| `pending` (0.8.1: no usable position and a pending actor — configured, else the invoking actor — has unreconciled changes; refused, nothing seeded) |
+| `pending[]` | (0.8.1) with `reason: "pending"`: `{actor_id, count}` per actor with unreconciled changes |
 | `blocking[]`, `informational[]` | retractions (same shape as orient's `retractions[]`); `blocking[]` are the unresolved ones |
 | `blocking[].pending_actors`, `.unread_by` | (0.8.0) the actors checked for this change and those that have not read its current version (`[]` / `[]`: no reader recorded) |
 | `resolved[]` | (0.8.0) blocking retractions since the cursor that every pending actor has re-read at the current version (same shape as `blocking[]`) |

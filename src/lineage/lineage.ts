@@ -33,7 +33,9 @@ import type BetterSqlite3 from 'better-sqlite3';
 import type { Chain } from '../chain/index.js';
 import type { Db } from '../db/open.js';
 type Statement = BetterSqlite3.Statement<unknown[]>;
-import { isInstructionSlug, REORDERED_RE, splitHeadingPath, type BlockRow, type DocumentStore } from '../docs/documents.js';
+import { isInstructionSlug, lineageEffects, REORDERED_RE, splitHeadingPath, type BlockRow, type DocumentStore } from '../docs/documents.js';
+
+type LineageRow = { doc_id: string; source_block_id: string; source_content_hash: string; inferred: number; chain_seq: number };
 import { classifyEdit } from '../orient/cosmetic.js';
 import { changeSnippets, snippet, wordDiff } from '../orient/textdiff.js';
 
@@ -113,22 +115,54 @@ interface Walk {
   currentFrom: number;
 }
 
-const MAX_DERIVED_DEPTH = 4;
+export const MAX_DERIVED_DEPTH = 4;
 
-/** Inference without a session (the actor never oriented): reads in this window… */
+/** Inference: besides the session, the reads in this window (a coarse wall-clock cap)… */
 export const INFER_FALLBACK_WINDOW_MS = 24 * 60 * 60 * 1000;
 /** …and at most this many of the most recently read blocks. */
 export const INFER_FALLBACK_MAX = 200;
 
-/** What `infer` returns: the edges, and whether the no-session bound left reads out. */
+/** What `infer` returns: the edges, and whether the bound left reads out (lineage then undetermined). */
 export interface InferredLineage {
   refs: LineageRef[];
   truncated: boolean;
+  /**
+   * 0.8.1: earlier inferred edges of the note (and reads) to sources that were
+   * REMOVED and that this write re-derives past (docs/FORMAT.md §3.10):
+   * recorded as `derived_from_released`, they leave the note's lineage.
+   */
+  released: LineageRef[];
 }
+
+/** 0.8.1: why a note's lineage could not be fully determined (honesty: never can_act on it). */
+export type LineageGap = 'inference_bound' | 'depth_bound';
+
+/** 0.8.1: one read's verdict on a derived note. */
+export interface LineageAssessment {
+  stale: StaleSource[];
+  /** Non-null when the note's sources could not all be determined. */
+  undetermined: LineageGap | null;
+}
+
+/**
+ * 0.8.1: the lineage projection a replay of the chain produces (doc_lineage
+ * rows + doc_lineage_gaps), for the integrity cross-check.
+ */
+export interface LineageReplay {
+  /** Up to and including this chain seq. */
+  seq: number;
+  /** doc_id → key `source|inferred` → {hash, chain_seq}. */
+  rows: Map<string, Map<string, { hash: string; chain_seq: number }>>;
+  gaps: Map<string, number>;
+}
+
+/** Per read (recall / orient): staleness results, plus the roots whose evaluation hit the depth bound. */
+const depthCut = new WeakMap<Map<string, StaleSource[]>, Set<string>>();
 
 export class Lineage {
   private readonly hopMemo = new Map<string, boolean>();
   private readonly stmts = new Map<string, Statement>();
+  private replayCache: LineageReplay | null = null;
 
   constructor(
     private readonly db: Db,
@@ -238,32 +272,127 @@ export class Lineage {
     return this.q(`SELECT 1 FROM doc_lineage WHERE doc_id = ? LIMIT 1`).get(doc_id) !== undefined;
   }
 
+  // ───────────────────────────── integrity (0.8.1, R2-09) ─────────────────────────────
+
+  /**
+   * What the chain says the lineage projection is: a replay of the events
+   * that carry lineage fields (an indexed subset), applied with the same
+   * rules as the projection (`lineageEffects`). Cached per process and
+   * extended incrementally (the chain is append-only; its own hashes are
+   * checked separately).
+   */
+  replay(): LineageReplay {
+    const head = this.chain.head().seq;
+    let r = this.replayCache;
+    if (!r || r.seq > head) r = { seq: 0, rows: new Map(), gaps: new Map() };
+    if (r.seq < head) {
+      const evs = this.q(
+        `SELECT seq, event_type, payload_canonical FROM events
+          WHERE event_type IN ('document.put', 'block.created') AND instr(payload_canonical, '"derived_from') > 0 AND seq > ? AND seq <= ?
+          ORDER BY seq`,
+      ).all(r.seq, head) as { seq: number; event_type: string; payload_canonical: string }[];
+      for (const ev of evs) {
+        let p: Record<string, unknown>;
+        try {
+          p = JSON.parse(ev.payload_canonical) as Record<string, unknown>;
+        } catch {
+          continue; // an unparseable payload projects nothing (chain verification reports it)
+        }
+        const fx = lineageEffects(ev.event_type, p);
+        if (!fx) continue;
+        let rows = r.rows.get(fx.doc_id);
+        if (fx.replace) rows = new Map();
+        rows ??= new Map();
+        for (const id of fx.release) rows.delete(`${id}|1`);
+        for (const a of fx.add) if (!rows.has(`${a.block_id}|${a.inferred}`)) rows.set(`${a.block_id}|${a.inferred}`, { hash: a.content_hash, chain_seq: ev.seq });
+        if (rows.size > 0) r.rows.set(fx.doc_id, rows);
+        else r.rows.delete(fx.doc_id);
+        if (fx.gap === 'clear') r.gaps.delete(fx.doc_id);
+        else if (fx.gap === 'set') r.gaps.set(fx.doc_id, ev.seq);
+      }
+      r.seq = head;
+    }
+    this.replayCache = r;
+    return r;
+  }
+
+  /**
+   * Compare the stored lineage rows (and gaps) with the chain's replay: of
+   * `doc_ids`, or of every document. null when they match, else the first
+   * problem in words.
+   */
+  checkProjection(doc_ids?: readonly string[]): string | null {
+    const want = this.replay();
+    const docs = doc_ids ?? null;
+    const have = new Map<string, Map<string, { hash: string; chain_seq: number }>>();
+    const rows = docs
+      ? docs.flatMap((d) => this.q(`SELECT doc_id, source_block_id, source_content_hash, inferred, chain_seq FROM doc_lineage WHERE doc_id = ?`).all(d) as LineageRow[])
+      : (this.q(`SELECT doc_id, source_block_id, source_content_hash, inferred, chain_seq FROM doc_lineage`).all() as LineageRow[]);
+    for (const x of rows) {
+      let m = have.get(x.doc_id);
+      if (!m) have.set(x.doc_id, (m = new Map()));
+      m.set(`${x.source_block_id}|${x.inferred}`, { hash: x.source_content_hash, chain_seq: x.chain_seq });
+    }
+    for (const d of docs ?? [...new Set([...want.rows.keys(), ...have.keys()])]) {
+      const w = want.rows.get(d) ?? new Map();
+      const h = have.get(d) ?? new Map();
+      if (w.size !== h.size) return `doc_lineage for document ${d}: ${h.size} row(s) stored, the chain records ${w.size}`;
+      for (const [k, v] of w) {
+        const s = h.get(k);
+        if (!s || s.hash !== v.hash || s.chain_seq !== v.chain_seq) return `doc_lineage for document ${d}: edge ${k.split('|')[0]} does not match the chain`;
+      }
+    }
+    const gaps = docs
+      ? docs.flatMap((d) => this.q(`SELECT doc_id, chain_seq FROM doc_lineage_gaps WHERE doc_id = ?`).all(d) as { doc_id: string; chain_seq: number }[])
+      : (this.q(`SELECT doc_id, chain_seq FROM doc_lineage_gaps`).all() as { doc_id: string; chain_seq: number }[]);
+    const wantGaps = docs ? docs.filter((d) => want.gaps.has(d)) : [...want.gaps.keys()];
+    if (gaps.length !== wantGaps.length || gaps.some((g) => want.gaps.get(g.doc_id) !== g.chain_seq)) return `doc_lineage_gaps: ${gaps.length} stored, the chain records ${wantGaps.length}`;
+    return null;
+  }
+
+  /** 0.8.1: the write that recorded a gap in this note's inferred lineage (doc_lineage_gaps), or null. */
+  gapSeq(doc_id: string): number | null {
+    return (this.q(`SELECT chain_seq FROM doc_lineage_gaps WHERE doc_id = ?`).get(doc_id) as { chain_seq: number } | undefined)?.chain_seq ?? null;
+  }
+
+  /**
+   * 0.8.1: staleness plus whether the note's sources could be determined at
+   * all: an inference that the bound cut short (`doc_lineage_gaps`), or a
+   * chain of derived notes deeper than MAX_DERIVED_DEPTH. Recall never labels
+   * such a note can_act on lineage grounds (docs/HONESTY.md).
+   */
+  assess(doc_id: string, memo: Map<string, StaleSource[]> = new Map()): LineageAssessment {
+    const stale = this.staleness(doc_id, memo);
+    const undetermined: LineageGap | null = this.gapSeq(doc_id) !== null ? 'inference_bound' : depthCut.get(memo)?.has(doc_id) ? 'depth_bound' : null;
+    return { stale, undetermined };
+  }
+
   /**
    * Stale sources of a derived note; [] when it has no lineage or every
    * source is current. `memo` is shared across one read (recall / orient).
+   * 0.8.1: a result cut short by a cycle or by the depth bound is the answer
+   * for the note the evaluation started from, never for an inner note on its
+   * own, so it is memoized only at the root (R2-05: before, a note evaluated
+   * inside another's walk could be cached fresh and served unmarked).
    */
   staleness(doc_id: string, memo: Map<string, StaleSource[]> = new Map(), depth = 0, seen: Set<string> = new Set()): StaleSource[] {
     return this.stalenessOf(doc_id, memo, depth, seen).out;
   }
 
-  /**
-   * `complete` is false when the result was cut short: by the depth bound
-   * (a stale note more than MAX_DERIVED_DEPTH hops below was not looked at)
-   * or by a cycle (a note already on the path was skipped). 0.8.1: such a
-   * result is the right answer for the note the read started from, never for
-   * this note on its own, so it is not memoized; before, a note evaluated
-   * after its descendant or cycle partner in the same read could show fresh.
-   */
-  private stalenessOf(doc_id: string, memo: Map<string, StaleSource[]>, depth: number, seen: Set<string>): { out: StaleSource[]; complete: boolean } {
+  /** `complete` is false when a cycle or the depth bound cut the walk below `doc_id`; `cut` when it was the depth bound. */
+  private stalenessOf(doc_id: string, memo: Map<string, StaleSource[]>, depth: number, seen: Set<string>): { out: StaleSource[]; complete: boolean; cut: boolean } {
+    let cuts = depthCut.get(memo);
+    if (!cuts) depthCut.set(memo, (cuts = new Set()));
     const cached = memo.get(doc_id);
-    if (cached) return { out: cached, complete: true };
-    if (seen.has(doc_id)) return { out: [], complete: false };
+    if (cached) return { out: cached, complete: !cuts.has(doc_id), cut: cuts.has(doc_id) };
+    if (seen.has(doc_id)) return { out: [], complete: false, cut: false };
     const edges = this.edges(doc_id);
     if (edges.length === 0) {
       memo.set(doc_id, []);
-      return { out: [], complete: true };
+      return { out: [], complete: true, cut: false };
     }
     let complete = true;
+    let cut = false;
     seen.add(doc_id);
     const ids = new Set(edges.map((e) => e.source_block_id));
     const bySource = new Map<string, { hash: string; inferred: boolean }>();
@@ -319,19 +448,36 @@ export class Lineage {
         if (d === doc_id) continue;
         const r = this.stalenessOf(d, memo, depth + 1, seen);
         if (!r.complete) complete = false;
-        const inner = r.out;
-        if (inner.length > 0) {
+        if (r.cut) cut = true;
+        if (r.out.length > 0) {
           const slug = this.slugOf(d) ?? d;
-          for (const s of inner) if (!out.some((o) => o.source_block_id === s.source_block_id)) out.push({ ...s, via: s.via ?? slug });
+          for (const s of r.out) if (!out.some((o) => o.source_block_id === s.source_block_id)) out.push({ ...s, via: s.via ?? slug });
         }
       }
     } else if ([...transitiveDocs].some((d) => d !== doc_id && this.hasLineage(d))) {
-      complete = false; // depth bound: notes below were not looked at
+      complete = false; // the depth bound: derived notes below were not looked at
+      cut = true;
     }
     seen.delete(doc_id);
     out.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0) || a.source_block_id.localeCompare(b.source_block_id));
-    if (complete || depth === 0) memo.set(doc_id, out);
-    return { out, complete };
+    if (complete || depth === 0) {
+      memo.set(doc_id, out);
+      // A stale verdict is final whatever lies below; a fresh one cut by the bound is undetermined.
+      if (cut && out.length === 0) cuts.add(doc_id);
+    }
+    return { out, complete, cut: cut && out.length === 0 };
+  }
+
+  /**
+   * 0.8.1: notes with a lineage edge to any version of a block of `doc_id`
+   * (derived from that note), for derived retractions one level down.
+   */
+  notesDerivedFromDoc(doc_id: string): string[] {
+    return (
+      this.q(
+        `SELECT DISTINCT l.doc_id FROM doc_lineage l JOIN blocks b ON b.block_id = l.source_block_id WHERE b.doc_id = ? AND l.doc_id != ? ORDER BY l.doc_id`,
+      ).all(doc_id, doc_id) as { doc_id: string }[]
+    ).map((r) => r.doc_id);
   }
 
   /**
@@ -360,43 +506,60 @@ export class Lineage {
    * versions of one block, only the latest is kept: the same staleness
    * verdict with fewer edges). Sorted by block id.
    *
-   * Bounded: `since` (ISO time) = its current session start (the briefing
-   * behind its cursor, else its latest orient): every block read since then.
-   * No session (the actor never oriented): never "everything ever read", but
-   * the most recently read blocks within the last 24 h, at most 200
-   * (`INFER_FALLBACK_WINDOW_MS`, `INFER_FALLBACK_MAX`); `truncated` is true
-   * when that bound left out any block the actor ever read.
+   * Bounded (docs/FORMAT.md §3.10), the union of:
+   *   - the session: every block read at or after chain position `since`
+   *     (the cursor's seq, else the actor's latest briefing; reads are placed
+   *     by the chain head they were made at, never by wall clock: C2-05);
+   *   - the most recently read blocks within the last 24 h, at most 200
+   *     (`INFER_FALLBACK_WINDOW_MS`, `INFER_FALLBACK_MAX`), whatever
+   *     briefings came in between (R2-04: recall → orient → write keeps the
+   *     read). The 24 h test is a coarse wall-clock cap only.
+   * `truncated` (lineage undetermined) is true when the 200 cap left out a
+   * block read in the window, or when the actor read blocks that neither
+   * bound covers and inference found nothing (no session, or nothing at all
+   * read in it): an empty inference is never claimed complete then.
    */
-  infer(actor_id: string, since: string | null, exclude_doc_id: string | null, opts: { now?: number } = {}): InferredLineage {
-    const READS = `SELECT block_id, issued_at AS at FROM receipts WHERE actor_id = ?
-           UNION ALL SELECT block_id, read_at AS at FROM reads WHERE actor_id = ? AND block_id IS NOT NULL AND via != 'write'`;
-    let rows: { block_id: string; content_hash: string; retired: number }[];
-    let truncated = false;
+  infer(actor_id: string, since: number | null, exclude_doc_id: string | null, opts: { now?: number } = {}): Omit<InferredLineage, 'released'> {
+    const READS = `SELECT block_id, issued_at AS at, chain_seq AS hs FROM receipts WHERE actor_id = ?
+           UNION ALL SELECT block_id, read_at AS at, head_seq AS hs FROM reads WHERE actor_id = ? AND block_id IS NOT NULL AND via != 'write'`;
+    type Row = { block_id: string; content_hash: string; retired: number };
+    const SEL = `SELECT b.block_id, b.content_hash, (b.valid_to IS NOT NULL OR b.tombstoned_at IS NOT NULL) AS retired`;
+    const picked = new Map<string, Row>();
     if (since !== null) {
-      rows = this.q(
-        `SELECT b.block_id, b.content_hash, (b.valid_to IS NOT NULL OR b.tombstoned_at IS NOT NULL) AS retired
-           FROM (SELECT DISTINCT block_id FROM (${READS}) WHERE at >= ?) r JOIN blocks b ON b.block_id = r.block_id
+      for (const r of this.q(
+        `${SEL} FROM (SELECT DISTINCT block_id FROM (${READS}) WHERE hs >= ?) r JOIN blocks b ON b.block_id = r.block_id
           WHERE b.doc_id IS NOT ?`,
-      ).all(actor_id, actor_id, since, exclude_doc_id) as typeof rows;
-    } else {
-      const cutoff = new Date((opts.now ?? Date.now()) - INFER_FALLBACK_WINDOW_MS).toISOString();
-      const recent = this.q(
-        `SELECT b.block_id, b.content_hash, (b.valid_to IS NOT NULL OR b.tombstoned_at IS NOT NULL) AS retired, r.at
-           FROM (SELECT block_id, MAX(at) AS at FROM (${READS}) GROUP BY block_id HAVING MAX(at) >= ?) r
-           JOIN blocks b ON b.block_id = r.block_id
-          WHERE b.doc_id IS NOT ?
-          ORDER BY r.at DESC, b.block_id LIMIT ?`,
-      ).all(actor_id, actor_id, cutoff, exclude_doc_id, INFER_FALLBACK_MAX + 1) as (typeof rows[number] & { at: string })[];
-      if (recent.length > INFER_FALLBACK_MAX) truncated = true;
-      rows = recent.slice(0, INFER_FALLBACK_MAX);
-      if (!truncated) {
-        truncated =
-          this.q(
-            `SELECT 1 FROM (SELECT block_id, MAX(at) AS at FROM (${READS}) GROUP BY block_id HAVING MAX(at) < ?) r
-               JOIN blocks b ON b.block_id = r.block_id WHERE b.doc_id IS NOT ? LIMIT 1`,
-          ).get(actor_id, actor_id, cutoff, exclude_doc_id) !== undefined;
+      ).all(actor_id, actor_id, since, exclude_doc_id) as Row[]) {
+        picked.set(r.block_id, r);
       }
     }
+    const cutoff = new Date((opts.now ?? Date.now()) - INFER_FALLBACK_WINDOW_MS).toISOString();
+    // Most recent first by chain position, then local time (both monotonic enough for a cap).
+    const recent = this.q(
+      `${SEL} FROM (SELECT block_id, MAX(hs) AS hs, MAX(at) AS at FROM (${READS}) GROUP BY block_id HAVING MAX(at) >= ?) r
+         JOIN blocks b ON b.block_id = r.block_id
+        WHERE b.doc_id IS NOT ?
+        ORDER BY r.hs DESC, r.at DESC, b.block_id LIMIT ?`,
+    ).all(actor_id, actor_id, cutoff, exclude_doc_id, INFER_FALLBACK_MAX + picked.size + 1) as Row[];
+    let truncated = false;
+    let taken = 0;
+    for (const r of recent) {
+      if (picked.has(r.block_id)) continue;
+      if (taken >= INFER_FALLBACK_MAX) {
+        truncated = true;
+        break;
+      }
+      picked.set(r.block_id, r);
+      taken++;
+    }
+    if (!truncated && (since === null || picked.size === 0)) {
+      // Reads neither bound covers: never claim a complete (or an empty) inference.
+      truncated =
+        this.q(
+          `SELECT 1 FROM (SELECT block_id FROM (${READS}) GROUP BY block_id) r JOIN blocks b ON b.block_id = r.block_id WHERE b.doc_id IS NOT ? LIMIT 1 OFFSET ?`,
+        ).get(actor_id, actor_id, exclude_doc_id, picked.size) !== undefined;
+    }
+    const rows = [...picked.values()];
     // Dedupe by lineage: drop a retired version when a later version of the same block was read too.
     const ids = new Set(rows.map((r) => r.block_id));
     const refs: LineageRef[] = [];
@@ -409,6 +572,51 @@ export class Lineage {
     }
     refs.sort((a, b) => a.block_id.localeCompare(b.block_id));
     return { refs, truncated };
+  }
+
+  /**
+   * 0.8.1 (R2-14): inference for a write of note `doc_id`, plus the removed
+   * sources this write re-derives past. A source whose lineage ends in a
+   * REMOVAL (tombstoned, or moved to another document) can never be
+   * re-derived from its current version, so before, such a note stayed stale
+   * forever unless the author re-declared its lineage explicitly. Released
+   * (left out of the inferred edges and dropped from the note's earlier
+   * inferred edges) when the author acknowledged the removal (read the
+   * document after it, the rule `pending` resolves by) or, rewriting the
+   * note, re-derived it from current material it read after the removal.
+   * Explicit edges are never released (an explicit derived_from replaces).
+   */
+  inferForWrite(actor_id: string, since: number | null, doc_id: string | null, opts: { rewrite?: boolean; now?: number } = {}): InferredLineage {
+    const base = this.infer(actor_id, since, doc_id, opts);
+    const earlier = doc_id ? this.edges(doc_id).filter((e) => e.inferred === 1) : [];
+    const candidates = new Map<string, string>();
+    for (const e of earlier) candidates.set(e.source_block_id, e.source_content_hash);
+    for (const r of base.refs) candidates.set(r.block_id, r.content_hash);
+    // When the actor last read each block (chain position), for "read after the removal".
+    const readSeq = this.q(
+      `SELECT MAX(hs) AS hs FROM (SELECT chain_seq AS hs FROM receipts WHERE actor_id = ? AND block_id = ? UNION ALL SELECT head_seq AS hs FROM reads WHERE actor_id = ? AND block_id = ? AND via != 'write')`,
+    );
+    const liveRefs = base.refs.filter((r) => (this.walk(r.block_id)?.currentFrom ?? -1) >= 0);
+    const released = new Set<string>();
+    for (const [sid] of candidates) {
+      const w = this.walk(sid);
+      if (!w || w.currentFrom >= 0) continue; // live lineage (re-derived by an edge to the current version) or missing (integrity)
+      const removedAt = this.retireSeq(w.head.block_id);
+      if (removedAt === null) continue;
+      const ack = this.readCurrent(actor_id, sid);
+      const rederived =
+        opts.rewrite === true &&
+        liveRefs.some((r) => {
+          const hs = (readSeq.get(actor_id, r.block_id, actor_id, r.block_id) as { hs: number | null }).hs;
+          return hs !== null && hs >= removedAt;
+        });
+      if (ack || rederived) released.add(sid);
+    }
+    return {
+      refs: base.refs.filter((r) => !released.has(r.block_id)),
+      truncated: base.truncated,
+      released: earlier.filter((e) => released.has(e.source_block_id)).map((e) => ({ block_id: e.source_block_id, content_hash: e.source_content_hash })),
+    };
   }
 
   // ───────────────────────────── reconciliation (pulse) ─────────────────────────────

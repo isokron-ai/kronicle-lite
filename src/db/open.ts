@@ -12,7 +12,7 @@ import {
 } from '../crypto/keys.js';
 import { ensureDir } from '../util/once-file.js';
 import { VERSION } from '../version.js';
-import { ADDED_COLUMNS, SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
+import { ADDED_COLUMNS, DATA_MIGRATIONS, SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
 import { isStorageWriteError, StoreUnreadableError, WRITER_GENERATION } from './storage.js';
 
 export type Db = Database.Database;
@@ -90,7 +90,7 @@ function openReadWrite(dataDir: string, dbFile: string, fresh: boolean): Opened 
         // best effort
       }
     }
-    const identity = loadOrCreateIdentity(dataDir);
+    let identity = loadOrCreateIdentity(dataDir);
     // First run: config.json with the default anchor_url only (no license key).
     ensureDefaultConfig(dataDir);
 
@@ -110,6 +110,18 @@ function openReadWrite(dataDir: string, dbFile: string, fresh: boolean): Opened 
         `this kronicle-lite store was marked by a newer kronicle-lite (writer generation ${min}; this is ${VERSION}, generation ${WRITER_GENERATION}); upgrade before writing to it`,
       );
     }
+    // 0.8.1 (C2-03): a cursor-secret created for a store that already had a chain
+    // (restored without it, deleted) silently invalidated every cursor. Never silent:
+    // say so on stderr, record it in meta, and let callers treat old cursors as unknown.
+    if (identity.cursor_secret_created && (db.prepare(`SELECT seq FROM chain_head WHERE id = 1`).get() as { seq: number } | undefined)?.seq) {
+      identity = { ...identity, cursor_secret_regenerated: true };
+      process.stderr.write(`kronicle-lite: ${dataDir}/cursor-secret was missing and has been regenerated; every cursor issued before is now unreadable (positions recover from the flight recorder; shims re-check pending).\n`);
+      try {
+        db.prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES ('cursor_secret_regenerated_at', ?)`).run(new Date().toISOString());
+      } catch {
+        // best effort: the warning above is the signal
+      }
+    }
     return { db, identity, dataDir };
   } catch (err) {
     db.close();
@@ -126,6 +138,7 @@ function setUp(db: Db, identity: ServerIdentity): void {
       .transaction(() => {
         db.exec(SCHEMA_DDL);
         addColumns(db);
+        dataMigrations(db);
         initialize(db, identity);
         db.exec(GUARD_DDL);
       })
@@ -317,6 +330,17 @@ function addColumns(db: Db): void {
       if (c.backfill) db.exec(c.backfill);
     }
     if (c.index) db.exec(c.index);
+  }
+}
+
+/** 0.8.1: one-time projection backfills (DATA_MIGRATIONS), each recorded in `meta`. */
+function dataMigrations(db: Db): void {
+  const done = db.prepare(`SELECT 1 FROM meta WHERE key = ?`);
+  const mark = db.prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)`);
+  for (const m of DATA_MIGRATIONS) {
+    if (done.get(m.key) !== undefined) continue;
+    db.exec(m.sql);
+    mark.run(m.key, new Date().toISOString());
   }
 }
 
