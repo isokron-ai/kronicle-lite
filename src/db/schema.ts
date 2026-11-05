@@ -338,4 +338,29 @@ CREATE TABLE IF NOT EXISTS audit_findings (
   events     INTEGER NOT NULL,
   PRIMARY KEY (audit_id, finding_id)
 );
+
+-- 0.9.0: apply. Confirmations issued by a dry run (single use: used_at set by the
+-- commit, or burned when the commit fails) and committed results by idempotency
+-- key (replay). Side tables like receipts: not chain data, not projection.
+CREATE TABLE IF NOT EXISTS apply_confirmations (
+  nonce      TEXT PRIMARY KEY,
+  plan_hash  TEXT NOT NULL,
+  actor_id   TEXT NOT NULL,
+  issued_at  TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  used_at    TEXT,
+  outcome    TEXT,
+  -- What the token binds (plan hash, actor, tenant, sandbox, catalog, project, resources and
+  -- versions, policy, expiry, idempotency key): server-side, so the token is only nonce + MAC.
+  binding_json TEXT
+);
+CREATE INDEX IF NOT EXISTS apply_confirmations_expiry_idx ON apply_confirmations (expires_at);
+CREATE INDEX IF NOT EXISTS apply_confirmations_actor_idx ON apply_confirmations (actor_id, plan_hash, expires_at);
+CREATE TABLE IF NOT EXISTS apply_results (
+  idempotency_key TEXT PRIMARY KEY,
+  request_hash    TEXT NOT NULL,
+  actor_id        TEXT NOT NULL,
+  result_json     TEXT NOT NULL,
+  seq             INTEGER NOT NULL
+);
 `;

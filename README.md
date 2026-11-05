@@ -543,6 +543,7 @@ recursion guard, reconciliation, per-project acknowledgement and client snippets
 | `put_document` | Create or re-put a Markdown document by slug. Unchanged blocks keep their ids; changed ones are superseded; removed ones tombstoned. `bind_git` + `source_path` bind it to a file's git blob. Refuses a detected secret (`secret_detected`); `redact_secrets: true` stores a redacted copy. | yes |
 | `supersede_block` | Replace one live block with new content and a reason (secret guard as for `put_document`). | yes |
 | `tombstone_block` | Retire one live block with a reason. | yes |
+| `apply` | 0.9.0: up to 50 put / supersede / tombstone ops in one SQLite transaction (`all_or_nothing`) or `best_effort`; `expect_version` per op; `dry_run` previews exact diffs and returns a single-use, expiring `confirm_token` bound to the plan and the versions it saw (state changed → `stale_plan`); `idempotency_key` replays; one `apply.committed` event ([docs/APPLY.md](docs/APPLY.md)). | yes |
 | `audit_record` | 0.9.0: append MCP-audit evidence (`catalog_snapshot`, `call_measured`, `finding`, `gate_result`, `fix_applied`, `regression_result`), schema-validated, all or nothing, idempotent by `event_key`; hashes and blob refs only ([docs/AUDIT.md](docs/AUDIT.md)). | yes |
 | `audit_query` | 0.9.0: audit events by `audit_id` and/or catalog `fingerprint`, plus each finding's current state (discovered / refuted / reopened / accepted). | no |
 

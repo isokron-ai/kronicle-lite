@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 
+import { ApplyEngine } from './apply/apply.js';
 import { AuditLog } from './audit/log.js';
 import { Chain, ChainEventSchema, type ChainEvent, type VerifyChainResult } from './chain/index.js';
 import type { ServerIdentity } from './crypto/keys.js';
@@ -46,6 +47,9 @@ export class KronicleLite {
   private readonly cleanup: (() => void) | undefined;
   /** 0.9.0: audit events, their projection and the blob store. */
   readonly audit: AuditLog;
+  /** 0.9.0: transactional batch writes with preview and confirm tokens. */
+  readonly applier: ApplyEngine;
+  readonly workspace: string;
 
   constructor(opts: KronicleLiteOptions = {}) {
     const opened = openDatabase(opts);
@@ -70,6 +74,8 @@ export class KronicleLite {
     this.recall.storeHealth = () => health.check();
     this.auditor = new AssumptionAuditor(this.chain, this.docs);
     this.audit = new AuditLog(this.db, this.chain);
+    this.workspace = opts.workspace ?? 'local';
+    this.applier = new ApplyEngine(this.db, this.chain, this.docs, this.identity.signer.public_key_pem, { tenant: this.workspace, secret: this.identity.cursor_secret });
   }
 
   close(): void {

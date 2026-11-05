@@ -350,6 +350,8 @@ async function main(argv: string[]): Promise<number> {
         ...(str(flags['actor']) !== undefined ? { defaultActorId: str(flags['actor'])! } : {}),
         // 0.5.0: orient hides other projects' instruction retractions (the project is the working directory's).
         project: flags['all-projects'] === true ? null : projectScopeFor(instructionCtx(flags)),
+        // 0.9.0: over HTTP (remote-capable), apply always needs a confirm_token.
+        ...(flags['http'] ? { requireApplyConfirm: true } : {}),
       });
       if (flags['http']) {
         const { loadOrCreateBearer, readBearerFile, serveHttp } = await import('./http.js');

@@ -61,9 +61,47 @@ uses semantic versioning once past 0.x.
     base64 and base64url (nested). Anything it cannot decode within the cap
     is flagged `unscanned_encoding`.
 
+### Added — `apply`: transactional batch writes with preview
+
+- `apply` (MCP tool; `store.applier`): up to 50 put / supersede / tombstone
+  ops in one local SQLite transaction (`all_or_nothing`, default) or
+  per-op savepoints (`best_effort`); `expect_version` per op; one
+  `apply.committed` chain event per commit (plan hash, result hash, per-op
+  receipts); `idempotency_key` replays the committed result, a different
+  plan under it is refused. `dry_run` executes and always rolls back
+  (exact diffs) and returns a single-use, expiring `confirm_token` bound to
+  plan hash, actor, tenant, sandbox, server, catalog fingerprint, resource
+  ids and versions, policy version, nonce and idempotency key; the commit
+  re-validates all of it inside its transaction (`stale_plan` on any state
+  change) and re-checks authorization per op (the token authorizes
+  nothing). docs/APPLY.md.
+- **apply review hardening (before release).**
+  - **Small tokens.** Confirm tokens are a nonce plus a MAC (about 80
+    characters), with the binding stored server-side. Before this, a 20-op
+    token was 5 KB and failed the MCP schema.
+  - **No false receipts.** A commit whose chain key already holds another
+    event fails with `idempotency_conflict` instead of reporting that event as
+    its receipt.
+  - **When a token is required.** After a dry run of the same plan
+    (`confirm_required`), and always over HTTP.
+  - **Burning.** A wrong-actor attempt no longer burns the owner's token.
+  - **Replays.** Idempotent replays re-check the actor and authz inside the
+    transaction.
+  - **Project scope.** `put` ops keep the server's project scope.
+  - **TTL.** A non-finite `ttl_seconds` gets the default; any value is capped
+    at 900.
+  - **Bounded confirmations.** Before this, 5,000 expired dry runs left
+    3.4 MB in `apply_confirmations`. Confirmations are now indexed by expiry
+    and by actor and plan, expired rows are pruned on write (bounded batches),
+    and each actor holds at most 100 live ones.
+  - **Strict MAC.** The token's MAC must be exactly 43 base64url characters,
+    so a trailing `=` is refused.
+
 ### Changed
 
-- Catalog: two new tools and a batch-capable `verify` (full and core
+- Catalog pins moved to `src/catalog-pin.ts` (no imports; apply binds the
+  fingerprint), re-exported from `src/catalog.ts`.
+- Catalog: three new tools (`apply`, `audit_record`, `audit_query`) and a batch-capable `verify` (full and core
   catalogs re-snapshotted; `CATALOG_VERSION` 0.9.0). Existing tools,
   hashes, receipts and cursors are unchanged; stores from 0.8.x open and
   gain the new tables on first open.

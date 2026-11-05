@@ -17,6 +17,7 @@ import { McpServer, ProtocolError, ResourceNotFoundError, ResourceTemplate, type
 import { z } from 'zod';
 
 import { anchorStatus, tryPushCheckpoint, verifyLastAnchor } from './anchor/anchor.js';
+import { ApplyError, CONFIRM_TTL_MAX_S, MAX_APPLY_OPS } from './apply/apply.js';
 import { AuditError, MAX_EVENTS_PER_CALL } from './audit/log.js';
 import { AUDIT_KINDS, AuditEventInputSchema, PAYLOAD_SCHEMAS } from './audit/schemas.js';
 import { ChainConflictError } from './chain/index.js';
@@ -32,6 +33,7 @@ import {
   lean,
   fullJsonSchema,
   AnchorStatusResultSchema,
+  ApplyResultSchema,
   AuditQueryResultSchema,
   AuditRecordResultSchema,
   AuditSummarySchema,
@@ -63,6 +65,11 @@ export interface ServerOptions {
    * `full` (default) serves every tool.
    */
   profile?: 'full' | 'core';
+  /**
+   * 0.9.0: apply commits need a confirm_token (dry_run first). `serve --http`
+   * sets it: a remote-capable server never commits a batch blind.
+   */
+  requireApplyConfirm?: boolean;
 }
 
 /** 0.6.0: the `--core` profile: orient, grade, search, check a receipt, write, fix one block. */
@@ -237,6 +244,9 @@ function errorResult(err: unknown): ToolResult {
   if (err instanceof SecretDetectedError) {
     // Findings name the detector and line only; the secret is never echoed.
     return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err.code, message: err.message, findings: err.findings }) }] };
+  }
+  if (err instanceof ApplyError) {
+    return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err.code, message: err.message }) }] };
   }
   if (err instanceof AuditError) {
     return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err.code, message: err.message, ...(err.index !== undefined ? { index: err.index } : {}) }) }] };
@@ -669,6 +679,60 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     },
   );
 
+  // ───────────────────────────── apply (0.9.0) ─────────────────────────────
+
+  const OP_ID = z.string().min(1).max(64);
+  const EXPECT = z.number().int().nonnegative().optional().describe('document revision the op expects (0 = must not exist); else version_conflict');
+  registerTool(
+    'apply',
+    {
+      title: 'Apply a batch of writes transactionally',
+      description:
+        `Up to ${MAX_APPLY_OPS} put / supersede / tombstone ops in ONE local transaction. mode all_or_nothing (default; any ` +
+        'failure rolls back everything) | best_effort. dry_run: exact per-op diffs, nothing written, plus a single-use ' +
+        'confirm_token bound to this plan, actor and the previewed versions; commit with it to reject a plan whose state ' +
+        'changed. expect_version per op; idempotency_key replays the committed result.',
+      inputSchema: lean(
+        z.object({
+          mode: z.enum(['all_or_nothing', 'best_effort']).default('all_or_nothing'),
+          ops: z
+            .array(
+              z.discriminatedUnion('op', [
+                z.strictObject({ id: OP_ID, op: z.literal('put'), slug: z.string().min(1).max(300), title: z.string().min(1).max(300), markdown: z.string().max(1_000_000), expect_version: EXPECT }),
+                z.strictObject({ id: OP_ID, op: z.literal('supersede'), block_id: z.string().min(1).max(100), new_content: z.string().min(1).max(200_000), reason: z.string().min(1).max(500), expect_version: EXPECT }),
+                z.strictObject({ id: OP_ID, op: z.literal('tombstone'), block_id: z.string().min(1).max(100), reason: z.string().min(1).max(500), expect_version: EXPECT }),
+              ]),
+            )
+            .min(1)
+            .max(MAX_APPLY_OPS),
+          dry_run: z.boolean().default(false),
+          confirm_token: z.string().min(1).max(4000).optional(),
+          idempotency_key: z.string().min(1).max(128).optional(),
+          ttl_seconds: z.number().int().min(1).max(CONFIRM_TTL_MAX_S).optional().describe('confirm_token lifetime (default 300)'),
+          actor_id: ACTOR,
+        }),
+        'input',
+      ),
+      outputSchema: lean(ApplyResultSchema, 'output'),
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+    },
+    (args) => {
+      try {
+        return json(
+          store.applier.apply({
+            ...args,
+            actor_id: actorOf(args.actor_id),
+            // Same project a put_document through this server records.
+            project: opts.project && opts.project.keys.length > 0 ? { key: opts.project.keys[0]!, root: opts.project.root ?? '' } : null,
+            require_confirm: opts.requireApplyConfirm === true,
+          }),
+        );
+      } catch (err) {
+        return errorResult(err);
+      }
+    },
+  );
+
   // ───────────────────────────── audit (0.9.0) ─────────────────────────────
 
   registerTool(
@@ -866,6 +930,7 @@ const OUTPUT_SCHEMAS = {
   put_document: PutDocumentResultSchema,
   supersede_block: SupersedeBlockResultSchema,
   tombstone_block: TombstoneBlockResultSchema,
+  apply: ApplyResultSchema,
   audit_record: AuditRecordResultSchema,
   audit_query: AuditQueryResultSchema,
 } as const;
