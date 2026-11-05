@@ -176,6 +176,11 @@ describe('P2-04: every tool result validates against the advertised (compact) an
             events: [{ kind: 'call_measured', event_key: `k${Math.floor(rnd() * 4)}`, payload: { fingerprint: 'a'.repeat(64), tool: 't', status: '200', is_error: false, latency_ms: 1, bytes_out: 1 } }],
           }),
           audit_query: () => (rnd() < 0.5 ? { audit_id: 'P' } : { fingerprint: 'a'.repeat(64) }),
+          apply: () => ({
+            ops: [{ id: 'x', op: 'put', slug: pick(['a', 'e']), title: 'T', markdown: `# A\n\nz ${Math.floor(rnd() * 9)}\n` }],
+            dry_run: rnd() < 0.5,
+            mode: pick(['all_or_nothing', 'best_effort']),
+          }),
           audit_assumptions: () => ({ claims: [{ symbol: pick(['head', 'a', ...(blocks.length ? [pick(blocks)] : [])]), value: pick([1, 'port 3', '0']) }] }),
           verify_chain: () => ({}),
           checkpoint_chain: () => ({}),
