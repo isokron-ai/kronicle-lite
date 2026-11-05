@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-05T17:33:28.968Z",
+  "capturedAt": "2026-11-05T17:35:04.769Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -80,6 +80,272 @@
           "type": "object"
         },
         "title": "Hosted anchor status"
+      },
+      {
+        "annotations": {
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false,
+          "readOnlyHint": false
+        },
+        "description": "Up to 50 put / supersede / tombstone ops in ONE local transaction. mode all_or_nothing (default; any failure rolls back everything) | best_effort. dry_run: exact per-op diffs, nothing written, plus a single-use confirm_token bound to this plan, actor and the previewed versions; commit with it to reject a plan whose state changed. expect_version per op; idempotency_key replays the committed result.",
+        "inputSchema": {
+          "properties": {
+            "actor_id": {
+              "description": "Your agent id (default: server --actor). Cursors are bound to it.",
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "confirm_token": {
+              "maxLength": 4000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "dry_run": {
+              "default": false,
+              "type": "boolean"
+            },
+            "idempotency_key": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "mode": {
+              "default": "all_or_nothing",
+              "enum": [
+                "all_or_nothing",
+                "best_effort"
+              ],
+              "type": "string"
+            },
+            "ops": {
+              "items": {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "expect_version": {
+                        "description": "document revision the op expects (0 = must not exist); else version_conflict",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "id": {
+                        "maxLength": 64,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "markdown": {
+                        "maxLength": 1000000,
+                        "type": "string"
+                      },
+                      "op": {
+                        "const": "put",
+                        "type": "string"
+                      },
+                      "slug": {
+                        "maxLength": 300,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "title": {
+                        "maxLength": 300,
+                        "minLength": 1,
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "op",
+                      "slug",
+                      "title",
+                      "markdown"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "block_id": {
+                        "maxLength": 100,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "expect_version": {
+                        "description": "document revision the op expects (0 = must not exist); else version_conflict",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "id": {
+                        "maxLength": 64,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "new_content": {
+                        "maxLength": 200000,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "op": {
+                        "const": "supersede",
+                        "type": "string"
+                      },
+                      "reason": {
+                        "maxLength": 500,
+                        "minLength": 1,
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "op",
+                      "block_id",
+                      "new_content",
+                      "reason"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "block_id": {
+                        "maxLength": 100,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "expect_version": {
+                        "description": "document revision the op expects (0 = must not exist); else version_conflict",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "id": {
+                        "maxLength": 64,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "op": {
+                        "const": "tombstone",
+                        "type": "string"
+                      },
+                      "reason": {
+                        "maxLength": 500,
+                        "minLength": 1,
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "op",
+                      "block_id",
+                      "reason"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
+              "maxItems": 50,
+              "minItems": 1,
+              "type": "array"
+            },
+            "ttl_seconds": {
+              "description": "confirm_token lifetime (default 300)",
+              "maximum": 900,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "ops"
+          ],
+          "type": "object"
+        },
+        "name": "apply",
+        "outputSchema": {
+          "properties": {
+            "atomic": {
+              "type": "boolean"
+            },
+            "confirm_expires_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "confirm_token": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "dry_run": {
+              "type": "boolean"
+            },
+            "head": {
+              "type": "object"
+            },
+            "idempotency_key": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "mode": {
+              "enum": [
+                "all_or_nothing",
+                "best_effort"
+              ],
+              "type": "string"
+            },
+            "ops": {
+              "type": "array"
+            },
+            "plan_hash": {
+              "type": "string"
+            },
+            "receipt": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "replayed": {
+              "type": "boolean"
+            },
+            "result_hash": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "enum": [
+                "planned",
+                "committed",
+                "partial",
+                "rolled_back",
+                "failed"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "mode",
+            "dry_run",
+            "atomic",
+            "plan_hash",
+            "result_hash",
+            "replayed",
+            "idempotency_key",
+            "ops",
+            "confirm_token",
+            "confirm_expires_at",
+            "receipt",
+            "head"
+          ],
+          "type": "object"
+        },
+        "title": "Apply a batch of writes transactionally"
       },
       {
         "annotations": {
@@ -1299,5 +1565,5 @@
     "title": "kronicle-lite",
     "version": "0.9.0"
   },
-  "sha256": "c91e266e583bb7c1239549c427ca3ae19011da42f6ed8c853d98481c41d86c33"
+  "sha256": "22d85066120b2840b7dd9a987853bf4d188157e4c29195945702bcb469c3e3f9"
 }

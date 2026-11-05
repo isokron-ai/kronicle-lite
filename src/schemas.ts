@@ -464,6 +464,34 @@ export const VerifyResultSchema = VerifyOneSchema.extend({
   counts: z.record(z.enum(VERIFY_STATUSES), z.number().int().nonnegative()).optional().describe('Batch: results per status.'),
 });
 
+/** 0.9.0: apply result. */
+const ApplyOpResultSchema = z.object({
+  id: z.string(),
+  op: z.enum(['put', 'supersede', 'tombstone']),
+  status: z.enum(['planned', 'applied', 'failed', 'rolled_back', 'not_run']),
+  target: z.object({ slug: z.string().nullable(), doc_id: z.string().nullable(), block_id: z.string().nullable() }),
+  version_before: z.number().int().nullable(),
+  version_after: z.number().int().nullable(),
+  diff: z.string().nullable(),
+  receipt: z.object({ first_seq: z.number().int(), last_seq: z.number().int(), this_hash: HEX64 }).nullable(),
+  error: z.object({ code: z.string(), message: z.string() }).nullable(),
+});
+export const ApplyResultSchema = z.object({
+  status: z.enum(['planned', 'committed', 'partial', 'rolled_back', 'failed']),
+  mode: z.enum(['all_or_nothing', 'best_effort']),
+  dry_run: z.boolean(),
+  atomic: z.boolean().describe('true: one local SQLite transaction (no compensation).'),
+  plan_hash: HEX64,
+  result_hash: HEX64.nullable(),
+  replayed: z.boolean().describe('true: this idempotency_key already committed; the original result.'),
+  idempotency_key: z.string().nullable(),
+  ops: z.array(ApplyOpResultSchema),
+  confirm_token: z.string().nullable().describe('dry_run: pass back to commit exactly this plan; single use, expires.'),
+  confirm_expires_at: z.string().nullable(),
+  receipt: z.object({ seq: z.number().int(), event_id: z.string(), this_hash: HEX64 }).nullable().describe('The apply.committed chain event.'),
+  head: ChainHeadSchema,
+});
+
 /** 0.9.0: audit_record result. */
 export const AuditRecordResultSchema = z.object({
   audit_id: z.string(),

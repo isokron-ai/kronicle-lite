@@ -29,6 +29,7 @@ const META = { 'io.modelcontextprotocol/protocolVersion': MODERN, 'io.modelconte
 
 const TOOL_NAMES = [
   'anchor_status',
+  'apply',
   'audit_assumptions',
   'audit_query',
   'audit_record',
@@ -301,6 +302,19 @@ describe('MCP server (in-process, 2026-07-28 client via serveStdio over InMemory
     expect(v.results.map((x) => x.status)).toEqual(['VERIFIED', 'UNVERIFIED']);
     expect(v.status).toBe('UNVERIFIED'); // fail closed at top level
     expect(v.counts['VERIFIED']).toBe(1);
+  });
+
+  it('0.9.0: apply over MCP: dry_run → confirm_token → commit once; a replayed token is a typed error', async () => {
+    const ops = [{ id: 'n', op: 'put', slug: 'mcp-apply', title: 'M', markdown: '# M\n\nvia apply.\n', expect_version: 0 }];
+    const plan = parse<{ status: string; confirm_token: string; ops: { status: string }[] }>(await client.callTool({ name: 'apply', arguments: { ops, dry_run: true } }));
+    expect(plan.status).toBe('planned');
+    expect(store.docs.getDocument('mcp-apply')).toBeNull();
+    const done = parse<{ status: string; receipt: { seq: number } }>(await client.callTool({ name: 'apply', arguments: { ops, confirm_token: plan.confirm_token } }));
+    expect(done.status).toBe('committed');
+    expect(store.chain.get(done.receipt.seq)!.event_type).toBe('apply.committed');
+    const again = (await client.callTool({ name: 'apply', arguments: { ops, confirm_token: plan.confirm_token } })) as ToolResult;
+    expect(again.isError).toBe(true);
+    expect(JSON.parse(textOf(again))).toMatchObject({ error: 'confirm_used' });
   });
 
   it('pulse is cheap and surfaces drift after many events', async () => {

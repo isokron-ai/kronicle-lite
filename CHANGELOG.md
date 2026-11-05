@@ -34,9 +34,26 @@ uses semantic versioning once past 0.x.
   docs/EVIDENCE-BUNDLE.md is the verification procedure; a pass (or an
   anchor) proves integrity and existence, not that the audit is correct.
 
+### Added — `apply`: transactional batch writes with preview
+
+- `apply` (MCP tool; `store.applier`): up to 50 put / supersede / tombstone
+  ops in one local SQLite transaction (`all_or_nothing`, default) or
+  per-op savepoints (`best_effort`); `expect_version` per op; one
+  `apply.committed` chain event per commit (plan hash, result hash, per-op
+  receipts); `idempotency_key` replays the committed result, a different
+  plan under it is refused. `dry_run` executes and always rolls back
+  (exact diffs) and returns a single-use, expiring `confirm_token` bound to
+  plan hash, actor, tenant, sandbox, server, catalog fingerprint, resource
+  ids and versions, policy version, nonce and idempotency key; the commit
+  re-validates all of it inside its transaction (`stale_plan` on any state
+  change) and re-checks authorization per op (the token authorizes
+  nothing). docs/APPLY.md.
+
 ### Changed
 
-- Catalog: two new tools and a batch-capable `verify` (full and core
+- Catalog pins moved to `src/catalog-pin.ts` (no imports; apply binds the
+  fingerprint), re-exported from `src/catalog.ts`.
+- Catalog: three new tools (`apply`, `audit_record`, `audit_query`) and a batch-capable `verify` (full and core
   catalogs re-snapshotted; `CATALOG_VERSION` 0.9.0). Existing tools,
   hashes, receipts and cursors are unchanged; stores from 0.8.x open and
   gain the new tables on first open.

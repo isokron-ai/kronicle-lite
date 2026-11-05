@@ -6,7 +6,7 @@
  * CATALOG_FINGERPRINT is the `sha256` that `npm run catalog:snapshot` pins in
  * .mcp-catalog/kronicle-lite.json; test/catalog.test.ts fails when either the
  * constant, the snapshot or the package version disagree, so re-snapshotting
- * means updating this file in the same commit.
+ * means updating src/catalog-pin.ts in the same commit.
  *
  * Fingerprint recipe (mcp-catalog-snap/1): sha256 of the RFC 8785 JSON of
  * { tools (by name), prompts (by name), resourceTemplates (by uriTemplate) }.
@@ -19,11 +19,7 @@ import { sha256Hex } from './crypto/hash.js';
 import { createServerFactory } from './server.js';
 import { KronicleLite } from './store.js';
 
-export const CATALOG_FINGERPRINT = 'c91e266e583bb7c1239549c427ca3ae19011da42f6ed8c853d98481c41d86c33';
-/** Package version the fingerprint above was pinned for. */
-export const CATALOG_VERSION = '0.9.0';
-/** 0.6.0: the `serve --core` catalog (.mcp-catalog/kronicle-lite-core.json). */
-export const CORE_CATALOG_FINGERPRINT = '18a336bb3830da7d04420c2d3344b952603e51fd08941ab54bc0b79bda7a2da4';
+export { CATALOG_FINGERPRINT, CATALOG_VERSION, CORE_CATALOG_FINGERPRINT } from './catalog-pin.js';
 
 const MODERN = '2026-07-28';
 
