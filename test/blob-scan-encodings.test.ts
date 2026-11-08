@@ -4,11 +4,11 @@
  * whose body is gzip, brotli, raw deflate, UTF-16LE after 4 KB of ASCII, and
  * UTF-16BE. Each is now decoded and refused; nesting past the limit is flagged.
  */
-import { brotliCompressSync, deflateRawSync, deflateSync, gzipSync } from 'node:zlib';
+import { brotliCompressSync, deflateRawSync, deflateSync, gzipSync, inflateRawSync } from 'node:zlib';
 
 import { describe, expect, it } from 'vitest';
 
-import { scanBlob } from '../src/audit/blob-scan.js';
+import { MAX_SCAN_BYTES, MAX_SCAN_WORK, scanBlob } from '../src/audit/blob-scan.js';
 import { KronicleLite } from '../src/index.js';
 import { SecretDetectedError } from '../src/secrets/guard.js';
 
@@ -89,4 +89,46 @@ describe('#15 what the scan cannot decode is flagged, not passed silently', () =
     for (let i = 0; i < prng.length; i++) prng[i] = (x = (x * 1103515245 + 12345) >>> 0) >>> 24;
     expect(scanBlob(prng).unscanned_encoding).toBe(false);
   });
+});
+
+describe('#15 review: brotli that raw deflate "decodes" first, and bombs', () => {
+  const hidden = brotliCompressSync(Buffer.concat([Buffer.alloc(1024 * 1024), Buffer.from(`token=${GHP}\n`)]));
+  it('brotli of 1 MB of zeros + a token (raw deflate decodes it too, to junk) is refused, bare and in base64', () => {
+    expect(hidden.length).toBeLessThan(200);
+    expect(inflateRawSync(hidden).length).toBeGreaterThan(0); // the decoder that used to win
+    for (const bytes of [hidden, b64(hidden)]) {
+      expect(scanBlob(bytes).encoded.map((f) => f.detector)).toContain('github_token');
+      const kl = new KronicleLite({ memory: true });
+      expect(() => kl.audit.putBlob(bytes, 'application/octet-stream')).toThrow(SecretDetectedError);
+      kl.close();
+    }
+  });
+  it('a tiny brotli bomb (17 MB of output) is flagged unscanned_encoding, bare and in base64', () => {
+    const bomb = brotliCompressSync(Buffer.alloc(17 * 1024 * 1024));
+    expect(bomb.length).toBeLessThan(100);
+    expect(scanBlob(bomb).unscanned_encoding).toBe(true);
+    expect(scanBlob(b64(bomb)).unscanned_encoding).toBe(true);
+  });
+});
+
+describe('#15 review: the work one blob can cost is bounded', () => {
+  const bomb = brotliCompressSync(Buffer.alloc(17 * 1024 * 1024));
+  it('63 brotli bombs in one view, and 4,000 base64-wrapped copies: a few decoder calls, flagged', () => {
+    const declared = Buffer.concat(Array.from({ length: 63 }, () => http('br', bomb)));
+    const wrapped = Buffer.from(Array.from({ length: 4000 }, () => bomb.toString('base64')).join(' '));
+    for (const blob of [declared, wrapped]) {
+      const s = scanBlob(blob);
+      expect(s.unscanned_encoding).toBe(true);
+      expect(s.cost.work).toBeLessThanOrEqual(MAX_SCAN_WORK);
+      // Each capped stream is charged the whole 16 MB cap: the 48 MB decode budget allows 3, then nothing more is decoded.
+      expect(s.cost.decoder_calls).toBeLessThan(20);
+    }
+  }, 60_000);
+  it('a 32 MB view with 60 gzip member headers stops at MAX_SCAN_WORK, flagged', () => {
+    const big = Buffer.alloc(MAX_SCAN_BYTES, 0x20);
+    for (let i = 0; i < 60; i++) Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0, 3]).copy(big, 1 + i * 500_000);
+    const s = scanBlob(big);
+    expect(s.unscanned_encoding).toBe(true);
+    expect(s.cost.work).toBeLessThanOrEqual(MAX_SCAN_WORK);
+  }, 60_000);
 });
