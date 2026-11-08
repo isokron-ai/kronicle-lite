@@ -115,6 +115,12 @@ uses semantic versioning once past 0.x.
     missing-table branch: a store whose chain holds audit events but has no
     `audit_events` table is a divergence (`verifyAll` not ok, `verify-chain`
     exit 1). Before, making the branch return null failed no test.
+  - **Linear secret-guard bookkeeping (#15 review).** Each write-time match
+    was checked against every earlier one for overlap, and its line number
+    was counted from the start of the text: both quadratic in the number of
+    matches. A 2 MB blob of AWS keys took 15 s (32 MB about 6 min); now
+    0.16 s. Matches are merged with a forward sweep and lines counted in one
+    pass; same findings.
 
 ### Added — `apply`: transactional batch writes with preview
 
