@@ -135,6 +135,11 @@ uses semantic versioning once past 0.x.
     decoding stops (flag `unscanned_encoding`) instead of blocking.
   - **The overlap-linearity test can fail (#24).** It asserts the step
     counter is live; with the old quadratic check restored it fails.
+  - **No false `unscanned_encoding` on base64'd Windows gzip (#24 CI).** A
+    base64 run is also read as base64url pieces (split at `+` / `/`); a piece
+    of base64'd gzip whose OS byte is 0x0a decoded to a truncated gzip header
+    and was flagged. A run strictly inside the other alphabet's run is now a
+    fragment: still decoded and scanned, but its gzip header is not flagged.
 
 ### Added — `apply`: transactional batch writes with preview
 

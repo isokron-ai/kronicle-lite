@@ -49,10 +49,10 @@ describe('#24 blob scan: regex passes are charged, time is bounded', () => {
     // 64 gzip views of 256 KB, base64-wrapped: about 64 × 256 KB × REGEX_PASSES units to scan them all.
     const blob = Buffer.from(Array.from({ length: 64 }, (_, i) => gzipSync(Buffer.from(`#${i}` + ' '.repeat(256 * 1024))).toString('base64')).join(' '));
     const cap = 64 * 256 * 1024 * REGEX_PASSES * 0.5;
-    const s = scanBlob(blob, { max_work: cap });
+    const s = scanBlob(blob, { max_work: cap, clock: () => 0 });
     expect(s.unscanned_encoding).toBe(true);
     expect(s.cost.work).toBeLessThanOrEqual(cap);
-    const whole = scanBlob(blob);
+    const whole = scanBlob(blob, { clock: () => 0 });
     expect(whole.unscanned_encoding).toBe(false);
     expect(whole.cost.work).toBeGreaterThan(cap);
   });

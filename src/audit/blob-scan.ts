@@ -195,7 +195,7 @@ export function scanBlob(bytes: Buffer, opts: { clock?: () => number; max_work?:
     return true;
   };
   let views = 0;
-  const visit = (b: Buffer, via: string, depth: number) => {
+  const visit = (b: Buffer, via: string, depth: number, fragment = false) => {
     if (depth > MAX_NESTING || ++views > MAX_VIEWS) {
       if (looksEncoded(b)) out.unscanned_encoding = true;
       return;
@@ -204,7 +204,7 @@ export function scanBlob(bytes: Buffer, opts: { clock?: () => number; max_work?:
     if (!spend(n)) return; // the passes below each read the view once
     // Compressed streams: at the start (gzip, zlib, or headerless raw deflate / brotli), after an
     // HTTP header block that declares a Content-Encoding, and at each gzip member header.
-    const starts = streamStarts(b, n);
+    const starts = streamStarts(b, n, !fragment);
     if (starts === 'too_many') out.unscanned_encoding = true;
     else
       for (const st of starts) {
@@ -226,6 +226,33 @@ export function scanBlob(bytes: Buffer, opts: { clock?: () => number; max_work?:
     // base64 / base64url segments
     let segments = 0;
     const seen = new Map<number, number>();
+    // Runs with the alphabet's own characters (+ / or - _), to tell a fragment: a run strictly inside
+    // one of the OTHER alphabet's is probably a piece of it, decoded misaligned (still scanned, but a
+    // gzip header that does not decode there is not flagged; #24: base64'd gzip, decoded as
+    // base64url pieces, was flagged corrupt).
+    const own = { base64: [] as [number, number][], base64url: [] as [number, number][] };
+    for (const [inSet, enc] of [
+      [inB64, 'base64'],
+      [inB64url, 'base64url'],
+    ] as const) {
+      let k = 0;
+      for (const [s0, e0, alnum] of runs(b, n, inSet, enc === 'base64')) {
+        if (!alnum) own[enc].push([s0, e0]);
+        if (++k > MAX_SEGMENTS) break;
+      }
+    }
+    const fragmentOf = (list: [number, number][], s0: number, e0: number): boolean => {
+      let lo = 0;
+      let hi = list.length - 1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        const [S, E] = list[mid]!;
+        if (E < e0) lo = mid + 1;
+        else if (S > s0) hi = mid - 1;
+        else return S < s0 || E > e0;
+      }
+      return false;
+    };
     for (const [inSet, enc] of [
       [inB64, 'base64'],
       [inB64url, 'base64url'],
@@ -244,7 +271,7 @@ export function scanBlob(bytes: Buffer, opts: { clock?: () => number; max_work?:
           out.unscanned_encoding = true;
           continue;
         }
-        scanView(Buffer.from(b.toString('latin1', s, e), enc), `${via}+base64`, depth);
+        scanView(Buffer.from(b.toString('latin1', s, e), enc), `${via}+base64`, depth, fragmentOf(own[enc === 'base64' ? 'base64url' : 'base64'], s, e));
       }
     }
   };
@@ -299,10 +326,10 @@ export function scanBlob(bytes: Buffer, opts: { clock?: () => number; max_work?:
   };
   /** Each window of a decoded view: charged REGEX_PASSES per character (and the time budget checked) before it is scanned. */
   const regexGate = (chars: number) => spend(chars * REGEX_PASSES);
-  const scanView = (b: Buffer, via: string, depth: number) => {
+  const scanView = (b: Buffer, via: string, depth: number, fragment = false) => {
     const r = scanLatin1(b, Math.min(b.byteLength, MAX_SCAN_BYTES), via, regexGate);
     out.encoded.push(...r.findings);
-    if (!r.stopped) visit(b, via, depth + 1);
+    if (!r.stopped) visit(b, via, depth + 1, fragment);
   };
   visit(bytes, 'blob', 0);
   return out;
@@ -316,8 +343,8 @@ type Encoding = 'gzip' | 'deflate' | 'br' | 'unknown' | null;
  * line (that encoding), where a failure to decode is flagged (`sure`); and each
  * later gzip member header, where a failure may be a coincidence in binary.
  */
-function streamStarts(b: Buffer, n: number): { at: number; encoding: Encoding; sure: boolean }[] | 'too_many' {
-  const out: { at: number; encoding: Encoding; sure: boolean }[] = [{ at: 0, encoding: null, sure: true }];
+function streamStarts(b: Buffer, n: number, sureAtStart: boolean): { at: number; encoding: Encoding; sure: boolean }[] | 'too_many' {
+  const out: { at: number; encoding: Encoding; sure: boolean }[] = [{ at: 0, encoding: null, sure: sureAtStart }];
   let from = 0;
   for (let i = b.indexOf('\r\n\r\n', 0, 'latin1'); i >= 0 && i < n; i = b.indexOf('\r\n\r\n', i + 1, 'latin1')) {
     if (i - from <= MAX_HEADER_BLOCK) {

@@ -137,3 +137,23 @@ describe('#15 review: the work one blob can cost is bounded', () => {
     expect(s.cost.work).toBeLessThanOrEqual(MAX_SCAN_WORK);
   }, 60_000);
 });
+
+describe('#24: a piece of a base64 run read as base64url is a fragment', () => {
+  // gzip's OS byte is 0x0a on Windows: the base64 then splits (at + or /) into base64url pieces, and the first
+  // piece decodes to a truncated gzip header. That is not an undecodable stream: no flag, and secrets are still found.
+  const gz = (body: Buffer) => {
+    const g = gzipSync(body);
+    g[9] = 0x0a;
+    return g;
+  };
+  it('base64 of a Windows-made gzip is not flagged; a token inside it is still refused', () => {
+    const clean = b64(gz(Buffer.from('#0' + ' '.repeat(256 * 1024))));
+    expect(clean.includes('+') || clean.includes('/')).toBe(true);
+    expect(scanBlob(clean).unscanned_encoding).toBe(false);
+    expect(scanBlob(b64(gz(Buffer.concat([Buffer.from(' '.repeat(256 * 1024)), SECRET])))).encoded.map((f) => f.detector)).toContain('github_token');
+  });
+  it('a truncated gzip that is a run of its own (not a piece) is still flagged', () => {
+    const cut = gzipSync(Buffer.from('a'.repeat(5000))).subarray(0, 30);
+    expect(scanBlob(b64(cut)).unscanned_encoding).toBe(true);
+  });
+});
