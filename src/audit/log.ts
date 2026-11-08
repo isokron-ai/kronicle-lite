@@ -16,8 +16,8 @@ import type { Chain, ChainEvent } from '../chain/index.js';
 import { canonicalize } from '../crypto/canonical.js';
 import { sha256Hex } from '../crypto/hash.js';
 import type { Db } from '../db/open.js';
-import { redactSecrets, scanValue, SecretDetectedError } from '../secrets/guard.js';
-import { scanBlob } from './blob-scan.js';
+import { scanValue, SecretDetectedError } from '../secrets/guard.js';
+import { scanBlob, scanFlags, type ScanFlag } from './blob-scan.js';
 import {
   auditEventType,
   auditIdentity,
@@ -97,7 +97,7 @@ export interface BlobRow {
   size: number;
   media_type: string | null;
   bytes: Buffer;
-  /** 'unscanned_encoding' when a view could not be decoded within the scan cap. */
+  /** Comma-separated scan flags: 'unscanned_encoding' (a view could not be decoded within the cap), 'unscanned_size' (larger than MAX_SCAN_BYTES). */
   flags: string | null;
 }
 
@@ -133,14 +133,15 @@ export class AuditLog {
    * `[REDACTED:<detector>]` and returns the count as `redactions` (the ref is
    * the redacted copy's hash); a match only visible after decoding cannot be
    * redacted in place and is refused in either mode. A view that cannot be
-   * decoded within the cap is stored, flagged `unscanned: ['unscanned_encoding']`
-   * (also in the blobs table and the bundle manifest).
+   * decoded within the cap is stored, flagged `unscanned: ['unscanned_encoding']`;
+   * one larger than MAX_SCAN_BYTES is scanned up to it and flagged
+   * `unscanned_size` (also in the blobs table and the bundle manifest).
    */
   putBlob(
     bytes: Uint8Array,
     media_type?: string,
     opts: { secrets?: 'refuse' | 'redact' } = {},
-  ): { sha256: string; size: number; media_type?: string; redactions?: number; unscanned?: ['unscanned_encoding'] } {
+  ): { sha256: string; size: number; media_type?: string; redactions?: number; unscanned?: ScanFlag[] } {
     if (bytes.byteLength > MAX_BLOB_BYTES) throw new AuditError('blob_too_large', `blob is ${bytes.byteLength} bytes; the limit is ${MAX_BLOB_BYTES}`);
     let body = Buffer.from(bytes);
     let redactions = 0;
@@ -148,20 +149,27 @@ export class AuditLog {
     if (scan.encoded.length > 0) throw new SecretDetectedError(scan.encoded, 'this blob (inside an encoding)', 'decode and redact it before storing; an encoded secret cannot be redacted in place');
     if (scan.raw.length > 0) {
       if (opts.secrets !== 'redact') throw new SecretDetectedError(scan.raw, 'this blob', 'redact it first, or put it with secrets: "redact" (CLI --redact-secrets)');
-      const r = redactSecrets(body.toString('latin1'), 'blob');
-      body = Buffer.from(r.text, 'latin1');
-      redactions = r.findings.length;
+      const parts: Buffer[] = [];
+      let pos = 0;
+      for (const m of scan.raw_spans) {
+        parts.push(body.subarray(pos, m.start), Buffer.from(`[REDACTED:${m.detector}]`, 'latin1'));
+        pos = m.end;
+      }
+      parts.push(body.subarray(pos));
+      body = Buffer.concat(parts);
+      redactions = scan.raw_spans.length;
     }
+    const flags = scanFlags(scan);
     const sha256 = blobHash(body);
     this.db
       .prepare(`INSERT OR IGNORE INTO blobs (sha256, size, media_type, bytes, created_at, flags) VALUES (?, ?, ?, ?, ?, ?)`)
-      .run(sha256, body.byteLength, media_type ?? null, body, new Date().toISOString(), scan.unscanned_encoding ? 'unscanned_encoding' : null);
+      .run(sha256, body.byteLength, media_type ?? null, body, new Date().toISOString(), flags.length > 0 ? flags.join(',') : null);
     return {
       sha256,
       size: body.byteLength,
       ...(media_type !== undefined ? { media_type } : {}),
       ...(redactions > 0 ? { redactions } : {}),
-      ...(scan.unscanned_encoding ? { unscanned: ['unscanned_encoding'] as ['unscanned_encoding'] } : {}),
+      ...(flags.length > 0 ? { unscanned: flags } : {}),
     };
   }
 

@@ -305,7 +305,8 @@ CREATE TABLE IF NOT EXISTS blobs (
   media_type TEXT,
   bytes      BLOB NOT NULL,
   created_at TEXT NOT NULL,
-  -- 'unscanned_encoding': a view (gzip, deflate…) could not be decoded within the scan cap.
+  -- Comma-separated scan flags: 'unscanned_encoding' (a view could not be decoded
+  -- within the cap), 'unscanned_size' (bytes past the scan cap were not scanned).
   flags      TEXT
 );
 

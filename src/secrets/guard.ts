@@ -40,6 +40,8 @@ interface Detector {
   valueGroup?: number;
   /** Extra check on the whole match (e.g. requires a digit). */
   accept?: (match: string) => boolean;
+  /** 0.9.0: a linear-time matcher with exactly `re`'s matches, used instead of `re` (which backtracks quadratically on hostile input). */
+  find?: (text: string) => Iterable<{ index: number; 0: string; [group: number]: string | undefined }>;
 }
 
 const hasDigit = (s: string) => /[0-9]/.test(s);
@@ -85,6 +87,62 @@ const passwordValueOk = (m: string): boolean => {
   return v.length >= 12 && classes >= 3;
 };
 
+/**
+ * 0.9.0: the private_key detector's matches without its regex. The regex
+ * (kept as the documented shape) backtracks: a 64 KB run of BEGIN headers
+ * with no END took 8 s, a 1 MB body line over a minute. Same language:
+ * BEGIN header, then within 0-8 lines (each `A*B*\n`) a line `A*` + 40 base64
+ * chars, then the FIRST END marker after that. Linear: every scan moves
+ * forward, and the next-END lookup is memoised across BEGINs.
+ */
+const PK_BEGIN = /-----BEGIN (?:[A-Z]+ )*PRIVATE KEY(?: BLOCK)?-----[ \t"',]*\r?\n/g;
+const PK_END = /-----END (?:[A-Z]+ )*PRIVATE KEY(?: BLOCK)?-----/g;
+const PK_PREFIX = new Set([...' \t>*+#"\'-']);
+const PK_LINE = new Set([...'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=:- ']);
+const isB64 = (c: string | undefined) => c !== undefined && /[A-Za-z0-9+/=]/.test(c);
+function* findPrivateKeys(text: string): Generator<{ index: number; 0: string; [group: number]: string | undefined }> {
+  const begin = new RegExp(PK_BEGIN.source, 'g');
+  const end = new RegExp(PK_END.source, 'g');
+  let memoFrom = -1;
+  let memo: { start: number; stop: number } | null = null;
+  const nextEnd = (p: number) => {
+    if (memoFrom >= 0 && p >= memoFrom && (memo === null || p <= memo.start)) return memo;
+    end.lastIndex = p;
+    const m = end.exec(text);
+    memoFrom = p;
+    memo = m ? { start: m.index, stop: m.index + m[0].length } : null;
+    return memo;
+  };
+  for (let m = begin.exec(text); m !== null; m = begin.exec(text)) {
+    let q = m.index + m[0].length;
+    let body = -1;
+    for (let line = 0; line <= 8 && body < 0; line++) {
+      let a = q;
+      while (a < text.length && PK_PREFIX.has(text[a]!)) a++;
+      let k = a;
+      while (k > q && text[k - 1] === '+') k--;
+      let r = k;
+      while (r < text.length && r - k < 40 && isB64(text[r])) r++;
+      if (r - k >= 40) body = r;
+      else {
+        let b = a;
+        while (b < text.length && PK_LINE.has(text[b]!)) b++;
+        if (text[b] === '\r') b++;
+        if (text[b] !== '\n') break;
+        q = b + 1;
+      }
+    }
+    if (body < 0) {
+      begin.lastIndex = m.index + 1;
+      continue;
+    }
+    const e = nextEnd(body);
+    if (e === null) return; // no END after this body: none after any later one either
+    yield { index: m.index, 0: text.slice(m.index, e.stop) };
+    begin.lastIndex = e.stop;
+  }
+}
+
 /** Write-time ruleset (refuse / redact). Order matters: specific shapes before generic ones. */
 export const WRITE_DETECTORS: readonly Detector[] = [
   {
@@ -93,6 +151,7 @@ export const WRITE_DETECTORS: readonly Detector[] = [
     // 0.8.1 (R2-10): body lines may carry any line prefix: indentation (YAML block
     // scalar, list item), block quote `>`, list markers, comment `#`, quotes.
     re: /-----BEGIN (?:[A-Z]+ )*PRIVATE KEY(?: BLOCK)?-----[ \t"',]*\r?\n(?:[ \t>*+#"'-]*[A-Za-z0-9+/=:\- ]*\r?\n){0,8}?[ \t>*+#"'-]*[A-Za-z0-9+/=]{40,}[\s\S]*?-----END (?:[A-Z]+ )*PRIVATE KEY(?: BLOCK)?-----/g,
+    find: findPrivateKeys,
   },
   { id: 'aws_access_key', description: 'AWS access key id', re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, accept: (m) => !m.includes('EXAMPLE') },
   {
@@ -170,17 +229,23 @@ interface Match {
  * char i. Stored and served text is never normalised.
  */
 const INVISIBLE = /[\u00AD\u200B-\u200D\u2060\uFEFF]/;
-function stripInvisible(text: string): { text: string; map: number[] | null } {
+function stripInvisible(text: string): { text: string; map: Uint32Array | null } {
   if (!INVISIBLE.test(text)) return { text, map: null };
-  let out = '';
-  const map: number[] = [];
+  // 0.9.0 (#15): slices and a typed map, not a char-by-char string and a number[] (a 60 MB blob took 2.2 GB).
+  const map = new Uint32Array(text.length + 1);
+  const parts: string[] = [];
+  let k = 0;
+  let from = 0;
   for (let i = 0; i < text.length; i++) {
-    if (INVISIBLE.test(text[i]!)) continue;
-    out += text[i];
-    map.push(i);
+    const c = text.charCodeAt(i);
+    if (c === 0xad || (c >= 0x200b && c <= 0x200d) || c === 0x2060 || c === 0xfeff) {
+      parts.push(text.slice(from, i));
+      from = i + 1;
+    } else map[k++] = i;
   }
-  map.push(text.length);
-  return { text: out, map };
+  parts.push(text.slice(from));
+  map[k] = text.length;
+  return { text: parts.join(''), map };
 }
 
 function matchAll(text: string, detectors: readonly Detector[]): Match[] {
@@ -194,7 +259,7 @@ function matchAllRaw(text: string, detectors: readonly Detector[]): Match[] {
   const out: Match[] = [];
   for (const d of detectors) {
     d.re.lastIndex = 0;
-    for (const m of text.matchAll(d.re)) {
+    for (const m of d.find ? d.find(text) : text.matchAll(d.re)) {
       const start = m.index ?? 0;
       const end = start + m[0].length;
       if (d.valueGroup !== undefined && isPlaceholder(m[d.valueGroup] ?? '')) continue;
@@ -205,6 +270,11 @@ function matchAllRaw(text: string, detectors: readonly Detector[]): Match[] {
     }
   }
   return out.sort((a, b) => a.start - b.start);
+}
+
+/** 0.9.0: write-time matches with their offsets (blob scan windows and redacts by span). */
+export function secretSpans(text: string): { detector: string; start: number; end: number }[] {
+  return matchAll(text, WRITE_DETECTORS);
 }
 
 /** Write-time scan. Returns one finding per match (field defaults to `text`); never the matched text. */

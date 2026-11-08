@@ -48,7 +48,7 @@ export interface BundleManifest {
   events: { seq: number; event_id: string; event_type: string; this_hash: string }[];
   /** Events in range that are stubs (other events; payload withheld), with the hash each one must carry. */
   stubs: { seq: number; this_hash: string }[];
-  blobs: { sha256: string; size: number; media_type: string | null; unscanned_encoding?: true }[];
+  blobs: { sha256: string; size: number; media_type: string | null; unscanned_encoding?: true; unscanned_size?: true }[];
   /** Refs declared `redacted: true` at record time: deliberately never stored. */
   redacted: { sha256: string; size: number; referenced_by: string[] }[];
   /** Refs to blobs the store no longer holds (should be empty; listed, never hidden). */
@@ -168,7 +168,14 @@ export function exportBundle(args: { chain: Chain; audit: AuditLog; signer: Sign
       continue;
     }
     writeNew(join(dir, 'blobs', sha256), b.bytes);
-    blobs.push({ sha256, size: b.size, media_type: b.media_type, ...(b.flags === 'unscanned_encoding' ? { unscanned_encoding: true as const } : {}) });
+    const flags = (b.flags ?? '').split(',');
+    blobs.push({
+      sha256,
+      size: b.size,
+      media_type: b.media_type,
+      ...(flags.includes('unscanned_encoding') ? { unscanned_encoding: true as const } : {}),
+      ...(flags.includes('unscanned_size') ? { unscanned_size: true as const } : {}),
+    });
   }
   const eventsText = lines.map(canonicalLine).join('');
   writeNew(join(dir, 'events.jsonl'), eventsText);

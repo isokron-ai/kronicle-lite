@@ -28,7 +28,13 @@ Source: `src/audit/`. Bundles: [EVIDENCE-BUNDLE.md](EVIDENCE-BUNDLE.md).
 - **Undecodable views.** A view that cannot be decoded within the cap (a gzip
   bomb, a truncated stream) is scanned as raw bytes only. The blob is stored
   flagged `unscanned: ["unscanned_encoding"]`, and the bundle manifest marks it
-  with `unscanned_encoding: true`.
+  with `unscanned_encoding: true`. So is a base64 run that would decode to
+  more than 16 MB.
+- **Size cap.** The scan reads the first 32 MB of a blob (raw bytes and their
+  views), in windows, so memory stays bounded. A larger blob is stored flagged
+  `unscanned: ["unscanned_size"]` (manifest: `unscanned_size: true`): bytes past
+  32 MB were not scanned. A match longer than 512 KB that crosses a 2 MB window
+  boundary can be cut short or, for a private key block, missed.
 
 ## Recording
 

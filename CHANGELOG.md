@@ -60,6 +60,19 @@ uses semantic versioning once past 0.x.
   - **Encoded secrets:** the blob scan decodes gzip / deflate, UTF-16LE,
     base64 and base64url (nested). Anything it cannot decode within the cap
     is flagged `unscanned_encoding`.
+  - **Scan limits (#15).** A single base64 or alphanumeric run of 8 MB made
+    the blob scan throw `RangeError: Maximum call stack size exceeded` (a
+    regex); runs are now found by a loop. A 60 MB random binary took 2.2 GB of
+    heap; the scan now reads the blob in 2 MB windows (512 KB overlap) and
+    stops at 32 MB: a larger blob is stored flagged `unscanned_size` (put
+    result, `blobs.flags`, bundle manifest). `blobs.flags` is now
+    comma-separated. A base64 run that would decode past 16 MB is flagged
+    `unscanned_encoding` instead of decoded.
+  - **Private key detector in linear time (#15).** The write-time
+    `private_key` regex backtracked: 64 KB of BEGIN headers with no END took
+    8 s, a 1 MB body line over a minute, in `put_document` as well as blobs.
+    It is now matched by a linear scan with the same matches (property test
+    against the regex). The detector's `re` is unchanged for display.
 
 ### Added — `apply`: transactional batch writes with preview
 
