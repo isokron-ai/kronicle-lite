@@ -27,7 +27,7 @@
  * versions are the same (AST-equivalent, identical text leaves).
  */
 
-import { bestEffortWrite } from '../db/storage.js';
+import { bestEffortWrite, lineageGapsState } from '../db/storage.js';
 import type BetterSqlite3 from 'better-sqlite3';
 
 import type { Chain } from '../chain/index.js';
@@ -342,6 +342,10 @@ export class Lineage {
         if (!s || s.hash !== v.hash || s.chain_seq !== v.chain_seq) return `doc_lineage for document ${d}: edge ${k.split('|')[0]} does not match the chain`;
       }
     }
+    // A 0.8.0 store opened read-only has no gaps table yet: nothing derived, nothing to diverge.
+    const gapsState = lineageGapsState(this.db);
+    if (gapsState === 'not_derived') return null;
+    if (gapsState === 'missing') return 'doc_lineage_gaps: the table is missing (the store ran its migration)';
     const gaps = docs
       ? docs.flatMap((d) => this.q(`SELECT doc_id, chain_seq FROM doc_lineage_gaps WHERE doc_id = ?`).all(d) as { doc_id: string; chain_seq: number }[])
       : (this.q(`SELECT doc_id, chain_seq FROM doc_lineage_gaps`).all() as { doc_id: string; chain_seq: number }[]);
@@ -352,6 +356,8 @@ export class Lineage {
 
   /** 0.8.1: the write that recorded a gap in this note's inferred lineage (doc_lineage_gaps), or null. */
   gapSeq(doc_id: string): number | null {
+    // Not derived yet (a 0.8.0 store opened read-only) or lost: answer from the chain.
+    if (lineageGapsState(this.db) !== 'present') return this.replay().gaps.get(doc_id) ?? null;
     return (this.q(`SELECT chain_seq FROM doc_lineage_gaps WHERE doc_id = ?`).get(doc_id) as { chain_seq: number } | undefined)?.chain_seq ?? null;
   }
 

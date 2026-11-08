@@ -81,3 +81,15 @@ export function markWriter(db: { prepare(sql: string): { run(...a: unknown[]): u
   db.prepare(`INSERT INTO meta (key, value) VALUES ('writer_head_seq', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(String(seq));
   db.prepare(`INSERT INTO meta (key, value) VALUES ('writer_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(version);
 }
+
+/**
+ * 0.9.0: the state of 0.8.1's `doc_lineage_gaps` table. A store made by 0.8.0
+ * and opened read-only (verify-chain, doctor, a read-only medium) is never
+ * migrated: the table does not exist yet and nothing has been derived into it
+ * (`not_derived`), which is not a divergence. A store that ran the migration
+ * (`meta` key `migration.lineage_gaps`) but has lost the table is (`missing`).
+ */
+export function lineageGapsState(db: { prepare(sql: string): { get(...a: unknown[]): unknown } }): 'present' | 'not_derived' | 'missing' {
+  if (db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'doc_lineage_gaps'`).get() !== undefined) return 'present';
+  return db.prepare(`SELECT 1 FROM meta WHERE key = 'migration.lineage_gaps'`).get() !== undefined ? 'missing' : 'not_derived';
+}

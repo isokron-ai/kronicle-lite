@@ -28,6 +28,7 @@ import { recomputeEventHash } from '../chain/event.js';
 import { blake3Hex } from '../crypto/hash.js';
 import type { Db } from '../db/open.js';
 import { SCHEMA_SQL } from '../db/schema.js';
+import { lineageGapsState } from '../db/storage.js';
 import { isPayloadUnparseable } from '../chain/index.js';
 import { DocumentStore } from './documents.js';
 
@@ -226,6 +227,15 @@ export function verifyProjection(db: Db, chain: Chain): ProjectionResult {
 
     const counts: Record<string, number> = {};
     for (const t of TABLES) {
+      if (t.table === 'doc_lineage_gaps') {
+        // A 0.8.0 store opened read-only (never migrated) has not derived this table yet.
+        const st = lineageGapsState(db);
+        if (st === 'not_derived') continue;
+        if (st === 'missing') {
+          report({ table: t.table, key: 'table', field: 'missing', detail: 'the table is missing although the store ran its migration' });
+          continue;
+        }
+      }
       const sql = (d: Db) =>
         d.prepare(`SELECT ${t.key} AS k, ${t.cols.join(', ')} FROM ${t.table} ORDER BY ${t.order}`).all() as Record<string, unknown>[];
       const want = new Map(sql(mem).map((r) => [String(r['k']), r]));
