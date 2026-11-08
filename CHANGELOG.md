@@ -97,6 +97,10 @@ uses semantic versioning once past 0.x.
     until TTL. The table now holds at most 10,000 rows (`MAX_CONFIRMATIONS`);
     a new preview evicts the oldest first. Denial of service only, documented
     in docs/APPLY.md.
+  - **Canonical MAC (#15).** The token MAC (32 bytes in 43 base64url
+    characters, so 2 unused bits in the last one) was compared after decoding,
+    so 4 spellings of every MAC verified. It is now compared as the canonical
+    base64url string.
 
 ### Added — `apply`: transactional batch writes with preview
 
