@@ -8,7 +8,7 @@ import { brotliCompressSync, deflateRawSync, deflateSync, gzipSync, inflateRawSy
 
 import { describe, expect, it } from 'vitest';
 
-import { MAX_SCAN_BYTES, MAX_SCAN_WORK, scanBlob } from '../src/audit/blob-scan.js';
+import { MAX_DECODED_BYTES, MAX_SCAN_BYTES, MAX_SCAN_WORK, scanBlob } from '../src/audit/blob-scan.js';
 import { KronicleLite } from '../src/index.js';
 import { SecretDetectedError } from '../src/secrets/guard.js';
 
@@ -124,9 +124,14 @@ describe('#15 review: the work one blob can cost is bounded', () => {
       expect(s.cost.decoder_calls).toBeLessThan(20);
     }
   }, 60_000);
-  it('a 32 MB view with 60 gzip member headers stops at MAX_SCAN_WORK, flagged', () => {
+  it('a 32 MB view and a 16 MB gzip view, each with 62 gzip member headers, stop at MAX_SCAN_WORK, flagged', () => {
+    const HDR = Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0, 3]);
+    const inner = Buffer.alloc(MAX_DECODED_BYTES, 0x20);
+    for (let i = 0; i < 62; i++) HDR.copy(inner, 1 + i * 16);
+    const z = gzipSync(inner);
     const big = Buffer.alloc(MAX_SCAN_BYTES, 0x20);
-    for (let i = 0; i < 60; i++) Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0, 0, 0, 0, 0, 3]).copy(big, 1 + i * 500_000);
+    z.copy(big, 0);
+    for (let i = 0; i < 62; i++) HDR.copy(big, z.length + 1 + i * 16);
     const s = scanBlob(big);
     expect(s.unscanned_encoding).toBe(true);
     expect(s.cost.work).toBeLessThanOrEqual(MAX_SCAN_WORK);

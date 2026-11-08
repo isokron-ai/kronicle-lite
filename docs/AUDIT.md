@@ -41,7 +41,10 @@ Source: `src/audit/`. Bundles: [EVIDENCE-BUNDLE.md](EVIDENCE-BUNDLE.md).
 - **Size cap.** The scan reads the first 32 MB of a blob (raw bytes and their
   views), in windows, so memory stays bounded. A larger blob is stored flagged
   `unscanned: ["unscanned_size"]` (manifest: `unscanned_size: true`): bytes past
-  32 MB were not scanned. A match longer than 512 KB that crosses a 2 MB window
+  32 MB were not scanned. The scan also has a time budget (30 s per blob,
+  checked between 2 MB windows): when it runs out, the rest of the raw bytes
+  is not scanned (`unscanned_size`) and nothing more is decoded
+  (`unscanned_encoding`). A match longer than 512 KB that crosses a 2 MB window
   boundary can be cut short or, for a private key block, missed.
 
 ## Recording

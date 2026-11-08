@@ -121,6 +121,20 @@ uses semantic versioning once past 0.x.
     matches. A 2 MB blob of AWS keys took 15 s (32 MB about 6 min); now
     0.16 s. Matches are merged with a forward sweep and lines counted in one
     pass; same findings.
+  - **env_secret in linear time (#24).** The write-time `env_secret` regex
+    backtracked quadratically on one long line of name characters
+    (`PASSWORD` repeated: 0.5 / 2.1 / 7.7 s at 64 / 128 / 256 KB in
+    `putDocument`, about 2 hours for an 8 MB MCP document). It is now matched
+    by a linear scan with the same matches (property test against the regex);
+    256 KB takes 67 ms, 8 MB 1 s.
+  - **Blob scan budget counts regex passes and time (#24).** Every regex pass
+    is charged (`REGEX_PASSES` units per character, one per write-time
+    detector; `MAX_SCAN_WORK` is now 3 Gi), and a per-blob time budget
+    (`MAX_SCAN_MS`, 30 s) is checked before each scan window and decoded
+    view: out of time, the raw scan stops (flag `unscanned_size`) and
+    decoding stops (flag `unscanned_encoding`) instead of blocking.
+  - **The overlap-linearity test can fail (#24).** It asserts the step
+    counter is live; with the old quadratic check restored it fails.
 
 ### Added — `apply`: transactional batch writes with preview
 

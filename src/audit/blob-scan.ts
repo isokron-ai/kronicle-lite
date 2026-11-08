@@ -15,7 +15,7 @@
 
 import { brotliDecompressSync, gunzipSync, inflateRawSync, inflateSync } from 'node:zlib';
 
-import { secretSpans, type SecretFinding } from '../secrets/guard.js';
+import { secretSpans, WRITE_DETECTORS, type SecretFinding } from '../secrets/guard.js';
 
 /** Most bytes any one decoded view may expand to. */
 export const MAX_DECODED_BYTES = 16 * 1024 * 1024;
@@ -42,12 +42,25 @@ const MAX_STREAMS = 64;
 /** Longest HTTP header block examined for a Content-Encoding line. */
 const MAX_HEADER_BLOCK = 16 * 1024;
 /**
- * Work units (≈ bytes read, decoded or scanned) one blob may cost; past it the
- * scan stops decoding and flags `unscanned_encoding`. Every decoder call is
- * charged its input plus DECODE_PROBE up front, and its output (or, when it hits
- * the output cap, the whole cap) after, so a blob of bombs is bounded.
+ * Work units one blob may cost; past it the scan stops decoding and flags
+ * `unscanned_encoding`. Every decoder call is charged its input plus
+ * DECODE_PROBE up front, and its output (or, when it hits the output cap, the
+ * whole cap) after, so a blob of bombs is bounded. #24: every regex pass is
+ * charged too, one unit per character per write-time detector (REGEX_PASSES),
+ * window overlap included. The raw scan is charged but always runs (about
+ * 0.8 Gi units for 32 MB).
  */
-export const MAX_SCAN_WORK = 512 * 1024 * 1024;
+export const MAX_SCAN_WORK = 3 * 1024 * 1024 * 1024;
+/** Regex passes per character scanned: one per write-time detector. */
+export const REGEX_PASSES = WRITE_DETECTORS.length;
+/**
+ * #24: wall-clock budget for one blob, the backstop for a detector that is
+ * slow on some input (work units cannot see regex backtracking). Checked
+ * before each scan window and each decoded view: past it the raw scan stops
+ * (flag `unscanned_size`: the rest was not scanned) and decoding stops (flag
+ * `unscanned_encoding`). A window already started runs to its end.
+ */
+export const MAX_SCAN_MS = 30_000;
 /** First decode of a stream is capped here; only a stream that produces more is decoded again at the full cap. */
 const DECODE_PROBE = 64 * 1024;
 
@@ -64,7 +77,7 @@ export interface BlobScan {
   unscanned_encoding: boolean;
   /** true when the blob is larger than MAX_SCAN_BYTES: bytes past it were not scanned. */
   unscanned_size: boolean;
-  /** What the scan cost: work units (bounded by MAX_SCAN_WORK) and decoder calls. */
+  /** What the scan cost: work units (bounded by MAX_SCAN_WORK; regex passes included) and decoder calls. */
   cost: { work: number; decoder_calls: number };
 }
 
@@ -78,7 +91,12 @@ export function scanFlags(s: Pick<BlobScan, ScanFlag>): ScanFlag[] {
  * window keeps the matches that start in the part it owns, so a match across a
  * boundary is reported once; lines are counted across windows.
  */
-function scanText(n: number, slice: (a: number, b: number) => string, field: string): { findings: SecretFinding[]; spans: BlobScan['raw_spans'] } {
+function scanText(
+  n: number,
+  slice: (a: number, b: number) => string,
+  field: string,
+  gate: (chars: number) => boolean = () => true,
+): { findings: SecretFinding[]; spans: BlobScan['raw_spans']; stopped: boolean } {
   const findings: SecretFinding[] = [];
   const spans: BlobScan['raw_spans'] = [];
   let line = 1;
@@ -86,7 +104,9 @@ function scanText(n: number, slice: (a: number, b: number) => string, field: str
   for (let s = 0; s < n; s += SCAN_WINDOW) {
     const from = Math.max(0, s - SCAN_CONTEXT);
     const ctx = s - from;
-    const text = slice(from, Math.min(n, s + SCAN_WINDOW + SCAN_OVERLAP));
+    const to = Math.min(n, s + SCAN_WINDOW + SCAN_OVERLAP);
+    if (!gate(to - from)) return { findings, spans, stopped: true };
+    const text = slice(from, to);
     const own = ctx + Math.min(SCAN_WINDOW, n - s);
     let pos = ctx;
     for (const m of secretSpans(text)) {
@@ -100,10 +120,10 @@ function scanText(n: number, slice: (a: number, b: number) => string, field: str
     }
     for (; pos < own; pos++) if (text.charCodeAt(pos) === 10) line++;
   }
-  return { findings, spans };
+  return { findings, spans, stopped: false };
 }
 
-const scanLatin1 = (b: Buffer, n: number, field: string) => scanText(n, (x, y) => b.toString('latin1', x, y), field);
+const scanLatin1 = (b: Buffer, n: number, field: string, gate?: (chars: number) => boolean) => scanText(n, (x, y) => b.toString('latin1', x, y), field, gate);
 
 // Byte classes for the base64 run finder.
 const ALNUM = new Uint8Array(256);
@@ -132,21 +152,34 @@ function* runs(b: Buffer, n: number, inSet: (c: number) => boolean, pad: boolean
   }
 }
 
-export function scanBlob(bytes: Buffer): BlobScan {
+/** `clock` (ms, default performance.now) and a lower `max_work` are for tests; a max_work that is not a positive finite number below MAX_SCAN_WORK is ignored. */
+export function scanBlob(bytes: Buffer, opts: { clock?: () => number; max_work?: number } = {}): BlobScan {
+  const clock = opts.clock ?? (() => performance.now());
+  const maxWork = typeof opts.max_work === 'number' && Number.isFinite(opts.max_work) && opts.max_work > 0 && opts.max_work < MAX_SCAN_WORK ? opts.max_work : MAX_SCAN_WORK;
+  const deadline = clock() + MAX_SCAN_MS;
   const limit = Math.min(bytes.byteLength, MAX_SCAN_BYTES);
-  const raw = scanLatin1(bytes, limit, 'blob');
+  let work = 0;
+  // The raw scan always runs (charged, never refused by the work cap) unless the time budget runs out.
+  const raw = scanLatin1(bytes, limit, 'blob', (chars) => {
+    work += chars * REGEX_PASSES;
+    return clock() <= deadline;
+  });
   const out: BlobScan = {
     raw: raw.findings,
     raw_spans: raw.spans,
     encoded: [],
     unscanned_encoding: false,
-    unscanned_size: bytes.byteLength > MAX_SCAN_BYTES,
-    cost: { work: limit, decoder_calls: 0 },
+    unscanned_size: bytes.byteLength > MAX_SCAN_BYTES || raw.stopped,
+    cost: { work: work + limit, decoder_calls: 0 },
   };
+  if (raw.stopped) {
+    out.unscanned_encoding = true; // out of time: nothing is decoded either
+    return out;
+  }
   let budget = MAX_TOTAL_DECODED;
-  /** Charge work; false (and flagged) once the blob's work cap would be passed. */
+  /** Charge work; false (and flagged) once the blob's work cap would be passed, or its time is up. */
   const spend = (n: number): boolean => {
-    if (out.cost.work + n > MAX_SCAN_WORK) {
+    if (out.cost.work + n > maxWork || clock() > deadline) {
       out.unscanned_encoding = true;
       return false;
     }
@@ -188,7 +221,7 @@ export function scanBlob(bytes: Buffer): BlobScan {
     for (const parity of utf16Parities(b, n)) {
       const chars = (n - parity) >> 1;
       if (!take(2 * chars) || !spend(2 * chars)) continue;
-      out.encoded.push(...scanText(chars, (x, y) => b.toString('utf16le', parity + 2 * x, parity + 2 * y), `${via}+${parity === 0 ? 'utf16le' : 'utf16be'}`).findings);
+      out.encoded.push(...scanText(chars, (x, y) => b.toString('utf16le', parity + 2 * x, parity + 2 * y), `${via}+${parity === 0 ? 'utf16le' : 'utf16be'}`, regexGate).findings);
     }
     // base64 / base64url segments
     let segments = 0;
@@ -264,10 +297,12 @@ export function scanBlob(bytes: Buffer): BlobScan {
       return (err as { code?: string }).code === 'ERR_BUFFER_TOO_LARGE' || err instanceof RangeError ? 'too_large' : 'failed';
     }
   };
+  /** Each window of a decoded view: charged REGEX_PASSES per character (and the time budget checked) before it is scanned. */
+  const regexGate = (chars: number) => spend(chars * REGEX_PASSES);
   const scanView = (b: Buffer, via: string, depth: number) => {
-    if (!spend(Math.min(b.byteLength, MAX_SCAN_BYTES))) return;
-    out.encoded.push(...scanLatin1(b, Math.min(b.byteLength, MAX_SCAN_BYTES), via).findings);
-    visit(b, via, depth + 1);
+    const r = scanLatin1(b, Math.min(b.byteLength, MAX_SCAN_BYTES), via, regexGate);
+    out.encoded.push(...r.findings);
+    if (!r.stopped) visit(b, via, depth + 1);
   };
   visit(bytes, 'blob', 0);
   return out;
