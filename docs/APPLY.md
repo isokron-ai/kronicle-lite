@@ -57,6 +57,12 @@ the nonce, and covers:
 - **Expired rows are pruned on every preview**, at most 1000 per call.
 - **Per-actor cap.** Each actor holds at most 100 live confirmations, and a new
   preview evicts the oldest; that token then answers `confirm_invalid`.
+- **Global cap.** The table holds at most 10,000 confirmations across all
+  actors; a new preview evicts the oldest rows first. Actor ids are
+  self-asserted, so anyone can claim an actor and evict its tokens, or preview
+  under many actors and evict everyone's. That is denial of service only: an
+  evicted token answers `confirm_invalid`, and a token never authorizes
+  anything by itself.
 
 **When the token is required.**
 - **After a dry run.** Once a plan has been previewed, committing the same plan
