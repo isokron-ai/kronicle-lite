@@ -90,6 +90,7 @@ export function markWriter(db: { prepare(sql: string): { run(...a: unknown[]): u
  * (`meta` key `migration.lineage_gaps`) but has lost the table is (`missing`).
  */
 export function lineageGapsState(db: { prepare(sql: string): { get(...a: unknown[]): unknown } }): 'present' | 'not_derived' | 'missing' {
-  if (db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'doc_lineage_gaps'`).get() !== undefined) return 'present';
+  // A TEMP table (shimMissingTables: an older store opened without migrating) holds the derived rows too.
+  if (db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'doc_lineage_gaps' UNION ALL SELECT 1 FROM sqlite_temp_master WHERE type = 'table' AND name = 'doc_lineage_gaps'`).get() !== undefined) return 'present';
   return db.prepare(`SELECT 1 FROM meta WHERE key = 'migration.lineage_gaps'`).get() !== undefined ? 'missing' : 'not_derived';
 }
