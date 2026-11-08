@@ -1,8 +1,9 @@
 /**
  * Secret scan of an audit blob (0.9.0). Audit artifacts are HTTP bodies,
  * traces and transcripts, so a credential is often not in the raw bytes:
- * gzip/deflate bodies, UTF-16LE text, base64 / base64url fields (and gzip
- * inside base64). Each view is decoded within a size cap and scanned with the
+ * gzip / deflate / raw deflate / brotli bodies (also after HTTP headers),
+ * UTF-16LE / UTF-16BE text anywhere, base64 / base64url fields, nested up to
+ * 12 layers (deeper, if still encoded, is flagged). Each view is decoded within a size cap and scanned with the
  * write-time detectors. Anything that cannot be decoded within the cap is
  * scanned as raw bytes only and reported as `unscanned_encoding`.
  *
@@ -12,7 +13,7 @@
  * MAX_SCAN_BYTES of a blob are read: a larger blob is flagged `unscanned_size`.
  */
 
-import { gunzipSync, inflateRawSync, inflateSync } from 'node:zlib';
+import { brotliDecompressSync, gunzipSync, inflateRawSync, inflateSync } from 'node:zlib';
 
 import { secretSpans, type SecretFinding } from '../secrets/guard.js';
 
@@ -33,7 +34,13 @@ export const SCAN_OVERLAP = 512 * 1024;
 const SCAN_CONTEXT = 1024;
 /** Most base64 segments decoded per view. */
 const MAX_SEGMENTS = 4096;
-const MAX_NESTING = 3;
+/** Most decoding layers followed (#15: 5-deep nesting got through); a view still encoded past it is flagged. */
+const MAX_NESTING = 12;
+/** Most views decoded per blob, and most compressed-stream starts tried per view; past either the blob is flagged. */
+const MAX_VIEWS = 8192;
+const MAX_STREAMS = 64;
+/** Longest HTTP header block examined for a Content-Encoding line. */
+const MAX_HEADER_BLOCK = 16 * 1024;
 
 export type ScanFlag = 'unscanned_encoding' | 'unscanned_size';
 
@@ -127,16 +134,28 @@ export function scanBlob(bytes: Buffer): BlobScan {
     budget -= n;
     return true;
   };
+  let views = 0;
   const visit = (b: Buffer, via: string, depth: number) => {
-    if (depth > MAX_NESTING) return;
+    if (depth > MAX_NESTING || ++views > MAX_VIEWS) {
+      if (looksEncoded(b)) out.unscanned_encoding = true;
+      return;
+    }
     const n = Math.min(b.byteLength, MAX_SCAN_BYTES);
-    // gzip / zlib / raw deflate
-    const z = decompress(b);
-    if (z === 'too_large' || z === 'corrupt') out.unscanned_encoding = true;
-    else if (z !== null && take(z.byteLength)) scanView(z, `${via}+${z.kind}`, depth);
-    // UTF-16LE (BOM, or text with NUL high bytes)
-    if (looksUtf16le(b) && take(n)) {
-      out.encoded.push(...scanText(n >> 1, (x, y) => b.toString('utf16le', 2 * x, 2 * y), `${via}+utf16le`).findings);
+    // Compressed streams: at the start (gzip, zlib, or headerless raw deflate / brotli), after an
+    // HTTP header block that declares a Content-Encoding, and at each gzip member header.
+    const starts = streamStarts(b, n);
+    if (starts === 'too_many') out.unscanned_encoding = true;
+    else
+      for (const st of starts) {
+        const z = decompress(b.subarray(st.at), st.encoding);
+        if (z === 'too_large' || (z === 'corrupt' && st.sure)) out.unscanned_encoding = true;
+        else if (z !== null && z !== 'corrupt' && take(z.byteLength)) scanView(z, `${via}+${z.kind}`, depth);
+      }
+    // UTF-16 text anywhere in the view: LE at even offsets; at odd offsets (UTF-16BE, or LE after an odd-length prefix)
+    for (const parity of utf16Parities(b, n)) {
+      const chars = (n - parity) >> 1;
+      if (!take(2 * chars)) continue;
+      out.encoded.push(...scanText(chars, (x, y) => b.toString('utf16le', parity + 2 * x, parity + 2 * y), `${via}+${parity === 0 ? 'utf16le' : 'utf16be'}`).findings);
     }
     // base64 / base64url segments
     let segments = 0;
@@ -171,33 +190,125 @@ export function scanBlob(bytes: Buffer): BlobScan {
   return out;
 }
 
-function decompress(b: Buffer): (Buffer & { kind?: string }) | 'too_large' | 'corrupt' | null {
-  const gzip = b.length >= 2 && b[0] === 0x1f && b[1] === 0x8b;
-  const zlib = b.length >= 2 && b[0] === 0x78 && [0x01, 0x5e, 0x9c, 0xda].includes(b[1]!);
-  if (!gzip && !zlib) return null;
-  try {
-    const r = (gzip ? gunzipSync : inflateSync)(b, { maxOutputLength: MAX_DECODED_BYTES }) as Buffer & { kind?: string };
-    r.kind = gzip ? 'gzip' : 'deflate';
-    return r;
-  } catch (err) {
-    if ((err as { code?: string }).code === 'ERR_BUFFER_TOO_LARGE' || err instanceof RangeError) return 'too_large';
-    // A zlib header can be a coincidence in binary; try raw deflate before calling it undecodable.
-    if (!gzip) {
-      try {
-        inflateRawSync(b, { maxOutputLength: MAX_DECODED_BYTES });
-      } catch {
-        return null;
+type Encoding = 'gzip' | 'deflate' | 'br' | 'unknown' | null;
+
+/**
+ * Where a compressed stream may start in b[0, n): offset 0 (the encoding is
+ * sniffed) and the body after each HTTP header block with a Content-Encoding
+ * line (that encoding), where a failure to decode is flagged (`sure`); and each
+ * later gzip member header, where a failure may be a coincidence in binary.
+ */
+function streamStarts(b: Buffer, n: number): { at: number; encoding: Encoding; sure: boolean }[] | 'too_many' {
+  const out: { at: number; encoding: Encoding; sure: boolean }[] = [{ at: 0, encoding: null, sure: true }];
+  let from = 0;
+  for (let i = b.indexOf('\r\n\r\n', 0, 'latin1'); i >= 0 && i < n; i = b.indexOf('\r\n\r\n', i + 1, 'latin1')) {
+    if (i - from <= MAX_HEADER_BLOCK) {
+      const m = /(?:^|\n)content-encoding:[ \t]*([^\r\n]*)/i.exec(b.toString('latin1', from, i));
+      if (m) {
+        const v = m[1]!.trim().toLowerCase();
+        const encoding: Encoding = v === 'gzip' || v === 'x-gzip' ? 'gzip' : v === 'deflate' ? 'deflate' : v === 'br' ? 'br' : v === 'identity' || v === '' ? null : 'unknown';
+        if (encoding !== null) out.push({ at: i + 4, encoding, sure: true });
       }
     }
-    return 'corrupt';
+    from = i + 4;
+    if (out.length > MAX_STREAMS) return 'too_many';
   }
+  // gzip member header: magic, CM = 8 (deflate), reserved FLG bits clear.
+  for (let i = b.indexOf(GZIP_MAGIC, 1); i >= 0 && i < n; i = b.indexOf(GZIP_MAGIC, i + 1)) {
+    if (i + 3 < b.length && (b[i + 3]! & 0xe0) === 0 && !out.some((s) => s.at === i)) out.push({ at: i, encoding: null, sure: false });
+    if (out.length > MAX_STREAMS) return 'too_many';
+  }
+  return out;
+}
+const GZIP_MAGIC = Buffer.from([0x1f, 0x8b, 0x08]);
+
+/**
+ * Worth trying a headerless decoder (raw deflate, brotli) on? Each try costs a
+ * zlib handle (~0.1 ms), so not on text: a compressed stream does not start
+ * with 64 printable bytes.
+ */
+function headerless(b: Buffer): boolean {
+  const n = Math.min(b.length, 64);
+  let printable = true;
+  for (let i = 0; i < n && printable; i++) printable = (b[i]! >= 0x20 && b[i]! < 0x7f) || b[i] === 0x09 || b[i] === 0x0a || b[i] === 0x0d;
+  return !printable;
 }
 
-function looksUtf16le(b: Buffer): boolean {
-  if (b.length >= 2 && b[0] === 0xff && b[1] === 0xfe) return true;
-  const n = Math.min(b.length, 4096) & ~1;
-  if (n < 16) return false;
-  let zeros = 0;
-  for (let i = 1; i < n; i += 2) if (b[i] === 0) zeros++;
-  return zeros / (n / 2) > 0.3;
+const DECODERS = {
+  gzip: gunzipSync,
+  deflate: inflateSync,
+  'deflate-raw': inflateRawSync,
+  br: brotliDecompressSync,
+} as const;
+
+/**
+ * Decode one stream. `encoding` null: sniff (gzip and zlib by header, then
+ * headerless raw deflate and brotli; a headerless decoder that fails means
+ * "not this encoding"). `unknown`: declared but not decodable here (zstd…).
+ */
+function decompress(b: Buffer, encoding: Encoding): (Buffer & { kind?: string }) | 'too_large' | 'corrupt' | null {
+  if (encoding === 'unknown') return 'corrupt';
+  const gzip = b.length >= 2 && b[0] === 0x1f && b[1] === 0x8b;
+  const zlib = b.length >= 2 && b[0] === 0x78 && [0x01, 0x5e, 0x9c, 0xda].includes(b[1]!);
+  const tries: (keyof typeof DECODERS)[] =
+    encoding === 'gzip' ? ['gzip'] : encoding === 'deflate' ? ['deflate', 'deflate-raw'] : encoding === 'br' ? ['br'] : gzip ? ['gzip'] : zlib ? ['deflate', 'deflate-raw'] : headerless(b) ? ['deflate-raw', 'br'] : [];
+  if (b.length < 8 || tries.length === 0) return null;
+  for (const kind of tries) {
+    try {
+      const r = DECODERS[kind](b, { maxOutputLength: MAX_DECODED_BYTES }) as Buffer & { kind?: string };
+      if (r.byteLength === 0) continue;
+      r.kind = kind;
+      return r;
+    } catch (err) {
+      if ((err as { code?: string }).code === 'ERR_BUFFER_TOO_LARGE' || err instanceof RangeError) return 'too_large';
+    }
+  }
+  // A declared encoding, or a gzip / zlib header, that does not decode. A zlib header can be a
+  // coincidence in binary (the raw-deflate retry above failed too): not flagged.
+  return encoding !== null || gzip ? 'corrupt' : null;
+}
+
+/**
+ * Offsets (0, 1) at which b[0, n) holds UTF-16 text: any 128-byte window
+ * (stepped by 64) whose bytes at one parity are mostly NUL and at the other
+ * mostly not (#15: only the first 4 KB was looked at, and
+ * only for LE). Decoding as UTF-16LE from offset 1 reads UTF-16BE text at
+ * offset 0 correctly for the ASCII the detectors match (and LE text after an
+ * odd-length prefix).
+ */
+function utf16Parities(b: Buffer, n: number): (0 | 1)[] {
+  const found = new Set<0 | 1>();
+  const BLOCK = 64;
+  let prevEven = 0;
+  let prevOdd = 0;
+  let prevLen = 0;
+  for (let c = 0; c < n && found.size < 2; c += BLOCK) {
+    const end = Math.min(n, c + BLOCK);
+    let even = 0;
+    let odd = 0;
+    for (let i = c; i < end; i++) {
+      if (b[i] !== 0) continue;
+      if (i & 1) odd++;
+      else even++;
+    }
+    const e = even + prevEven;
+    const o = odd + prevOdd;
+    const half = (end - c + prevLen) / 2;
+    if (half >= 16) {
+      if (o > 0.3 * half && e < o / 4) found.add(0);
+      if (e > 0.3 * half && o < e / 4) found.add(1);
+    }
+    prevEven = even;
+    prevOdd = odd;
+    prevLen = end - c;
+  }
+  return [...found].sort();
+}
+
+/** Past the nesting limit: does this view still look like something the scan would decode? */
+function looksEncoded(b: Buffer): boolean {
+  const n = Math.min(b.byteLength, MAX_SCAN_BYTES);
+  const gzip = b.length >= 2 && b[0] === 0x1f && b[1] === 0x8b;
+  const zlib = b.length >= 2 && b[0] === 0x78 && [0x01, 0x5e, 0x9c, 0xda].includes(b[1]!);
+  return gzip || zlib || utf16Parities(b, n).length > 0 || !runs(b, n, inB64, true).next().done || !runs(b, n, inB64url, false).next().done;
 }

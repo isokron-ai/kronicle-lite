@@ -73,6 +73,15 @@ uses semantic versioning once past 0.x.
     8 s, a 1 MB body line over a minute, in `put_document` as well as blobs.
     It is now matched by a linear scan with the same matches (property test
     against the regex). The detector's `re` is unchanged for display.
+  - **Encoded secrets that got through silently (#15).** Five-deep nesting,
+    an HTTP message with a gzip body, brotli, raw deflate, UTF-16LE after
+    4 KB of ASCII, and UTF-16BE produced neither a finding nor
+    `unscanned_encoding`. All are now decoded and refused. The scan nests 12
+    levels. It tries gzip at every member header, raw deflate and brotli on
+    non-text views, and the declared encoding after each HTTP header block,
+    and it finds UTF-16 in any 128-byte window at either parity. What it
+    cannot decode is flagged: nesting past the limit, a declared encoding it
+    cannot decode or that fails, and more than 64 stream starts or 8192 views.
 
 ### Added — `apply`: transactional batch writes with preview
 
