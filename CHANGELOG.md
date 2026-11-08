@@ -54,12 +54,18 @@ uses semantic versioning once past 0.x.
     with "no such table: audit_events" and exit 1, the divergence code. The
     test uses a real 0.8.1 store (`test/fixtures/store-0.8.1.db.gz`) and a
     read-only medium.
-  - **0.8.0 stores verify too.** A store made by the published 0.8.0 has no
-    `doc_lineage_gaps` table (0.8.1). Opened read-only, `verify-chain`,
-    `verify` and `doctor` failed with "no such table: doc_lineage_gaps" and
-    exit 1 until something opened it read-write. A gaps table that was never
-    derived is now "nothing stored yet"; one the store migrated and then lost
-    is still a divergence (`test/upgrade-080.test.ts`).
+  - **0.7.0 and 0.8.0 stores verify too.** A store made by the published
+    0.7.0 has no `doc_lineage`, `doc_lineage_gaps` or `reads` table, one made
+    by 0.8.0 no `doc_lineage_gaps`. Opened without migrating (`verify-chain`,
+    `verify`, `doctor`, a read-only medium), they failed with "no such table"
+    and exit 1, the divergence code; on a read-only medium `orient` reported
+    an integrity failure and `get` / `pending` failed. Every table an older
+    store lacks is now served as an empty TEMP table on that connection (the
+    file is never written), with the data migrations it has not run derived
+    into it, so reads answer as on a migrated store; a tampered 0.7.0 / 0.8.0
+    store still exits 1, and a gaps table the store migrated and then lost
+    is still a divergence (`test/upgrade-old-stores.test.ts`, new fixture
+    `store-0.7.0.db.gz` made by the published 0.7.0).
   - **Truncated exports are refused.** `import` read an export to its last
     line and ignored the head its header names, so a file cut short (an
     interrupted `export --out`, a full disk, a partial copy) imported as a
@@ -74,8 +80,13 @@ uses semantic versioning once past 0.x.
     was a 3 GB blob; `--key /dev/zero` aborted too. Bundle files must now be
     regular files (no links) under the V8 string limit, a blob whose size
     differs from the manifest is reported without being read, and `--key`
-    must be a regular file of at most 64 KB. Each case is `ok: false` with a
-    reason, in milliseconds.
+    must be a regular file of at most 64 KB. A `blobs/` directory linked
+    outside the bundle is refused too. No blob is read until the manifest
+    signature verifies (an edited 16 KB bundle listing sparse multi-GB blobs
+    made the verifier use 1.6 GB and seconds per blob, even with a broken
+    signature); a blob listed above 64 MiB is refused unread, and the rest
+    are hashed as a stream. Each case is `ok: false` with a reason, in
+    milliseconds.
   - **Identifiers and object keys get the secret guard.** It scanned
     content only, so a token as an `actor_id` (every write tool), a
     `put_document` `idempotency_key`, `slug` or `source_path`, an `apply` op

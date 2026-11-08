@@ -170,6 +170,7 @@ export function openDbReadOnly(dbFile: string, cause: unknown = null): { db: Db;
     db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
     db.prepare('SELECT seq FROM chain_head WHERE id = 1').get();
     registerFunctions(db);
+    shimMissingTables(db);
     return db;
   };
   const attempt = (label: string, fn: () => Db): Db | null => {
@@ -293,6 +294,48 @@ export const BUSY_TIMEOUT_MS = 10_000;
 
 /** SCHEMA_SQL without its connection pragmas (they run outside the setup transaction). */
 const SCHEMA_DDL = SCHEMA_SQL.replace(/^\s*PRAGMA [^;]+;\s*$/gm, '');
+
+let tableDdl: { name: string; sql: string }[] | null = null;
+/** Every ordinary table SCHEMA_SQL creates, with its CREATE TABLE statement (FTS5 and its shadow tables excluded). */
+function schemaTables(): { name: string; sql: string }[] {
+  if (tableDdl) return tableDdl;
+  const mem = new Database(':memory:');
+  try {
+    mem.exec(SCHEMA_DDL);
+    tableDdl = (mem.prepare(`SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'blocks_fts%'`).all() as { name: string; sql: string }[]).filter(
+      (t) => !/^CREATE VIRTUAL/i.test(t.sql),
+    );
+  } finally {
+    mem.close();
+  }
+  return tableDdl;
+}
+
+/**
+ * 0.9.0: a store made by an older release (0.7.0: no doc_lineage, doc_lineage_gaps, reads;
+ * 0.8.0: no doc_lineage_gaps; both: no audit / blob / apply tables) opened WITHOUT migrating
+ * (read-only, a snapshot, an image, or doctor's raw handle). Each missing table is created as an
+ * empty TEMP table on this connection only (the file is never written), and each data migration
+ * the store has not run is derived into its TEMP target, so every read answers as on a migrated
+ * store. Returns the tables shimmed.
+ */
+export function shimMissingTables(db: Db): string[] {
+  const has = (name: string) => db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(name) !== undefined;
+  const shimmed: string[] = [];
+  for (const t of schemaTables()) {
+    if (has(t.name)) continue;
+    // Drop REFERENCES: a TEMP table cannot enforce a key into the main schema (and nothing writes it).
+    db.exec(t.sql.replace(/^CREATE TABLE(?: IF NOT EXISTS)?/i, 'CREATE TEMP TABLE IF NOT EXISTS').replace(/\s+REFERENCES\s+\w+\s*\([^)]*\)/gi, ''));
+    shimmed.push(t.name);
+  }
+  if (shimmed.length === 0) return shimmed;
+  const done = has('meta') ? db.prepare(`SELECT 1 FROM meta WHERE key = ?`) : null;
+  for (const m of DATA_MIGRATIONS) {
+    if (!shimmed.includes(m.target) || (done && done.get(m.key) !== undefined)) continue;
+    db.exec(m.sql);
+  }
+  return shimmed;
+}
 
 function enableWal(db: Db): void {
   if (String(db.pragma('journal_mode', { simple: true })).toLowerCase() === 'wal') return;
