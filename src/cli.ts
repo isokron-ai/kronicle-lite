@@ -423,9 +423,10 @@ async function main(argv: string[]): Promise<number> {
     case 'verify-bundle': {
       const dir = positional[0];
       if (!dir) throw new Error('usage: kronicle-lite verify-bundle DIR [--key PEM-FILE] [--allow-missing] [--json]');
-      const { verifyBundle } = await import('./audit/verify-bundle.js');
+      const { verifyBundle, readBundleFile } = await import('./audit/verify-bundle.js');
       const key = str(flags['key']);
-      const r = verifyBundle(dir, { ...(key ? { public_key_pem: readFileSync(key, 'utf8') } : {}), allow_missing: flags['allow-missing'] === true });
+      // A PEM public key is a few hundred bytes; a device, FIFO or huge file is refused, not read.
+      const r = verifyBundle(dir, { ...(key ? { public_key_pem: readBundleFile(key, 64 * 1024, { followLinks: true }).toString('utf8') } : {}), allow_missing: flags['allow-missing'] === true });
       if (flags['json'] === true) process.stdout.write(JSON.stringify(r, null, 2) + '\n');
       else {
         for (const c of r.checks) process.stdout.write(`${c.ok ? 'ok  ' : 'FAIL'} ${c.check}${c.problem ? `: ${c.problem}` : ''}\n`);

@@ -68,6 +68,12 @@ Hostile input fails cleanly:
   parsing) and any file name yields `ok: false` with a reason, never a crash.
 - Blob names must be 64 lowercase hex characters and regular files, so nothing
   outside `DIR/blobs/` is ever read.
+- `manifest.json`, `events.jsonl` and every blob must be regular files, not
+  symlinks, devices, FIFOs or directories, so nothing outside `DIR` is read and
+  nothing blocks. `manifest.json` and `events.jsonl` are refused above about
+  512 MB (the longest string Node can hold); a blob whose size differs from
+  the manifest is reported without being read. `--key` must be a regular file
+  of at most 64 KB (a link to one is fine).
 
 ### 1. `canonical`
 1. `manifest.json` must equal `JCS(manifest) + "\n"`.

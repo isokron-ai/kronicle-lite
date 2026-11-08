@@ -16,9 +16,10 @@
  * time.
  */
 
+import { constants as bufferConstants } from 'node:buffer';
 import { createHash, createPublicKey } from 'node:crypto';
-import { lstatSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
 
 import { checkpointSigningPayload } from '../chain/chain.js';
 import { recomputeEventHash, type ChainEvent } from '../chain/event.js';
@@ -62,6 +63,39 @@ function parseBounded(text: string): unknown {
     } else if (c === 125 || c === 93) depth--;
   }
   return JSON.parse(text);
+}
+
+/** Largest manifest.json / events.jsonl read: the longest string V8 can hold (a larger file cannot be checked anyway). */
+export const MAX_BUNDLE_FILE_BYTES = bufferConstants.MAX_STRING_LENGTH;
+
+/**
+ * Read a bundle file only if it is a regular file (not a symlink, device, FIFO or
+ * directory) of at most `max` bytes (`followLinks`: a link to a regular file is fine, as for
+ * the operator's own --key). Opened O_NOFOLLOW | O_NONBLOCK and checked with fstat, so
+ * a FIFO cannot block, a link to /dev/zero cannot exhaust memory, and a file swapped after a
+ * check is still the file that was checked.
+ */
+export function readBundleFile(path: string, max: number, opts: { followLinks?: boolean } = {}): Buffer {
+  const name = basename(path);
+  const follow = opts.followLinks === true;
+  if (!follow && lstatSync(path).isSymbolicLink()) throw new Error(`${name} is a symbolic link, not a regular file`);
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | (follow ? 0 : (constants.O_NOFOLLOW ?? 0)) | (constants.O_NONBLOCK ?? 0));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ELOOP') throw new Error(`${name} is a symbolic link, not a regular file`);
+    throw err;
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new Error(`${name} is not a regular file`);
+    if (st.size > max) throw new Error(`${name} is ${st.size} bytes; the limit is ${max}`);
+    const bytes = readFileSync(fd);
+    if (bytes.byteLength > max) throw new Error(`${name} grew past the limit of ${max} bytes while being read`);
+    return bytes;
+  } finally {
+    closeSync(fd);
+  }
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -127,8 +161,8 @@ export function verifyBundle(dir: string, opts: { public_key_pem?: string; allow
     let manifestText: string;
     let eventsText: string;
     try {
-      manifestText = readFileSync(join(dir, 'manifest.json'), 'utf8');
-      eventsText = readFileSync(join(dir, 'events.jsonl'), 'utf8');
+      manifestText = readBundleFile(join(dir, 'manifest.json'), MAX_BUNDLE_FILE_BYTES).toString('utf8');
+      eventsText = readBundleFile(join(dir, 'events.jsonl'), MAX_BUNDLE_FILE_BYTES).toString('utf8');
     } catch (err) {
       failAll(`cannot read bundle: ${(err as Error).message}`);
       return;
@@ -263,7 +297,17 @@ export function verifyBundle(dir: string, opts: { public_key_pem?: string; allow
         fail('artifacts', `blob ${b.sha256.slice(0, 12)}… is not a regular file`);
         continue;
       }
-      const bytes = readFileSync(p);
+      if (st.size !== b.size) {
+        fail('artifacts', `blob ${b.sha256.slice(0, 12)}… size differs`);
+        continue;
+      }
+      let bytes: Buffer;
+      try {
+        bytes = readBundleFile(p, b.size);
+      } catch (err) {
+        fail('artifacts', `blob ${b.sha256.slice(0, 12)}… cannot be read: ${(err as Error).message}`);
+        continue;
+      }
       if (createHash('sha256').update(bytes).digest('hex') !== b.sha256) fail('artifacts', `blob ${b.sha256.slice(0, 12)}… does not hash to its name`);
       else if (bytes.byteLength !== b.size) fail('artifacts', `blob ${b.sha256.slice(0, 12)}… size differs`);
     }

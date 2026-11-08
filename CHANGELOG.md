@@ -67,6 +67,15 @@ uses semantic versioning once past 0.x.
     at the header's head seq and hash, else nothing is imported. `export`
     stops at the head it wrote in the header, so a writer appending
     mid-export no longer adds events past it.
+  - **verify-bundle reads only small regular files.** `manifest.json` or
+    `events.jsonl` linked to `/dev/zero` aborted the verifier (out of
+    memory), a FIFO in their place blocked it forever, a link to any file
+    outside the bundle was read, a sparse 3 GB file was read in full, and so
+    was a 3 GB blob; `--key /dev/zero` aborted too. Bundle files must now be
+    regular files (no links) under the V8 string limit, a blob whose size
+    differs from the manifest is reported without being read, and `--key`
+    must be a regular file of at most 64 KB. Each case is `ok: false` with a
+    reason, in milliseconds.
   - **Safe export:** `--out` must be new or empty and free of symlinks, and
     every file is created with `O_EXCL|O_NOFOLLOW`, so no symlink planted in
     `--out` is written through.
