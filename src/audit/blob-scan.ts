@@ -41,6 +41,15 @@ const MAX_VIEWS = 8192;
 const MAX_STREAMS = 64;
 /** Longest HTTP header block examined for a Content-Encoding line. */
 const MAX_HEADER_BLOCK = 16 * 1024;
+/**
+ * Work units (≈ bytes read, decoded or scanned) one blob may cost; past it the
+ * scan stops decoding and flags `unscanned_encoding`. Every decoder call is
+ * charged its input plus DECODE_PROBE up front, and its output (or, when it hits
+ * the output cap, the whole cap) after, so a blob of bombs is bounded.
+ */
+export const MAX_SCAN_WORK = 512 * 1024 * 1024;
+/** First decode of a stream is capped here; only a stream that produces more is decoded again at the full cap. */
+const DECODE_PROBE = 64 * 1024;
 
 export type ScanFlag = 'unscanned_encoding' | 'unscanned_size';
 
@@ -55,6 +64,8 @@ export interface BlobScan {
   unscanned_encoding: boolean;
   /** true when the blob is larger than MAX_SCAN_BYTES: bytes past it were not scanned. */
   unscanned_size: boolean;
+  /** What the scan cost: work units (bounded by MAX_SCAN_WORK) and decoder calls. */
+  cost: { work: number; decoder_calls: number };
 }
 
 /** The flags a scan sets, in a fixed order (stored comma-separated in blobs.flags). */
@@ -124,8 +135,24 @@ function* runs(b: Buffer, n: number, inSet: (c: number) => boolean, pad: boolean
 export function scanBlob(bytes: Buffer): BlobScan {
   const limit = Math.min(bytes.byteLength, MAX_SCAN_BYTES);
   const raw = scanLatin1(bytes, limit, 'blob');
-  const out: BlobScan = { raw: raw.findings, raw_spans: raw.spans, encoded: [], unscanned_encoding: false, unscanned_size: bytes.byteLength > MAX_SCAN_BYTES };
+  const out: BlobScan = {
+    raw: raw.findings,
+    raw_spans: raw.spans,
+    encoded: [],
+    unscanned_encoding: false,
+    unscanned_size: bytes.byteLength > MAX_SCAN_BYTES,
+    cost: { work: limit, decoder_calls: 0 },
+  };
   let budget = MAX_TOTAL_DECODED;
+  /** Charge work; false (and flagged) once the blob's work cap would be passed. */
+  const spend = (n: number): boolean => {
+    if (out.cost.work + n > MAX_SCAN_WORK) {
+      out.unscanned_encoding = true;
+      return false;
+    }
+    out.cost.work += n;
+    return true;
+  };
   const take = (n: number): boolean => {
     if (n > budget) {
       out.unscanned_encoding = true;
@@ -141,20 +168,26 @@ export function scanBlob(bytes: Buffer): BlobScan {
       return;
     }
     const n = Math.min(b.byteLength, MAX_SCAN_BYTES);
+    if (!spend(n)) return; // the passes below each read the view once
     // Compressed streams: at the start (gzip, zlib, or headerless raw deflate / brotli), after an
     // HTTP header block that declares a Content-Encoding, and at each gzip member header.
     const starts = streamStarts(b, n);
     if (starts === 'too_many') out.unscanned_encoding = true;
     else
       for (const st of starts) {
-        const z = decompress(b.subarray(st.at), st.encoding);
-        if (z === 'too_large' || (z === 'corrupt' && st.sure)) out.unscanned_encoding = true;
-        else if (z !== null && z !== 'corrupt' && take(z.byteLength)) scanView(z, `${via}+${z.kind}`, depth);
+        const r = decodeAll(b.subarray(st.at), st.encoding);
+        if (r === 'corrupt') {
+          if (st.sure) out.unscanned_encoding = true;
+          continue;
+        }
+        // #15 review: every decoder that succeeds is scanned, not just the first (raw deflate
+        // "decodes" a brotli stream into junk, and brotli was then never tried).
+        for (const z of r) scanView(z, `${via}+${z.kind}`, depth);
       }
     // UTF-16 text anywhere in the view: LE at even offsets; at odd offsets (UTF-16BE, or LE after an odd-length prefix)
     for (const parity of utf16Parities(b, n)) {
       const chars = (n - parity) >> 1;
-      if (!take(2 * chars)) continue;
+      if (!take(2 * chars) || !spend(2 * chars)) continue;
       out.encoded.push(...scanText(chars, (x, y) => b.toString('utf16le', parity + 2 * x, parity + 2 * y), `${via}+${parity === 0 ? 'utf16le' : 'utf16be'}`).findings);
     }
     // base64 / base64url segments
@@ -182,7 +215,57 @@ export function scanBlob(bytes: Buffer): BlobScan {
       }
     }
   };
+  /**
+   * Decode one stream with each decoder that fits it, charging work and the
+   * decode budget: input + DECODE_PROBE per call, then the output, or the full
+   * limit when it hits the cap or fails past the probe (it may have produced
+   * that much). Hitting the cap flags `unscanned_encoding`.
+   */
+  const decodeAll = (b: Buffer, encoding: Encoding): (Buffer & { kind: string })[] | 'corrupt' => {
+    if (encoding === 'unknown') return 'corrupt';
+    const gzip = b.length >= 2 && b[0] === 0x1f && b[1] === 0x8b;
+    const zlib = b.length >= 2 && b[0] === 0x78 && [0x01, 0x5e, 0x9c, 0xda].includes(b[1]!);
+    const tries: (keyof typeof DECODERS)[] =
+      encoding === 'gzip' ? ['gzip'] : encoding === 'deflate' ? ['deflate', 'deflate-raw'] : encoding === 'br' ? ['br'] : gzip ? ['gzip'] : zlib ? ['deflate', 'deflate-raw'] : headerless(b) ? ['deflate-raw', 'br'] : [];
+    if (b.length < 8 || tries.length === 0) return [];
+    const outputs: (Buffer & { kind: string })[] = [];
+    for (const kind of tries) {
+      if (budget < DECODE_PROBE) {
+        out.unscanned_encoding = true; // the decode budget is spent (e.g. by bombs): stop decoding
+        break;
+      }
+      if (!spend(b.length + DECODE_PROBE)) break;
+      let r = decodeOnce(kind, b, DECODE_PROBE);
+      if (r === 'too_large') {
+        const cap = Math.min(MAX_DECODED_BYTES, budget);
+        if (cap <= DECODE_PROBE || !spend(b.length)) {
+          out.unscanned_encoding = true; // the decode budget is spent: not decoded
+          continue;
+        }
+        r = decodeOnce(kind, b, cap);
+        if (!(r instanceof Buffer)) {
+          take(cap); // it may have produced up to the cap before failing: charge the cap
+          spend(cap);
+          if (r === 'too_large') out.unscanned_encoding = true;
+          continue;
+        }
+      }
+      if (r instanceof Buffer && r.byteLength > 0 && take(r.byteLength) && spend(r.byteLength)) outputs.push(Object.assign(r, { kind }));
+    }
+    // A declared encoding, or a gzip / zlib header, that nothing decodes. A zlib header can be a
+    // coincidence in binary (the raw-deflate retry failed too): not flagged.
+    return outputs.length === 0 && (encoding !== null || gzip) ? 'corrupt' : outputs;
+  };
+  const decodeOnce = (kind: keyof typeof DECODERS, b: Buffer, maxOutputLength: number): Buffer | 'too_large' | 'failed' => {
+    out.cost.decoder_calls++;
+    try {
+      return DECODERS[kind](b, { maxOutputLength });
+    } catch (err) {
+      return (err as { code?: string }).code === 'ERR_BUFFER_TOO_LARGE' || err instanceof RangeError ? 'too_large' : 'failed';
+    }
+  };
   const scanView = (b: Buffer, via: string, depth: number) => {
+    if (!spend(Math.min(b.byteLength, MAX_SCAN_BYTES))) return;
     out.encoded.push(...scanLatin1(b, Math.min(b.byteLength, MAX_SCAN_BYTES), via).findings);
     visit(b, via, depth + 1);
   };
@@ -240,33 +323,6 @@ const DECODERS = {
   'deflate-raw': inflateRawSync,
   br: brotliDecompressSync,
 } as const;
-
-/**
- * Decode one stream. `encoding` null: sniff (gzip and zlib by header, then
- * headerless raw deflate and brotli; a headerless decoder that fails means
- * "not this encoding"). `unknown`: declared but not decodable here (zstd…).
- */
-function decompress(b: Buffer, encoding: Encoding): (Buffer & { kind?: string }) | 'too_large' | 'corrupt' | null {
-  if (encoding === 'unknown') return 'corrupt';
-  const gzip = b.length >= 2 && b[0] === 0x1f && b[1] === 0x8b;
-  const zlib = b.length >= 2 && b[0] === 0x78 && [0x01, 0x5e, 0x9c, 0xda].includes(b[1]!);
-  const tries: (keyof typeof DECODERS)[] =
-    encoding === 'gzip' ? ['gzip'] : encoding === 'deflate' ? ['deflate', 'deflate-raw'] : encoding === 'br' ? ['br'] : gzip ? ['gzip'] : zlib ? ['deflate', 'deflate-raw'] : headerless(b) ? ['deflate-raw', 'br'] : [];
-  if (b.length < 8 || tries.length === 0) return null;
-  for (const kind of tries) {
-    try {
-      const r = DECODERS[kind](b, { maxOutputLength: MAX_DECODED_BYTES }) as Buffer & { kind?: string };
-      if (r.byteLength === 0) continue;
-      r.kind = kind;
-      return r;
-    } catch (err) {
-      if ((err as { code?: string }).code === 'ERR_BUFFER_TOO_LARGE' || err instanceof RangeError) return 'too_large';
-    }
-  }
-  // A declared encoding, or a gzip / zlib header, that does not decode. A zlib header can be a
-  // coincidence in binary (the raw-deflate retry above failed too): not flagged.
-  return encoding !== null || gzip ? 'corrupt' : null;
-}
 
 /**
  * Offsets (0, 1) at which b[0, n) holds UTF-16 text: any 128-byte window
