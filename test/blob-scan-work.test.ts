@@ -46,8 +46,15 @@ describe('#24 blob scan: regex passes are charged, time is bounded', () => {
     expect(scanBlob(z, { clock: () => 0 }).encoded.map((f) => f.detector)).toEqual(['github_token']);
   });
   it('the work cap stops decoding, flagged: work never passes it', () => {
-    // 64 gzip views of 256 KB, base64-wrapped: about 64 × 256 KB × REGEX_PASSES units to scan them all.
-    const blob = Buffer.from(Array.from({ length: 64 }, (_, i) => gzipSync(Buffer.from(`#${i}` + ' '.repeat(256 * 1024))).toString('base64')).join(' '));
+    // 64 gzip views of 256 KB, base64-wrapped: about 64 × 256 KB × REGEX_PASSES units to scan them all. The OS byte is
+    // Windows' (0x0a) on every platform: some base64url pieces of these then decode as brotli past the probe and fail,
+    // which used to drain the decode budget and flag the real streams (Windows CI).
+    const gz = (i: number) => {
+      const g = gzipSync(Buffer.from(`#${i}` + ' '.repeat(256 * 1024)));
+      g[9] = 0x0a;
+      return g.toString('base64');
+    };
+    const blob = Buffer.from(Array.from({ length: 64 }, (_, i) => gz(i)).join(' '));
     const cap = 64 * 256 * 1024 * REGEX_PASSES * 0.5;
     const s = scanBlob(blob, { max_work: cap, clock: () => 0 });
     expect(s.unscanned_encoding).toBe(true);

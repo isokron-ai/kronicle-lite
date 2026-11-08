@@ -304,9 +304,15 @@ export function scanBlob(bytes: Buffer, opts: { clock?: () => number; max_work?:
         }
         r = decodeOnce(kind, b, cap);
         if (!(r instanceof Buffer)) {
-          take(cap); // it may have produced up to the cap before failing: charge the cap
+          // It may have produced up to the cap: charge the cap as work. A stream that hit the cap is also
+          // charged it against the decode budget, and flagged. One that failed is not (#24: junk pieces
+          // that brotli decodes past the probe before failing drained the budget and got real streams
+          // flagged).
           spend(cap);
-          if (r === 'too_large') out.unscanned_encoding = true;
+          if (r === 'too_large') {
+            take(cap);
+            out.unscanned_encoding = true;
+          }
           continue;
         }
       }

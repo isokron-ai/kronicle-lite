@@ -140,6 +140,12 @@ uses semantic versioning once past 0.x.
     of base64'd gzip whose OS byte is 0x0a decoded to a truncated gzip header
     and was flagged. A run strictly inside the other alphabet's run is now a
     fragment: still decoded and scanned, but its gzip header is not flagged.
+  - **A failed decode no longer drains the decode budget (#24 CI).** A
+    stream that fails after producing more than the 64 KB probe is charged
+    the cap as work only; one that hits the cap is still charged against the
+    48 MB decode budget and flagged. Before, junk base64url pieces that
+    brotli decodes past the probe drained the budget, and later real streams
+    were flagged (64 base64'd gzips with the Windows OS byte).
 
 ### Added — `apply`: transactional batch writes with preview
 
