@@ -5,12 +5,14 @@
  * regular file.
  */
 import { spawnSync } from 'node:child_process';
-import { readdirSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { exportBundle } from '../src/audit/bundle.js';
+import { exportBundle, signManifest, type BundleManifest } from '../src/audit/bundle.js';
+import { canonicalize, type JsonValue } from '../src/crypto/canonical.js';
+import { ephemeralIdentity } from '../src/crypto/keys.js';
 import { verifyBundle } from '../src/audit/verify-bundle.js';
 import { KronicleLite } from '../src/index.js';
 import { CLI, cleanEnv, tempDir } from './helpers/fs.js';
@@ -99,5 +101,94 @@ describe.skipIf(!POSIX)('verify-bundle: bundle files that are not small regular 
     const r = spawnSync(process.execPath, [CLI, 'verify-bundle', dir, '--key', join(keyDir, 'link.pem')], { env: cleanEnv({ HOME: home, USERPROFILE: home }), encoding: 'utf8' });
     expect(r.status, r.stdout + r.stderr).toBe(0);
     expect(r.stdout).toMatch(/key pinned/);
+  });
+
+  it('blobs/ symlinked to a directory outside the bundle is refused (a linked path component)', () => {
+    const dir = bundle();
+    const outside = tempDir('kl-vbf-blobs-');
+    for (const f of readdirSync(join(dir, 'blobs'))) renameSync(join(dir, 'blobs', f), join(outside, f));
+    rmSync(join(dir, 'blobs'), { recursive: true });
+    symlinkSync(outside, join(dir, 'blobs'));
+    const r = verifyBundle(dir);
+    expect(r.ok).toBe(false);
+    expect(r.checks.find((c) => c.check === 'artifacts')!.problem).toMatch(/blobs.*symbolic link/);
+  });
+
+  it('blobs/ that is a file, not a directory, is refused', () => {
+    const dir = bundle();
+    rmSync(join(dir, 'blobs'), { recursive: true });
+    writeFileSync(join(dir, 'blobs'), 'x');
+    expect(verifyBundle(dir).checks.find((c) => c.check === 'artifacts')!.problem).toMatch(/not a directory/);
+  });
+
+  it('a bundle reached through a symlinked DIR path still verifies (the path given is resolved once)', () => {
+    const dir = bundle();
+    const link = join(tempDir('kl-vbf-l-'), 'b');
+    symlinkSync(dir, link);
+    expect(verifyBundle(link).ok).toBe(true);
+  });
+});
+
+/** Rewrite the manifest: list the first blob with a new size, optionally re-signed by an attacker key. */
+function editBlobSize(dir: string, size: number, resign: boolean): string {
+  const m = JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8')) as BundleManifest;
+  const sha = m.blobs[0]!.sha256;
+  (m.blobs[0] as { size: number }).size = size;
+  let out = m;
+  if (resign) {
+    const id = ephemeralIdentity();
+    out = signManifest({ ...m, root: { ...m.root, key_id: id.signer.key_id, public_key_pem: id.signer.public_key_pem } }, id.signer);
+  }
+  writeFileSync(join(dir, 'manifest.json'), canonicalize(out as unknown as JsonValue) + '\n');
+  truncateSync(join(dir, 'blobs', sha), size);
+  return sha;
+}
+const rssAfter = (f: () => void) => {
+  globalThis.gc?.();
+  const before = process.memoryUsage().rss;
+  const t0 = Date.now();
+  f();
+  return { mb: (process.memoryUsage().rss - before) / 1024 ** 2, ms: Date.now() - t0 };
+};
+
+describe.skipIf(!POSIX)('verify-bundle: no blob is read before the manifest is trusted, and never whole', () => {
+  it('an edited manifest (signature broken) listing a 2 GB sparse blob: no blob is read', () => {
+    const dir = bundle();
+    editBlobSize(dir, 2 * 1024 ** 3, false);
+    let r!: ReturnType<typeof verifyBundle>;
+    const cost = rssAfter(() => (r = verifyBundle(dir)));
+    expect(r.ok).toBe(false);
+    expect(r.checks.find((c) => c.check === 'signature')!.ok).toBe(false);
+    expect(r.checks.find((c) => c.check === 'artifacts')!.problem).toMatch(/not checked/);
+    expect(cost.ms).toBeLessThan(1000);
+    expect(cost.mb).toBeLessThan(100);
+  });
+
+  it('a re-signed manifest (no --key) listing a 2 GB blob: refused by the 64 MiB blob cap without reading', () => {
+    const dir = bundle();
+    editBlobSize(dir, 2 * 1024 ** 3, true);
+    let r!: ReturnType<typeof verifyBundle>;
+    const cost = rssAfter(() => (r = verifyBundle(dir)));
+    expect(r.checks.find((c) => c.check === 'signature')!.ok).toBe(true);
+    expect(r.checks.find((c) => c.check === 'artifacts')!.problem).toMatch(/limit/);
+    expect(cost.ms).toBeLessThan(1000);
+  });
+
+  it('a re-signed manifest listing a 60 MB sparse blob: hashed as a stream, memory stays flat', () => {
+    const dir = bundle();
+    editBlobSize(dir, 60 * 1024 ** 2, true);
+    let r!: ReturnType<typeof verifyBundle>;
+    const cost = rssAfter(() => (r = verifyBundle(dir)));
+    expect(r.checks.find((c) => c.check === 'artifacts')!.problem).toMatch(/does not hash/);
+    expect(cost.mb).toBeLessThan(40);
+  });
+
+  it('the same edits pinned with --key fail the signature and read nothing', () => {
+    const dir = bundle();
+    const pem = (JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8')) as BundleManifest).root.public_key_pem;
+    editBlobSize(dir, 60 * 1024 ** 2, true);
+    const r = verifyBundle(dir, { public_key_pem: pem });
+    expect(r.checks.find((c) => c.check === 'signature')!.ok).toBe(false);
+    expect(r.checks.find((c) => c.check === 'artifacts')!.problem).toMatch(/not checked/);
   });
 });

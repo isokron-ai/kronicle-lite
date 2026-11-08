@@ -80,8 +80,13 @@ uses semantic versioning once past 0.x.
     was a 3 GB blob; `--key /dev/zero` aborted too. Bundle files must now be
     regular files (no links) under the V8 string limit, a blob whose size
     differs from the manifest is reported without being read, and `--key`
-    must be a regular file of at most 64 KB. Each case is `ok: false` with a
-    reason, in milliseconds.
+    must be a regular file of at most 64 KB. A `blobs/` directory linked
+    outside the bundle is refused too. No blob is read until the manifest
+    signature verifies (an edited 16 KB bundle listing sparse multi-GB blobs
+    made the verifier use 1.6 GB and seconds per blob, even with a broken
+    signature); a blob listed above 64 MiB is refused unread, and the rest
+    are hashed as a stream. Each case is `ok: false` with a reason, in
+    milliseconds.
   - **Safe export:** `--out` must be new or empty and free of symlinks, and
     every file is created with `O_EXCL|O_NOFOLLOW`, so no symlink planted in
     `--out` is written through.

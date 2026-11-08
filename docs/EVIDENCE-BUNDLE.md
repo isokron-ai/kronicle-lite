@@ -69,11 +69,18 @@ Hostile input fails cleanly:
 - Blob names must be 64 lowercase hex characters and regular files, so nothing
   outside `DIR/blobs/` is ever read.
 - `manifest.json`, `events.jsonl` and every blob must be regular files, not
-  symlinks, devices, FIFOs or directories, so nothing outside `DIR` is read and
-  nothing blocks. `manifest.json` and `events.jsonl` are refused above about
-  512 MB (the longest string Node can hold); a blob whose size differs from
-  the manifest is reported without being read. `--key` must be a regular file
-  of at most 64 KB (a link to one is fine).
+  symlinks, devices, FIFOs or directories, and `blobs/` must be a real
+  directory, not a link: no path component below `DIR` may be a link, so
+  nothing outside `DIR` is read and nothing blocks (`DIR` itself is resolved
+  once). `manifest.json` and `events.jsonl` are refused above about 512 MB
+  (the longest string Node can hold). `--key` must be a regular file of at
+  most 64 KB (a link to one is fine).
+- **No blob is read before the manifest is trusted.** When the manifest
+  signature does not verify (or not under `--key`), step 6 is not run and
+  reports `not checked`: the sizes it lists could be an attacker's. A blob
+  listed above 64 MiB (the store's limit) or whose size differs from the
+  manifest is reported without being read; the rest are hashed as a stream
+  in 1 MiB chunks.
 
 ### 1. `canonical`
 1. `manifest.json` must equal `JCS(manifest) + "\n"`.
