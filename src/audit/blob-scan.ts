@@ -324,10 +324,10 @@ export function scanBlob(bytes: Buffer, opts: { clock?: () => number; max_work?:
     // A declared encoding or a gzip / zlib header: what a decoder recovers from a truncated stream is scanned too.
     const recoverable = encoding !== null || gzip || zlib;
     let whole = false;
-    const recover = (kind: keyof typeof DECODERS) => {
+    const recover = (kind: keyof typeof DECODERS, src = b) => {
       const cap = Math.min(MAX_DECODED_BYTES, budget);
-      if (cap <= 0 || !spend(b.length)) return;
-      const p = decodeOnce(kind, b, cap, true);
+      if (cap <= 0 || !spend(src.length)) return;
+      const p = decodeOnce(kind, src, cap, true);
       if (p === 'too_large') {
         spend(cap);
         take(cap);
@@ -367,9 +367,12 @@ export function scanBlob(bytes: Buffer, opts: { clock?: () => number; max_work?:
         whole = true;
       }
     }
-    // A declared encoding, or a gzip header, that nothing decodes whole: corrupt (what was recovered is
-    // scanned). A zlib header can be a coincidence in binary: not corrupt.
-    return { outputs, corrupt: !whole && (encoding !== null || gzip), whole: whole && recoverable };
+    // #26: a zlib stream that fails (a corrupted Adler-32 trailer, say) still has a raw deflate body
+    // after its 2-byte header: inflate that, and scan what it recovers.
+    if (zlib && !whole) recover('deflate-raw', b.subarray(2));
+    // A declared encoding, or a gzip or zlib header, that nothing decodes whole: corrupt (what was
+    // recovered is scanned).
+    return { outputs, corrupt: !whole && (encoding !== null || gzip || zlib), whole: whole && recoverable };
   };
   const decodeOnce = (kind: keyof typeof DECODERS, b: Buffer, maxOutputLength: number, partial = false): Buffer | 'too_large' | 'failed' => {
     out.cost.decoder_calls++;
