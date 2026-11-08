@@ -51,6 +51,10 @@ audit was right, complete, or honest.
 - **Safe export:** `--out` must be a new or empty directory, and neither it nor
   any existing parent may be a symlink. Every file is created new with
   `O_CREAT|O_EXCL|O_NOFOLLOW`, so a planted link is never written through.
+  Files are written by name relative to a working directory pinned to the
+  checked directory's inode (`--out`, then `blobs/`), so swapping either one
+  for a link mid-export cannot redirect a write; the export then fails with
+  "changed during export".
 - **Determinism:** every byte is a function of the chain and the blob store, so
   exporting twice gives identical files. The SHA-256 of `manifest.json` is the
   bundle's identity (printed as `manifest sha256`).

@@ -17,7 +17,7 @@
  * docs/EVIDENCE-BUNDLE.md is the format and the verification procedure.
  */
 
-import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readdirSync, writeSync } from 'node:fs';
+import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readdirSync, statSync, writeSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
 import type { Chain, ChainEvent } from '../chain/index.js';
@@ -85,12 +85,19 @@ export interface ExportResult {
 /** Canonical bytes of a JSON value plus a trailing newline (the on-disk form of every bundle file). */
 export const canonicalLine = (v: unknown): string => canonicalize(v as JsonValue) + '\n';
 
+/** A directory as checked: its path and its identity (dev, ino). */
+interface PinnedDir {
+  path: string;
+  dev: bigint;
+  ino: bigint;
+}
+
 /**
  * The output directory, made safe to write into: it must not exist yet or be
  * an empty real directory; neither it nor any existing ancestor may be a
  * symlink (a planted link would redirect the writes). Created fresh (0700).
  */
-function prepareOut(dir: string): string {
+function prepareOut(dir: string): PinnedDir {
   const abs = resolve(dir);
   for (let p = abs; ; p = dirname(p)) {
     let st: ReturnType<typeof lstatSync> | null = null;
@@ -108,14 +115,42 @@ function prepareOut(dir: string): string {
   } else {
     mkdirSync(abs, { recursive: true, mode: 0o700 });
   }
-  mkdirSync(join(abs, 'blobs'), { mode: 0o700 });
-  return abs;
+  return pin(abs);
+}
+
+function pin(path: string): PinnedDir {
+  const st = lstatSync(path, { bigint: true });
+  if (!st.isDirectory()) throw changed(path);
+  return { path, dev: st.dev, ino: st.ino };
+}
+
+const changed = (path: string) => new AuditError('invalid_audit_event', `refusing to export: ${path} changed during export (swapped or replaced by a link); nothing more was written`);
+
+/**
+ * #15: run `fn` with the working directory pinned to `d`, the directory that
+ * was checked. Writes then use names relative to it, so they land in that
+ * inode whatever happens to the path meanwhile (an openat on a directory fd,
+ * which Node does not expose). The export is synchronous: no other JS runs
+ * while the working directory is moved, and it is always restored. (Not
+ * callable from a worker thread, where process.chdir is unavailable; the CLI
+ * is the caller.)
+ */
+function inDir<T>(d: PinnedDir, fn: () => T): T {
+  const back = process.cwd();
+  process.chdir(d.path);
+  try {
+    const st = statSync('.', { bigint: true });
+    if (st.dev !== d.dev || st.ino !== d.ino) throw changed(d.path);
+    return fn();
+  } finally {
+    process.chdir(back);
+  }
 }
 
 /** Create a NEW file (never an existing one, never through a symlink) and write it. */
-function writeNew(path: string, data: string | Buffer): void {
+function writeNew(name: string, data: string | Buffer): void {
   // why: O_EXCL refuses any existing entry, a symlink included; O_NOFOLLOW is belt and braces where it exists.
-  const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o644);
+  const fd = openSync(name, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o644);
   try {
     writeSync(fd, typeof data === 'string' ? Buffer.from(data, 'utf8') : data);
   } finally {
@@ -126,7 +161,7 @@ function writeNew(path: string, data: string | Buffer): void {
 export function exportBundle(args: { chain: Chain; audit: AuditLog; signer: Signer; audit_id: string; dir: string }): ExportResult {
   const seqs = args.audit.seqsOf(args.audit_id);
   if (seqs.length === 0) throw new AuditError('invalid_audit_event', `no audit events for "${args.audit_id}"`);
-  const dir = prepareOut(args.dir);
+  const out = prepareOut(args.dir);
   const from = seqs[0]!;
   const to = seqs[seqs.length - 1]!;
   const mine = new Set(seqs);
@@ -156,6 +191,7 @@ export function exportBundle(args: { chain: Chain; audit: AuditLog; signer: Sign
   const blobs: BundleManifest['blobs'] = [];
   const redacted: BundleManifest['redacted'] = [];
   const missing: BundleManifest['missing'] = [];
+  const stored: string[] = []; // fetched again when written: one blob's bytes in memory at a time
   for (const [sha256, r] of [...refs.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     const by = [...r.by].sort();
     if (r.redacted) {
@@ -167,7 +203,7 @@ export function exportBundle(args: { chain: Chain; audit: AuditLog; signer: Sign
       missing.push({ sha256, size: r.size, referenced_by: by });
       continue;
     }
-    writeNew(join(dir, 'blobs', sha256), b.bytes);
+    stored.push(sha256);
     const flags = (b.flags ?? '').split(',');
     blobs.push({
       sha256,
@@ -178,7 +214,6 @@ export function exportBundle(args: { chain: Chain; audit: AuditLog; signer: Sign
     });
   }
   const eventsText = lines.map(canonicalLine).join('');
-  writeNew(join(dir, 'events.jsonl'), eventsText);
   const manifest: BundleManifest = signManifest({
     format: BUNDLE_FORMAT,
     audit_id: args.audit_id,
@@ -192,6 +227,27 @@ export function exportBundle(args: { chain: Chain; audit: AuditLog; signer: Sign
     root: { root: cp.root, leaf_count: cp.leaf_count, key_id: cp.key_id, public_key_pem: args.signer.public_key_pem, signature: cp.signature },
   }, args.signer);
   const manifestText = canonicalLine(manifest);
-  writeNew(join(dir, 'manifest.json'), manifestText);
-  return { dir, manifest_sha256: sha256Hex(manifestText), manifest };
+  // Every write goes through a working directory pinned to a checked inode: out, then
+  // out/blobs (entered by a relative chdir from out), then out again.
+  const blobsPath = join(out.path, 'blobs');
+  const blobsDir = inDir(out, () => {
+    mkdirSync('blobs', { mode: 0o700 });
+    const made = lstatSync('blobs', { bigint: true });
+    process.chdir('blobs');
+    const st = statSync('.', { bigint: true });
+    if (st.dev !== made.dev || st.ino !== made.ino) throw changed(blobsPath);
+    for (const sha256 of stored) {
+      const b = args.audit.getBlob(sha256);
+      if (!b) throw new AuditError('invalid_audit_event', `blob ${sha256} disappeared during export`);
+      writeNew(sha256, b.bytes);
+    }
+    return made;
+  });
+  inDir(out, () => {
+    const st = lstatSync('blobs', { bigint: true });
+    if (!st.isDirectory() || st.dev !== blobsDir.dev || st.ino !== blobsDir.ino) throw changed(blobsPath);
+    writeNew('events.jsonl', eventsText);
+    writeNew('manifest.json', manifestText);
+  });
+  return { dir: out.path, manifest_sha256: sha256Hex(manifestText), manifest };
 }
