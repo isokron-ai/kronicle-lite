@@ -96,6 +96,12 @@ uses semantic versioning once past 0.x.
     an unreleased 0.9.0 dev build (blobs table without it) gains the column on
     open. Before this, every put-blob on such a store failed with "table blobs
     has no column named flags". Released stores are unaffected.
+  - **Export race (#15).** `--out` was checked, then written by path, so
+    swapping `blobs/` or the out dir for a link mid-export created new files
+    in the victim directory (nothing was overwritten). Writes now use names
+    relative to a working directory pinned to the checked inode (openat
+    style; Node has no openat), and the export fails if either directory
+    changed. Blob bytes are fetched one at a time while writing.
 
 ### Added — `apply`: transactional batch writes with preview
 
