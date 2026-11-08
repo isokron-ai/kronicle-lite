@@ -210,10 +210,16 @@ export const WRITE_DETECTORS: readonly Detector[] = [
   },
 ];
 
-function lineOf(text: string, index: number): number {
+/** 1-based line of each match (sorted by start), counted in one pass (#15 review: one scan per match was quadratic). */
+function linesOf(text: string, matches: readonly Match[]): number[] {
+  const lines: number[] = [];
   let line = 1;
-  for (let i = 0; i < index && i < text.length; i++) if (text.charCodeAt(i) === 10) line++;
-  return line;
+  let pos = 0;
+  for (const m of matches) {
+    for (const stop = Math.min(m.start, text.length); pos < stop; pos++) if (text.charCodeAt(pos) === 10) line++;
+    lines.push(line);
+  }
+  return lines;
 }
 
 interface Match {
@@ -255,21 +261,47 @@ function matchAll(text: string, detectors: readonly Detector[]): Match[] {
   return matchAllRaw(n.text, detectors).map((m) => ({ ...m, start: map[m.start]!, end: m.end > 0 ? map[m.end - 1]! + 1 : 0 }));
 }
 
+/** Work counter for the overlap check (tests assert it stays linear in the number of matches). */
+export const guardStats = { overlap_steps: 0 };
+
 function matchAllRaw(text: string, detectors: readonly Detector[]): Match[] {
-  const out: Match[] = [];
+  // Accepted matches, sorted by start and non-overlapping (so also sorted by end). A detector's own
+  // matches come in ascending, non-overlapping order, so one forward pointer finds the accepted match
+  // each candidate could overlap, and its kept matches are merged in after it: linear per detector
+  // (#15 review: the old `out.some` check was quadratic, 15 s for a 2 MB blob of AWS keys).
+  let acc: Match[] = [];
   for (const d of detectors) {
     d.re.lastIndex = 0;
+    const kept: Match[] = [];
+    let p = 0;
     for (const m of d.find ? d.find(text) : text.matchAll(d.re)) {
       const start = m.index ?? 0;
       const end = start + m[0].length;
       if (d.valueGroup !== undefined && isPlaceholder(m[d.valueGroup] ?? '')) continue;
       if (d.accept && !d.accept(m[0])) continue;
       // An earlier (more specific) detector already covers this span.
-      if (out.some((o) => start < o.end && end > o.start)) continue;
-      out.push({ detector: d.id, start, end });
+      while (p < acc.length && acc[p]!.end <= start) {
+        guardStats.overlap_steps++;
+        p++;
+      }
+      guardStats.overlap_steps++;
+      if (p < acc.length && acc[p]!.start < end) continue;
+      kept.push({ detector: d.id, start, end });
     }
+    if (kept.length > 0) acc = mergeByStart(acc, kept);
   }
-  return out.sort((a, b) => a.start - b.start);
+  return acc;
+}
+
+function mergeByStart(a: Match[], b: Match[]): Match[] {
+  const out: Match[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length || j < b.length) {
+    guardStats.overlap_steps++;
+    out.push(j >= b.length || (i < a.length && a[i]!.start <= b[j]!.start) ? a[i++]! : b[j++]!);
+  }
+  return out;
 }
 
 /** 0.9.0: write-time matches with their offsets (blob scan windows and redacts by span). */
@@ -279,7 +311,9 @@ export function secretSpans(text: string): { detector: string; start: number; en
 
 /** Write-time scan. Returns one finding per match (field defaults to `text`); never the matched text. */
 export function scanForSecrets(text: string, field = 'text'): SecretFinding[] {
-  return matchAll(text, WRITE_DETECTORS).map((m) => ({ field, detector: m.detector, line: lineOf(text, m.start) }));
+  const matches = matchAll(text, WRITE_DETECTORS);
+  const lines = linesOf(text, matches);
+  return matches.map((m, i) => ({ field, detector: m.detector, line: lines[i]! }));
 }
 
 /** Replace every write-time match with `[REDACTED:<detector>]`. */
@@ -293,7 +327,8 @@ export function redactSecrets(text: string, field = 'text'): { text: string; fin
     pos = m.end;
   }
   out += text.slice(pos);
-  return { text: out, findings: matches.map((m) => ({ field, detector: m.detector, line: lineOf(text, m.start) })) };
+  const lines = linesOf(text, matches);
+  return { text: out, findings: matches.map((m, i) => ({ field, detector: m.detector, line: lines[i]! })) };
 }
 
 export class SecretDetectedError extends Error {
