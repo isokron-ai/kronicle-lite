@@ -107,16 +107,23 @@ describe('#15 blob scan: windowed, capped', () => {
     kl.close();
   });
   it('a 60 MB random binary scans under a 256 MB heap (was 2.2 GB)', () => {
+    // Seeded (xorshift32), so every platform scans the same bytes; any secret-shaped run in them is refused, never an OOM.
     const code = `
       const { KronicleLite } = await import(${JSON.stringify(DIST)});
-      const { randomFillSync } = await import('node:crypto');
-      const b = randomFillSync(Buffer.alloc(60 * 1024 * 1024));
+      const b = Buffer.alloc(60 * 1024 * 1024);
+      let x = 0x9e3779b9;
+      for (let i = 0; i < b.length; i += 4) {
+        x ^= x << 13; x ^= x >>> 17; x ^= x << 5;
+        b.writeUInt32LE(x >>> 0, i);
+      }
       const kl = new KronicleLite({ memory: true });
-      const r = kl.audit.putBlob(b, 'application/octet-stream');
-      process.stdout.write(JSON.stringify(r.unscanned ?? []));`;
+      let r;
+      try { r = kl.audit.putBlob(b, 'application/octet-stream').unscanned ?? []; } catch (e) { r = e.code ?? String(e); }
+      process.stdout.write(JSON.stringify(r));`;
     const p = spawnSync(process.execPath, ['--max-old-space-size=256', '--input-type=module', '-e', code], { encoding: 'utf8', timeout: 120_000 });
     expect(p.stderr).toBe('');
-    expect(JSON.parse(p.stdout)).toContain('unscanned_size');
+    expect(p.status).toBe(0);
+    expect(JSON.parse(p.stdout)).toEqual(['unscanned_size']);
   }, 130_000);
 });
 
