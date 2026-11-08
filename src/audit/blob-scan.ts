@@ -13,7 +13,7 @@
  * MAX_SCAN_BYTES of a blob are read: a larger blob is flagged `unscanned_size`.
  */
 
-import { brotliDecompressSync, gunzipSync, inflateRawSync, inflateSync } from 'node:zlib';
+import { brotliDecompressSync, constants, gunzipSync, inflateRawSync, inflateSync } from 'node:zlib';
 
 import { secretSpans, WRITE_DETECTORS, type SecretFinding } from '../secrets/guard.js';
 
@@ -195,27 +195,37 @@ export function scanBlob(bytes: Buffer, opts: { clock?: () => number; max_work?:
     return true;
   };
   let views = 0;
-  const visit = (b: Buffer, via: string, depth: number, fragment = false) => {
+  /**
+   * Scan one view's encodings. Returns whether the stream at its start decoded
+   * cleanly (whole, without error). `piece`: the view is a misaligned piece of
+   * a longer run of the other base64 alphabet that itself decoded cleanly, so
+   * a corrupt gzip header in it is not flagged (#24: Windows gzip). Bytes any
+   * decoder recovers are scanned either way.
+   */
+  const visit = (b: Buffer, via: string, depth: number, piece = false): boolean => {
     if (depth > MAX_NESTING || ++views > MAX_VIEWS) {
       if (looksEncoded(b)) out.unscanned_encoding = true;
-      return;
+      return false;
     }
     const n = Math.min(b.byteLength, MAX_SCAN_BYTES);
-    if (!spend(n)) return; // the passes below each read the view once
+    if (!spend(n)) return false; // the passes below each read the view once
+    let clean = false;
     // Compressed streams: at the start (gzip, zlib, or headerless raw deflate / brotli), after an
     // HTTP header block that declares a Content-Encoding, and at each gzip member header.
-    const starts = streamStarts(b, n, !fragment);
+    const starts = streamStarts(b, n);
     if (starts === 'too_many') out.unscanned_encoding = true;
     else
       for (const st of starts) {
         const r = decodeAll(b.subarray(st.at), st.encoding);
-        if (r === 'corrupt') {
-          if (st.sure) out.unscanned_encoding = true;
-          continue;
-        }
+        // A corrupt stream (truncated, bad trailer…) is flagged wherever it starts (#25 review: gzip
+        // members past offset 0 were neither flagged nor scanned), unless this view is a piece of a
+        // run that decoded cleanly.
+        if (r.corrupt && (st.encoding !== null || !piece)) out.unscanned_encoding = true;
+        if (st.at === 0 && r.whole) clean = true;
         // #15 review: every decoder that succeeds is scanned, not just the first (raw deflate
-        // "decodes" a brotli stream into junk, and brotli was then never tried).
-        for (const z of r) scanView(z, `${via}+${z.kind}`, depth);
+        // "decodes" a brotli stream into junk, and brotli was then never tried). #25 review: so is
+        // what a decoder recovers from a truncated stream.
+        for (const z of r.outputs) scanView(z, `${via}+${z.kind}`, depth);
       }
     // UTF-16 text anywhere in the view: LE at even offsets; at odd offsets (UTF-16BE, or LE after an odd-length prefix)
     for (const parity of utf16Parities(b, n)) {
@@ -226,10 +236,11 @@ export function scanBlob(bytes: Buffer, opts: { clock?: () => number; max_work?:
     // base64 / base64url segments
     let segments = 0;
     const seen = new Map<number, number>();
-    // Runs with the alphabet's own characters (+ / or - _), to tell a fragment: a run strictly inside
-    // one of the OTHER alphabet's is probably a piece of it, decoded misaligned (still scanned, but a
-    // gzip header that does not decode there is not flagged; #24: base64'd gzip, decoded as
-    // base64url pieces, was flagged corrupt).
+    // Runs with the alphabet's own characters (+ / or - _), to tell a piece: a run strictly inside one
+    // of the OTHER alphabet's is probably a piece of it, decoded misaligned. Its decoded bytes are
+    // scanned like any; only when the enclosing run decoded cleanly is a corrupt gzip header in it
+    // not flagged (#24: base64'd Windows gzip; #25 review: `_X_` with X the base64 of a truncated
+    // gzip must stay flagged, its enclosing run decodes to junk).
     const own = { base64: [] as [number, number][], base64url: [] as [number, number][] };
     for (const [inSet, enc] of [
       [inB64, 'base64'],
@@ -241,7 +252,8 @@ export function scanBlob(bytes: Buffer, opts: { clock?: () => number; max_work?:
         if (++k > MAX_SEGMENTS) break;
       }
     }
-    const fragmentOf = (list: [number, number][], s0: number, e0: number): boolean => {
+    /** The run of `list` that strictly contains [s0, e0), or null. */
+    const enclosing = (list: [number, number][], s0: number, e0: number): [number, number] | null => {
       let lo = 0;
       let hi = list.length - 1;
       while (lo <= hi) {
@@ -249,31 +261,47 @@ export function scanBlob(bytes: Buffer, opts: { clock?: () => number; max_work?:
         const [S, E] = list[mid]!;
         if (E < e0) lo = mid + 1;
         else if (S > s0) hi = mid - 1;
-        else return S < s0 || E > e0;
+        else return S < s0 || E > e0 ? list[mid]! : null;
       }
-      return false;
+      return null;
+    };
+    // Whole runs first (recording which decoded cleanly), then the pieces.
+    const cleanRuns = new Set<string>();
+    const pieces: [enc: 'base64' | 'base64url', s: number, e: number, outer: string][] = [];
+    const decodeRun = (enc: 'base64' | 'base64url', s: number, e: number, piece: boolean): boolean | 'stop' => {
+      if (++segments > MAX_SEGMENTS) {
+        out.unscanned_encoding = true;
+        return 'stop';
+      }
+      const size = Math.floor(((e - s) * 3) / 4);
+      if (size < 8) return false;
+      if (size > MAX_DECODED_BYTES || !take(size)) {
+        out.unscanned_encoding = true;
+        return false;
+      }
+      return scanView(Buffer.from(b.toString('latin1', s, e), enc), `${via}+base64`, depth, piece);
     };
     for (const [inSet, enc] of [
       [inB64, 'base64'],
       [inB64url, 'base64url'],
     ] as const) {
+      const other = enc === 'base64' ? 'base64url' : 'base64';
       for (const [s, e, alnum] of runs(b, n, inSet, enc === 'base64')) {
         if (enc === 'base64') {
           if (alnum) seen.set(s, e);
         } else if (alnum && seen.get(s) === e) continue; // the same bytes decode the same way: done in the base64 pass
-        if (++segments > MAX_SEGMENTS) {
-          out.unscanned_encoding = true;
-          return;
-        }
-        const size = Math.floor(((e - s) * 3) / 4);
-        if (size < 8) continue;
-        if (size > MAX_DECODED_BYTES || !take(size)) {
-          out.unscanned_encoding = true;
+        const outer = enclosing(own[other], s, e);
+        if (outer) {
+          pieces.push([enc, s, e, `${other}:${outer[0]}`]);
           continue;
         }
-        scanView(Buffer.from(b.toString('latin1', s, e), enc), `${via}+base64`, depth, fragmentOf(own[enc === 'base64' ? 'base64url' : 'base64'], s, e));
+        const r = decodeRun(enc, s, e, false);
+        if (r === 'stop') return clean;
+        if (r && !alnum) cleanRuns.add(`${enc}:${s}`);
       }
     }
+    for (const [enc, s, e, outer] of pieces) if (decodeRun(enc, s, e, cleanRuns.has(outer)) === 'stop') return clean;
+    return clean;
   };
   /**
    * Decode one stream with each decoder that fits it, charging work and the
@@ -281,14 +309,31 @@ export function scanBlob(bytes: Buffer, opts: { clock?: () => number; max_work?:
    * limit when it hits the cap or fails past the probe (it may have produced
    * that much). Hitting the cap flags `unscanned_encoding`.
    */
-  const decodeAll = (b: Buffer, encoding: Encoding): (Buffer & { kind: string })[] | 'corrupt' => {
-    if (encoding === 'unknown') return 'corrupt';
+  /**
+   * `whole`: a stream identified by its header or a declared encoding decoded
+   * whole (a headerless sniff that "decodes" junk does not count).
+   */
+  const decodeAll = (b: Buffer, encoding: Encoding): { outputs: (Buffer & { kind: string })[]; corrupt: boolean; whole: boolean } => {
+    if (encoding === 'unknown') return { outputs: [], corrupt: true, whole: false };
     const gzip = b.length >= 2 && b[0] === 0x1f && b[1] === 0x8b;
     const zlib = b.length >= 2 && b[0] === 0x78 && [0x01, 0x5e, 0x9c, 0xda].includes(b[1]!);
     const tries: (keyof typeof DECODERS)[] =
       encoding === 'gzip' ? ['gzip'] : encoding === 'deflate' ? ['deflate', 'deflate-raw'] : encoding === 'br' ? ['br'] : gzip ? ['gzip'] : zlib ? ['deflate', 'deflate-raw'] : headerless(b) ? ['deflate-raw', 'br'] : [];
-    if (b.length < 8 || tries.length === 0) return [];
+    if (b.length < 8 || tries.length === 0) return { outputs: [], corrupt: false, whole: false };
     const outputs: (Buffer & { kind: string })[] = [];
+    // A declared encoding or a gzip / zlib header: what a decoder recovers from a truncated stream is scanned too.
+    const recoverable = encoding !== null || gzip || zlib;
+    let whole = false;
+    const recover = (kind: keyof typeof DECODERS) => {
+      const cap = Math.min(MAX_DECODED_BYTES, budget);
+      if (cap <= 0 || !spend(b.length)) return;
+      const p = decodeOnce(kind, b, cap, true);
+      if (p === 'too_large') {
+        spend(cap);
+        take(cap);
+        out.unscanned_encoding = true;
+      } else if (p instanceof Buffer && p.byteLength > 0 && take(p.byteLength) && spend(p.byteLength)) outputs.push(Object.assign(p, { kind: `${kind}(truncated)` }));
+    };
     for (const kind of tries) {
       if (budget < DECODE_PROBE) {
         out.unscanned_encoding = true; // the decode budget is spent (e.g. by bombs): stop decoding
@@ -312,30 +357,36 @@ export function scanBlob(bytes: Buffer, opts: { clock?: () => number; max_work?:
           if (r === 'too_large') {
             take(cap);
             out.unscanned_encoding = true;
-          }
+          } else if (recoverable) recover(kind);
           continue;
         }
       }
-      if (r instanceof Buffer && r.byteLength > 0 && take(r.byteLength) && spend(r.byteLength)) outputs.push(Object.assign(r, { kind }));
+      if (r === 'failed' && recoverable) recover(kind);
+      if (r instanceof Buffer && r.byteLength > 0 && take(r.byteLength) && spend(r.byteLength)) {
+        outputs.push(Object.assign(r, { kind }));
+        whole = true;
+      }
     }
-    // A declared encoding, or a gzip / zlib header, that nothing decodes. A zlib header can be a
-    // coincidence in binary (the raw-deflate retry failed too): not flagged.
-    return outputs.length === 0 && (encoding !== null || gzip) ? 'corrupt' : outputs;
+    // A declared encoding, or a gzip header, that nothing decodes whole: corrupt (what was recovered is
+    // scanned). A zlib header can be a coincidence in binary: not corrupt.
+    return { outputs, corrupt: !whole && (encoding !== null || gzip), whole: whole && recoverable };
   };
-  const decodeOnce = (kind: keyof typeof DECODERS, b: Buffer, maxOutputLength: number): Buffer | 'too_large' | 'failed' => {
+  const decodeOnce = (kind: keyof typeof DECODERS, b: Buffer, maxOutputLength: number, partial = false): Buffer | 'too_large' | 'failed' => {
     out.cost.decoder_calls++;
     try {
-      return DECODERS[kind](b, { maxOutputLength });
+      // partial: flush what was decoded instead of failing at the end of the input (a truncated stream).
+      return DECODERS[kind](b, partial ? { maxOutputLength, finishFlush: kind === 'br' ? constants.BROTLI_OPERATION_FLUSH : constants.Z_SYNC_FLUSH } : { maxOutputLength });
     } catch (err) {
       return (err as { code?: string }).code === 'ERR_BUFFER_TOO_LARGE' || err instanceof RangeError ? 'too_large' : 'failed';
     }
   };
   /** Each window of a decoded view: charged REGEX_PASSES per character (and the time budget checked) before it is scanned. */
   const regexGate = (chars: number) => spend(chars * REGEX_PASSES);
-  const scanView = (b: Buffer, via: string, depth: number, fragment = false) => {
+  /** Scan a decoded view and its encodings; true when the stream at its start decoded cleanly. */
+  const scanView = (b: Buffer, via: string, depth: number, piece = false): boolean => {
     const r = scanLatin1(b, Math.min(b.byteLength, MAX_SCAN_BYTES), via, regexGate);
     out.encoded.push(...r.findings);
-    if (!r.stopped) visit(b, via, depth + 1, fragment);
+    return r.stopped ? false : visit(b, via, depth + 1, piece);
   };
   visit(bytes, 'blob', 0);
   return out;
@@ -345,12 +396,12 @@ type Encoding = 'gzip' | 'deflate' | 'br' | 'unknown' | null;
 
 /**
  * Where a compressed stream may start in b[0, n): offset 0 (the encoding is
- * sniffed) and the body after each HTTP header block with a Content-Encoding
- * line (that encoding), where a failure to decode is flagged (`sure`); and each
- * later gzip member header, where a failure may be a coincidence in binary.
+ * sniffed), the body after each HTTP header block with a Content-Encoding line
+ * (that encoding), and each later gzip member header. A declared or gzip
+ * stream that does not decode whole is flagged wherever it starts.
  */
-function streamStarts(b: Buffer, n: number, sureAtStart: boolean): { at: number; encoding: Encoding; sure: boolean }[] | 'too_many' {
-  const out: { at: number; encoding: Encoding; sure: boolean }[] = [{ at: 0, encoding: null, sure: sureAtStart }];
+function streamStarts(b: Buffer, n: number): { at: number; encoding: Encoding }[] | 'too_many' {
+  const out: { at: number; encoding: Encoding }[] = [{ at: 0, encoding: null }];
   let from = 0;
   for (let i = b.indexOf('\r\n\r\n', 0, 'latin1'); i >= 0 && i < n; i = b.indexOf('\r\n\r\n', i + 1, 'latin1')) {
     if (i - from <= MAX_HEADER_BLOCK) {
@@ -358,7 +409,7 @@ function streamStarts(b: Buffer, n: number, sureAtStart: boolean): { at: number;
       if (m) {
         const v = m[1]!.trim().toLowerCase();
         const encoding: Encoding = v === 'gzip' || v === 'x-gzip' ? 'gzip' : v === 'deflate' ? 'deflate' : v === 'br' ? 'br' : v === 'identity' || v === '' ? null : 'unknown';
-        if (encoding !== null) out.push({ at: i + 4, encoding, sure: true });
+        if (encoding !== null) out.push({ at: i + 4, encoding });
       }
     }
     from = i + 4;
@@ -366,7 +417,7 @@ function streamStarts(b: Buffer, n: number, sureAtStart: boolean): { at: number;
   }
   // gzip member header: magic, CM = 8 (deflate), reserved FLG bits clear.
   for (let i = b.indexOf(GZIP_MAGIC, 1); i >= 0 && i < n; i = b.indexOf(GZIP_MAGIC, i + 1)) {
-    if (i + 3 < b.length && (b[i + 3]! & 0xe0) === 0 && !out.some((s) => s.at === i)) out.push({ at: i, encoding: null, sure: false });
+    if (i + 3 < b.length && (b[i + 3]! & 0xe0) === 0 && !out.some((s) => s.at === i)) out.push({ at: i, encoding: null });
     if (out.length > MAX_STREAMS) return 'too_many';
   }
   return out;

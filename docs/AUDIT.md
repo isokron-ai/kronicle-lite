@@ -33,7 +33,9 @@ Source: `src/audit/`. Bundles: [EVIDENCE-BUNDLE.md](EVIDENCE-BUNDLE.md).
   or that the scan cannot decode, such as zstd, nesting past 12 levels, more
   than 64 stream starts or 8192 views in one blob, a stream that hits the
   16 MB cap, the 48 MB per-blob decode budget spent, or the per-blob work cap
-  reached) is scanned as raw bytes only. Every decoder that fits a stream is
+  reached) is scanned as raw bytes only. A truncated stream (a gzip without
+  its trailer, say) is also flagged, but what a decoder recovers from it is
+  scanned first, so a secret in it is still refused. Every decoder that fits a stream is
   tried and each output is scanned. The blob is stored
   flagged `unscanned: ["unscanned_encoding"]`, and the bundle manifest marks it
   with `unscanned_encoding: true`. So is a base64 run that would decode to

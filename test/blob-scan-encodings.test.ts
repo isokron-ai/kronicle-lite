@@ -69,8 +69,10 @@ describe('#15 what the scan cannot decode is flagged, not passed silently', () =
     expect(scanBlob(http('gzip', Buffer.from('not gzip at all, just text'))).unscanned_encoding).toBe(true);
     expect(scanBlob(http('identity', Buffer.from('plain body'))).unscanned_encoding).toBe(false);
   });
-  it('a gzip header inside binary that does not decode is a coincidence: not flagged', () => {
-    expect(scanBlob(Buffer.from([9, 9, 9, 0x1f, 0x8b, 0x08, 0x00, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])).unscanned_encoding).toBe(false);
+  it('a gzip header inside binary that does not decode is flagged, like one at offset 0 (#25 review: it could hide a truncated stream)', () => {
+    expect(scanBlob(Buffer.from([9, 9, 9, 0x1f, 0x8b, 0x08, 0x00, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])).unscanned_encoding).toBe(true);
+    // Bytes that only look like the magic (reserved flag bits set) are not a gzip header.
+    expect(scanBlob(Buffer.from([9, 9, 9, 0x1f, 0x8b, 0x08, 0xe0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])).unscanned_encoding).toBe(false);
   });
   it('more gzip headers than it will try, or more views than it will decode: flagged', () => {
     const many = Buffer.concat([Buffer.from('x'), ...Array.from({ length: 100 }, () => Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0x20]))]);
@@ -155,5 +157,51 @@ describe('#24: a piece of a base64 run read as base64url is a fragment', () => {
   it('a truncated gzip that is a run of its own (not a piece) is still flagged', () => {
     const cut = gzipSync(Buffer.from('a'.repeat(5000))).subarray(0, 30);
     expect(scanBlob(b64(cut)).unscanned_encoding).toBe(true);
+  });
+});
+
+describe('#25 review: truncated streams are recovered and scanned; fragments do not fail open', () => {
+  /** A gzip without its 8-byte trailer: gunzip refuses it, a streaming gunzip still recovers the text. */
+  const truncatedGzip = (text: string) => {
+    const g = gzipSync(Buffer.from(text));
+    g[9] = 3; // the same bytes on every platform
+    return g.subarray(0, g.length - 8);
+  };
+  // Padded so the base64 is alphanumeric only: inside `_…_` or `-…-` it is a piece of a base64url run.
+  const k = Array.from({ length: 5000 }, (_, i) => i).find((i) => !/[+/=]/.test(truncatedGzip('x'.repeat(i) + ` token=${GHP}\n`).toString('base64')))!;
+  const X = truncatedGzip('x'.repeat(k) + ` token=${GHP}\n`).toString('base64');
+  for (const [name, text] of [
+    ['bare', X],
+    ['between _ _', `_${X}_`],
+    ['between - -', `-${X}-`],
+  ] as const) {
+    it(`base64 of a truncated gzip holding a token, ${name}: refused`, () => {
+      expect(/^[A-Za-z0-9]+$/.test(X)).toBe(true);
+      const bytes = Buffer.from(text);
+      expect(scanBlob(bytes).encoded.map((f) => f.detector)).toContain('github_token');
+      const kl = new KronicleLite({ memory: true });
+      expect(() => kl.audit.putBlob(bytes, 'application/octet-stream')).toThrow(SecretDetectedError);
+      kl.close();
+    });
+  }
+  it('the same without a token, between _ _ or - -: flagged (the enclosing run decodes to junk, not cleanly)', () => {
+    const j = Array.from({ length: 5000 }, (_, i) => i).find((i) => !/[+/=]/.test(truncatedGzip('y'.repeat(i) + ' nothing secret\n').toString('base64')))!;
+    const Y = truncatedGzip('y'.repeat(j) + ' nothing secret\n').toString('base64');
+    // `C_…_`: the enclosing base64url run decodes (misaligned) to junk that raw deflate accepts; that is not clean either.
+    expect(inflateRawSync(Buffer.from(`C_${Y}_`, 'base64url')).length).toBeGreaterThan(0);
+    for (const text of [Y, `_${Y}_`, `-${Y}-`, `C_${Y}_`]) expect(scanBlob(Buffer.from(text)).unscanned_encoding, text).toBe(true);
+  });
+  it('a truncated gzip after a NUL byte (a member past offset 0): its token refused; without one, flagged', () => {
+    const kl = new KronicleLite({ memory: true });
+    const withToken = Buffer.concat([Buffer.from([0]), truncatedGzip(`token=${GHP}\n`)]);
+    expect(scanBlob(withToken).encoded.map((f) => f.detector)).toContain('github_token');
+    expect(() => kl.audit.putBlob(withToken, 'application/octet-stream')).toThrow(SecretDetectedError);
+    const clean = Buffer.concat([Buffer.from([0]), truncatedGzip('nothing secret here\n'.repeat(50))]);
+    expect(kl.audit.putBlob(clean, 'application/octet-stream').unscanned).toEqual(['unscanned_encoding']);
+    kl.close();
+  });
+  it('a truncated gzip at offset 0 is scanned too (its token refused), and still flagged without one', () => {
+    expect(scanBlob(truncatedGzip(`token=${GHP}\n`)).encoded.map((f) => f.detector)).toContain('github_token');
+    expect(scanBlob(truncatedGzip('nothing secret here\n'.repeat(50))).unscanned_encoding).toBe(true);
   });
 });
