@@ -102,6 +102,11 @@ uses semantic versioning once past 0.x.
     relative to a working directory pinned to the checked inode (openat
     style; Node has no openat), and the export fails if either directory
     changed. Blob bytes are fetched one at a time while writing.
+  - **Global confirmation cap (#15).** Actor ids are self-asserted, so
+    previews under distinct actors grew `apply_confirmations` without bound
+    until TTL. The table now holds at most 10,000 rows (`MAX_CONFIRMATIONS`);
+    a new preview evicts the oldest first. Denial of service only, documented
+    in docs/APPLY.md.
 
 ### Added — `apply`: transactional batch writes with preview
 

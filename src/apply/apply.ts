@@ -45,6 +45,13 @@ export const CONFIRM_TTL_DEFAULT_S = 300;
 export const CONFIRM_TTL_MAX_S = 900;
 /** Most live (unused, unexpired) confirmations one actor may hold; a new preview evicts the oldest. */
 export const MAX_CONFIRMATIONS_PER_ACTOR = 100;
+/**
+ * #15: most confirmations the table holds, across all actors. Actor ids are
+ * self-asserted, so distinct actors grew the table without bound until TTL; a
+ * new preview evicts the oldest rows first (DoS only: an evicted token answers
+ * confirm_invalid, it never authorizes anything).
+ */
+export const MAX_CONFIRMATIONS = 10_000;
 /** Most expired confirmations one write prunes (bounded work per call). */
 export const PRUNE_BATCH = 1000;
 const TOKEN_PREFIX = 'klc2';
@@ -478,7 +485,8 @@ export class ApplyEngine {
    * Bounded housekeeping on every preview: drop up to PRUNE_BATCH expired
    * confirmations (used or not; past expiry they can only fail), then keep
    * this actor under MAX_CONFIRMATIONS_PER_ACTOR live ones by evicting the
-   * oldest (its token then answers confirm_invalid).
+   * oldest (its token then answers confirm_invalid), then the whole table under
+   * MAX_CONFIRMATIONS, oldest first.
    */
   private pruneConfirmations(actor_id: string, now: Date): void {
     const t = now.toISOString();
@@ -490,6 +498,10 @@ export class ApplyEngine {
             ORDER BY issued_at DESC, rowid DESC LIMIT -1 OFFSET ?)`,
       )
       .run(actor_id, t, MAX_CONFIRMATIONS_PER_ACTOR - 1);
+    // Global cap, oldest (lowest rowid) first, leaving room for the row about to be inserted.
+    this.db
+      .prepare(`DELETE FROM apply_confirmations WHERE rowid <= (SELECT rowid FROM apply_confirmations ORDER BY rowid DESC LIMIT 1 OFFSET ?)`)
+      .run(MAX_CONFIRMATIONS - 1);
   }
 
   /** The nonce of a token this store issued, or confirm_invalid. */
