@@ -151,6 +151,12 @@ uses semantic versioning once past 0.x.
     decode of a declared or header-identified stream is now retried with a
     sync flush, and what it recovers is scanned (a token in it is refused);
     a corrupt gzip member is flagged wherever it starts.
+  - **zlib with a corrupted trailer (#26).** A zlib stream whose Adler-32
+    trailer is corrupted failed inflate and the raw-deflate retry (which
+    started at the header), so a token in it was stored unscanned and
+    unflagged. The body is now raw-inflated from byte 2 within the decode
+    budget, what it recovers is scanned, and a zlib stream that does not
+    decode whole is flagged corrupt.
   - **A failed decode no longer drains the decode budget (#24 CI).** A
     stream that fails after producing more than the 64 KB probe is charged
     the cap as work only; one that hits the cap is still charged against the
