@@ -19,7 +19,7 @@ import { CATALOG_FINGERPRINT, CATALOG_VERSION, liveCatalogFingerprint } from './
 import { Chain, type AnchorRecord, type Checkpoint } from './chain/chain.js';
 import type { Signer } from './crypto/keys.js';
 import { describeProjection, verifyProjection } from './docs/integrity.js';
-import { openDbReadOnly } from './db/open.js';
+import { openDbReadOnly, shimMissingTables } from './db/open.js';
 import { isStorageWriteError } from './db/storage.js';
 import { checkWriters, describeWriters } from './db/writers.js';
 import { VERSION } from './version.js';
@@ -538,6 +538,8 @@ export async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
       try {
         db.pragma('busy_timeout = 2000');
         db.prepare('SELECT seq FROM chain_head WHERE id = 1').get();
+        // Doctor never migrates: tables an older release did not have are read as empty TEMP tables.
+        shimMissingTables(db);
         opened = { db, via: 'read-write' };
       } catch (e) {
         db.close();

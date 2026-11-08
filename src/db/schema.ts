@@ -10,8 +10,9 @@ export const SCHEMA_VERSION = 1;
  * key and run inside open()'s setup transaction. They only derive projection
  * rows from the chain (never touch events), so re-running one is harmless.
  */
-export const DATA_MIGRATIONS: readonly { key: string; sql: string }[] = [
+export const DATA_MIGRATIONS: readonly { key: string; sql: string; target: string }[] = [
   {
+    target: 'doc_lineage_gaps',
     // doc_lineage_gaps for notes written by 0.8.0 (lineageEffects in SQL): the
     // latest truncated inference per document, unless a later put declared
     // an explicit derived_from.
