@@ -111,6 +111,10 @@ uses semantic versioning once past 0.x.
     characters, so 2 unused bits in the last one) was compared after decoding,
     so 4 spellings of every MAC verified. It is now compared as the canonical
     base64url string.
+  - **Mutation gap closed (#15).** A test now pins `AuditLog.checkProjection`'s
+    missing-table branch: a store whose chain holds audit events but has no
+    `audit_events` table is a divergence (`verifyAll` not ok, `verify-chain`
+    exit 1). Before, making the branch return null failed no test.
 
 ### Added — `apply`: transactional batch writes with preview
 
