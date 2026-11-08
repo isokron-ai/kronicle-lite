@@ -52,7 +52,8 @@ the nonce, and covers:
 
 **Housekeeping.**
 - **Tokens are strict.** The MAC must be exactly 43 base64url characters; a
-  trailing `=` is refused.
+  trailing `=` is refused. It is compared as the canonical string, so the
+  three other spellings of its last character (2 unused bits) are refused too.
 - **Confirmations are indexed** by expiry and by actor and plan.
 - **Expired rows are pruned on every preview**, at most 1000 per call.
 - **Per-actor cap.** Each actor holds at most 100 live confirmations, and a new

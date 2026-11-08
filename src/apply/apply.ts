@@ -511,8 +511,10 @@ export class ApplyEngine {
     if (prefix !== TOKEN_PREFIX || !nonce || !/^[0-9a-f]{32}$/.test(nonce) || !mac || !/^[A-Za-z0-9_-]{43}$/.test(mac) || extra !== undefined) {
       throw new ApplyError('confirm_invalid', 'confirm_token is malformed');
     }
-    const want = createHmac('sha256', this.opts.secret).update(TOKEN_DOMAIN + nonce).digest();
-    const got = Buffer.from(mac, 'base64url');
+    // #15: compare the canonical base64url STRING. 32 bytes in 43 characters leave 2 unused bits in
+    // the last one, so decoding first accepted 4 spellings of every MAC.
+    const want = Buffer.from(b64u(createHmac('sha256', this.opts.secret).update(TOKEN_DOMAIN + nonce).digest()));
+    const got = Buffer.from(mac);
     if (got.length !== want.length || !timingSafeEqual(got, want)) throw new ApplyError('confirm_invalid', 'confirm_token does not verify (another store, or altered)');
     return nonce;
   }
