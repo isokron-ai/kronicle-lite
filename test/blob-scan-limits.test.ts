@@ -8,6 +8,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { gzipSync } from 'node:zlib';
 
 import { describe, expect, it } from 'vitest';
@@ -20,7 +21,7 @@ import { tempDir } from './helpers/fs.js';
 
 const GHP = 'ghp_' + 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8';
 const MB = 1024 * 1024;
-const DIST = join(__dirname, '..', 'dist', 'index.js');
+const DIST = pathToFileURL(join(__dirname, '..', 'dist', 'index.js')).href;
 
 describe('#15 blob scan: no stack overflow on long runs', () => {
   it('an 8 MB base64 / alnum run scans without throwing; a secret after it is still found', () => {
