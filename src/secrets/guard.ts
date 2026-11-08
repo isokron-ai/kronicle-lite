@@ -510,8 +510,24 @@ export function scanValue(value: unknown, prefix: string): SecretFinding[] {
   const walk = (v: unknown, path: string) => {
     if (typeof v === 'string') out.push(...scanForSecrets(v, path));
     else if (Array.isArray(v)) v.forEach((x, i) => walk(x, `${path}[${i}]`));
-    else if (v !== null && typeof v === 'object') for (const [k, x] of Object.entries(v)) walk(x, `${path}.${k}`);
+    else if (v !== null && typeof v === 'object')
+      for (const [k, x] of Object.entries(v)) {
+        // 0.9.0: object keys are chained too (audit `deltas` / `tokens` names are caller-chosen).
+        out.push(...scanForSecrets(k, `${path} key`));
+        walk(x, `${path}.${k}`);
+      }
   };
   walk(value, prefix);
   return out;
+}
+
+/**
+ * 0.9.0: identifiers that are chained or stored beside the chain (actor ids, idempotency
+ * keys, slugs, source paths, apply op ids) get the write-time scan too. An identifier cannot be
+ * redacted without changing what it names, so a match is refused in every mode.
+ */
+export function guardIdentifiers(fields: Record<string, string | null | undefined>, what: string): void {
+  const findings: SecretFinding[] = [];
+  for (const [k, v] of Object.entries(fields)) if (typeof v === 'string') findings.push(...scanForSecrets(v, k));
+  if (findings.length > 0) throw new SecretDetectedError(findings, what, 'use an identifier that is not a credential (identifiers cannot be redacted); there is no override');
 }

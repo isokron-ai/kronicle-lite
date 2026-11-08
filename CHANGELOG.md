@@ -76,6 +76,14 @@ uses semantic versioning once past 0.x.
     differs from the manifest is reported without being read, and `--key`
     must be a regular file of at most 64 KB. Each case is `ok: false` with a
     reason, in milliseconds.
+  - **Identifiers and object keys get the secret guard.** It scanned
+    content only, so a token as an `actor_id` (every write tool), a
+    `put_document` `idempotency_key`, `slug` or `source_path`, an `apply` op
+    id or `idempotency_key`, or an audit `deltas` / `tokens` key was chained
+    and exported verbatim (and the store could no longer round-trip through
+    `import`). These are refused now in every mode (an identifier cannot be
+    redacted); `import` also scans actor ids, idempotency keys and payload
+    keys.
   - **Safe export:** `--out` must be new or empty and free of symlinks, and
     every file is created with `O_EXCL|O_NOFOLLOW`, so no symlink planted in
     `--out` is written through.

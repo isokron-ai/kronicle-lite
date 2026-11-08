@@ -200,7 +200,7 @@ export class KronicleLite {
       }
     }
     if (opts.allow_secrets !== true) {
-      const findings = events.flatMap((ev) => scanValue(ev.payload, `seq ${ev.seq} ${ev.event_type}`));
+      const findings = events.flatMap((ev) => scanValue({ payload: ev.payload, actor_id: ev.actor_id, idempotency_key: ev.idempotency_key }, `seq ${ev.seq} ${ev.event_type}`));
       if (findings.length > 0) throw new SecretDetectedError(findings, 'this import', 'import with --allow-secrets (verbatim: chained bytes cannot be redacted)');
     }
     const tx = this.db.transaction(() => {
