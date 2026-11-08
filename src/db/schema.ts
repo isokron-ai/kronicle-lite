@@ -58,6 +58,14 @@ export const ADDED_COLUMNS: readonly { table: string; column: string; ddl: strin
     index: 'CREATE INDEX IF NOT EXISTS documents_project_idx ON documents (project_key)',
     backfill: `UPDATE documents SET project_key = (SELECT json_extract(s.source_json, '$.project.key') FROM doc_sources s WHERE s.doc_id = documents.doc_id) WHERE project_key IS NULL`,
   },
+  {
+    // 0.9.0 (#15): blob scan flags. A store made by an unreleased 0.9.0 dev build has
+    // a blobs table without it (NULL = scanned whole). SCHEMA_SQL creates blobs first,
+    // so the ALTER only ever runs on such a dev table.
+    table: 'blobs',
+    column: 'flags',
+    ddl: 'ALTER TABLE blobs ADD COLUMN flags TEXT',
+  },
 ];
 
 export const SCHEMA_SQL = `

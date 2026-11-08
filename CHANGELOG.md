@@ -92,6 +92,10 @@ uses semantic versioning once past 0.x.
     and it finds UTF-16 in any 128-byte window at either parity. What it
     cannot decode is flagged: nesting past the limit, a declared encoding it
     cannot decode or that fails, and more than 64 stream starts or 8192 views.
+  - **Migration (#15).** `blobs.flags` is in `ADDED_COLUMNS`: a store made by
+    an unreleased 0.9.0 dev build (blobs table without it) gains the column on
+    open. Before this, every put-blob on such a store failed with "table blobs
+    has no column named flags". Released stores are unaffected.
 
 ### Added — `apply`: transactional batch writes with preview
 
