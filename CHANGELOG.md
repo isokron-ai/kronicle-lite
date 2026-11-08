@@ -73,6 +73,25 @@ uses semantic versioning once past 0.x.
     8 s, a 1 MB body line over a minute, in `put_document` as well as blobs.
     It is now matched by a linear scan with the same matches (property test
     against the regex). The detector's `re` is unchanged for display.
+  - **Every decoder's output is scanned; bounded decode work (#15 review).**
+    Raw deflate often "decodes" a brotli stream into a few junk bytes, and
+    only the first decoder that succeeded was scanned, so a brotli-wrapped
+    token (or a 40-byte brotli bomb) passed unflagged. Every decoder that
+    succeeds is now scanned. A stream that hits the 16 MB cap (or fails past
+    a 64 KB probe) is charged the whole cap against the 48 MB per-blob decode
+    budget, decoding stops when that is spent, and a per-blob work cap
+    (`MAX_SCAN_WORK`, 512 Mi units: bytes read, decoded and scanned) flags
+    `unscanned_encoding` when reached. 63 bombs in one view took 2.2 s, and
+    base64-wrapped copies scaled linearly to hours; now a few decoder calls.
+  - **Encoded secrets that got through silently (#15).** Five-deep nesting,
+    an HTTP message with a gzip body, brotli, raw deflate, UTF-16LE after
+    4 KB of ASCII, and UTF-16BE produced neither a finding nor
+    `unscanned_encoding`. All are now decoded and refused. The scan nests 12
+    levels. It tries gzip at every member header, raw deflate and brotli on
+    non-text views, and the declared encoding after each HTTP header block,
+    and it finds UTF-16 in any 128-byte window at either parity. What it
+    cannot decode is flagged: nesting past the limit, a declared encoding it
+    cannot decode or that fails, and more than 64 stream starts or 8192 views.
 
 ### Added — `apply`: transactional batch writes with preview
 
