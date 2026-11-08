@@ -121,6 +121,42 @@ uses semantic versioning once past 0.x.
     matches. A 2 MB blob of AWS keys took 15 s (32 MB about 6 min); now
     0.16 s. Matches are merged with a forward sweep and lines counted in one
     pass; same findings.
+  - **env_secret in linear time (#24).** The write-time `env_secret` regex
+    backtracked quadratically on one long line of name characters
+    (`PASSWORD` repeated: 0.5 / 2.1 / 7.7 s at 64 / 128 / 256 KB in
+    `putDocument`, about 2 hours for an 8 MB MCP document). It is now matched
+    by a linear scan with the same matches (property test against the regex);
+    256 KB takes 67 ms, 8 MB 1 s.
+  - **Blob scan budget counts regex passes and time (#24).** Every regex pass
+    is charged (`REGEX_PASSES` units per character, one per write-time
+    detector; `MAX_SCAN_WORK` is now 3 Gi), and a per-blob time budget
+    (`MAX_SCAN_MS`, 30 s) is checked before each scan window and decoded
+    view: out of time, the raw scan stops (flag `unscanned_size`) and
+    decoding stops (flag `unscanned_encoding`) instead of blocking.
+  - **The overlap-linearity test can fail (#24).** It asserts the step
+    counter is live; with the old quadratic check restored it fails.
+  - **No false `unscanned_encoding` on base64'd Windows gzip (#24 CI).** A
+    base64 run is also read as base64url pieces (split at `+` / `/`); a piece
+    of base64'd gzip whose OS byte is 0x0a decoded to a truncated gzip header
+    and was flagged. A run strictly inside a run of the other alphabet is a
+    piece: still decoded and scanned, and a corrupt gzip header in it is not
+    flagged only when the enclosing run's own stream (identified by its
+    header) decoded whole. Otherwise (`_X_` with X the base64 of a truncated
+    gzip: the enclosing run is junk) it is flagged as before.
+  - **Truncated streams are recovered and scanned; corrupt gzip members are
+    flagged anywhere (#25 review).** A truncated gzip (no trailer) failed
+    gunzip, so its content was never scanned (a streaming gunzip recovers it)
+    and a member past offset 0 was neither flagged nor scanned (`\0` + a
+    truncated gzip holding a token stored unflagged on 0.9.0 dev). A failed
+    decode of a declared or header-identified stream is now retried with a
+    sync flush, and what it recovers is scanned (a token in it is refused);
+    a corrupt gzip member is flagged wherever it starts.
+  - **A failed decode no longer drains the decode budget (#24 CI).** A
+    stream that fails after producing more than the 64 KB probe is charged
+    the cap as work only; one that hits the cap is still charged against the
+    48 MB decode budget and flagged. Before, junk base64url pieces that
+    brotli decodes past the probe drained the budget, and later real streams
+    were flagged (64 base64'd gzips with the Windows OS byte).
 
 ### Added — `apply`: transactional batch writes with preview
 

@@ -20,6 +20,9 @@ describe('#15 guard: overlap checks are linear in the number of matches', () => 
     };
     const a = steps(5_000);
     const b = steps(20_000);
+    // #24: the counter must be live, or the bounds below hold trivially (0 <= 4.5 * 0).
+    expect(a).toBeGreaterThanOrEqual(5_000);
+    expect(b).toBeGreaterThanOrEqual(20_000);
     expect(b).toBeLessThanOrEqual(4.5 * a);
     expect(b).toBeLessThanOrEqual(8 * 20_000);
   });

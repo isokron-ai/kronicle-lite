@@ -33,7 +33,9 @@ Source: `src/audit/`. Bundles: [EVIDENCE-BUNDLE.md](EVIDENCE-BUNDLE.md).
   or that the scan cannot decode, such as zstd, nesting past 12 levels, more
   than 64 stream starts or 8192 views in one blob, a stream that hits the
   16 MB cap, the 48 MB per-blob decode budget spent, or the per-blob work cap
-  reached) is scanned as raw bytes only. Every decoder that fits a stream is
+  reached) is scanned as raw bytes only. A truncated stream (a gzip without
+  its trailer, say) is also flagged, but what a decoder recovers from it is
+  scanned first, so a secret in it is still refused. Every decoder that fits a stream is
   tried and each output is scanned. The blob is stored
   flagged `unscanned: ["unscanned_encoding"]`, and the bundle manifest marks it
   with `unscanned_encoding: true`. So is a base64 run that would decode to
@@ -41,7 +43,10 @@ Source: `src/audit/`. Bundles: [EVIDENCE-BUNDLE.md](EVIDENCE-BUNDLE.md).
 - **Size cap.** The scan reads the first 32 MB of a blob (raw bytes and their
   views), in windows, so memory stays bounded. A larger blob is stored flagged
   `unscanned: ["unscanned_size"]` (manifest: `unscanned_size: true`): bytes past
-  32 MB were not scanned. A match longer than 512 KB that crosses a 2 MB window
+  32 MB were not scanned. The scan also has a time budget (30 s per blob,
+  checked between 2 MB windows): when it runs out, the rest of the raw bytes
+  is not scanned (`unscanned_size`) and nothing more is decoded
+  (`unscanned_encoding`). A match longer than 512 KB that crosses a 2 MB window
   boundary can be cut short or, for a private key block, missed.
 
 ## Recording

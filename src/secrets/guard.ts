@@ -143,6 +143,59 @@ function* findPrivateKeys(text: string): Generator<{ index: number; 0: string; [
   }
 }
 
+/**
+ * #24: the env_secret detector's matches without its regex, which backtracked
+ * quadratically on one long line of name characters (`PASSWORD` repeated:
+ * 7.7 s at 256 KB). Same language, per line start: [ \t]*, optional
+ * `export[ \t]+`, the maximal [A-Z0-9_] run (it must end there: the next
+ * character has to be [ \t:=]) containing a keyword, [ \t]*[:=][ \t]*, then
+ * an optional quote, 8+ [^\s'"#], an optional quote. Each character is
+ * examined a bounded number of times (guardStats.scan_steps counts them).
+ */
+const ENV_KEYWORD = /PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY/;
+function* findEnvSecrets(text: string): Generator<{ index: number; 0: string; [group: number]: string | undefined }> {
+  const run = (re: RegExp, at: number): number => {
+    re.lastIndex = at;
+    re.test(text);
+    guardStats.scan_steps += re.lastIndex - at;
+    return re.lastIndex;
+  };
+  const SP = /[ \t]*/y;
+  const NAME = /[A-Z0-9_]*/y;
+  const VALUE = /[^\s'"#]*/y;
+  const EXPORT = /export[ \t]+/y;
+  for (let line = 0; line <= text.length; ) {
+    let i = run(SP, line);
+    EXPORT.lastIndex = i;
+    if (EXPORT.test(text)) {
+      guardStats.scan_steps += EXPORT.lastIndex - i;
+      i = EXPORT.lastIndex;
+    }
+    const nameEnd = run(NAME, i);
+    let match: { end: number; value: number } | null = null;
+    const named = nameEnd > i && ENV_KEYWORD.test(text.slice(i, nameEnd)); // one more pass over the name
+    guardStats.scan_steps += nameEnd - i;
+    if (named) {
+      let k = run(SP, nameEnd);
+      if (text[k] === ':' || text[k] === '=') {
+        k = run(SP, k + 1);
+        const q = text[k] === '"' || text[k] === "'" ? 1 : 0;
+        const r = run(VALUE, k + q);
+        if (r - (k + q) >= 8) match = { end: r + (text[r] === '"' || text[r] === "'" ? 1 : 0), value: k };
+      }
+    }
+    if (match) yield { index: line, 0: text.slice(line, match.end), 1: text.slice(match.value, match.end) };
+    // Next line start: after \n, \r, \u2028 or \u2029 (what ^ means under the m flag).
+    let next = match ? match.end : line;
+    for (; next < text.length; next++) {
+      guardStats.scan_steps++;
+      const c = text.charCodeAt(next);
+      if (c === 10 || c === 13 || c === 0x2028 || c === 0x2029) break;
+    }
+    line = next + 1;
+  }
+}
+
 /** Write-time ruleset (refuse / redact). Order matters: specific shapes before generic ones. */
 export const WRITE_DETECTORS: readonly Detector[] = [
   {
@@ -188,6 +241,7 @@ export const WRITE_DETECTORS: readonly Detector[] = [
     id: 'env_secret',
     description: 'Sensitive env assignment (…PASSWORD=, …TOKEN=, …SECRET=, …API_KEY=) with a real-looking value',
     re: /^[ \t]*(?:export[ \t]+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY)[A-Z0-9_]*[ \t]*[:=][ \t]*(['"]?[^\s'"#]{8,}['"]?)/gm,
+    find: findEnvSecrets,
     valueGroup: 1,
     accept: (m) => looksLikeCredential(m.slice(m.search(/[:=]/) + 1)),
   },
@@ -261,8 +315,8 @@ function matchAll(text: string, detectors: readonly Detector[]): Match[] {
   return matchAllRaw(n.text, detectors).map((m) => ({ ...m, start: map[m.start]!, end: m.end > 0 ? map[m.end - 1]! + 1 : 0 }));
 }
 
-/** Work counter for the overlap check (tests assert it stays linear in the number of matches). */
-export const guardStats = { overlap_steps: 0 };
+/** Work counters: the overlap check, and characters examined by the linear matchers (tests assert both stay linear). */
+export const guardStats = { overlap_steps: 0, scan_steps: 0 };
 
 function matchAllRaw(text: string, detectors: readonly Detector[]): Match[] {
   // Accepted matches, sorted by start and non-overlapping (so also sorted by end). A detector's own
