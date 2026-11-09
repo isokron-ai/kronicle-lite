@@ -31,6 +31,20 @@ describe('strict CLI options', () => {
     [['keys', 'extra'], /unexpected argument "extra" for keys/],
     [['orient', '--__proto__', 'x'], /unknown option --__proto__/],
     [['doctor', '--no-netwrok'], /did you mean --no-network\?/],
+    // value-taking options given no value: an error, never silently ignored (a bare --key ran unauthenticated)
+    [['verify-bundle', '/nonexistent', '--key'], /--key needs a value/],
+    [['orient', '--cursor'], /--cursor needs a value/],
+    [['put', 'slug', 'file.md', '--title'], /--title needs a value/],
+    // each subcommand has its own options
+    [['audit', 'put-blob', 'f.bin', '--findings'], /unknown option --findings for audit put-blob/],
+    [['audit', 'query', '--out', 'x'], /unknown option --out for audit query/],
+    [['anchor', 'keys', '--key', 'k'], /unknown option --key for anchor keys/],
+    [['audit', '--json'], /audit needs a subcommand first/],
+    // pulse and the shim subcommands parse their own argv, with the same rules
+    [['pulse', '--bogus'], /unknown option --bogus for pulse/],
+    [['pulse', '--state'], /--state needs a value/],
+    [['shim', 'status', '--bogus'], /unknown option --bogus for shim status/],
+    [['shim', 'ack', '--through'], /--through needs a value/],
   ])('%j exits 2 with a reason and touches no store', (args, why) => {
     const r = run(args as string[]);
     expect(r.status, r.stdout + r.stderr).toBe(2);
@@ -40,6 +54,8 @@ describe('strict CLI options', () => {
 
   it('known options still work, booleans accept true / false, repeatable options accumulate', () => {
     expect(run(['orient', '--actor', 'a', '--json']).status).toBe(0);
+    expect(run(['audit', 'query', '--audit-id', 'A', '--findings', '--json']).status).toBe(0);
+    expect(run(['pulse', '--json']).status).not.toBe(2);
     expect(run(['orient', '--json=true']).status).toBe(0);
     expect(run(['verify-chain', '--full']).status).toBe(0);
   });

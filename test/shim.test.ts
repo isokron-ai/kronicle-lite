@@ -720,7 +720,20 @@ describe.skipIf(!POSIX)('overhead of a read-only command through the shim', () =
     console.log(
       `[shim overhead] git status --short (${realGit}), N=${N}: direct median ${direct.median.toFixed(2)} ms (p90 ${direct.p90.toFixed(2)}), via shim median ${viaShim.median.toFixed(2)} ms (p90 ${viaShim.p90.toFixed(2)}); overhead ${overhead.toFixed(2)} ms`,
     );
-    expect(overhead).toBeLessThan(generous(25));
+    // The fast path must not start node: its overhead stays well under one node startup measured in this
+    // same run (a loaded machine slows both): a shim that starts node costs about one node start.
+    const nodeStart = (() => {
+      const ms: number[] = [];
+      for (let i = 0; i < 15; i++) {
+        const t0 = process.hrtime.bigint();
+        spawnSync(process.execPath, ['-e', '0'], { encoding: 'utf8' });
+        ms.push(Number(process.hrtime.bigint() - t0) / 1e6);
+      }
+      ms.sort((a, b) => a - b);
+      return ms[7]!;
+    })();
+    console.log(`[shim overhead] one node start (median of 15): ${nodeStart.toFixed(2)} ms`);
+    expect(overhead).toBeLessThan(nodeStart / 2);
 
     // the world-changing path: one `kronicle-lite pulse` (node start + orient) before exec
     const r = rig({ tools: ['terraform'] });

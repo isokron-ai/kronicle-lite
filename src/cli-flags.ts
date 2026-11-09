@@ -12,12 +12,16 @@ export const COMMAND_OPTIONS: Readonly<Record<string, readonly string[]>> = {
   serve: ['actor', 'all-projects', 'allow-host', 'allow-origin', 'bearer', 'bearer-file', 'core', 'host', 'http', 'modern-only', 'port', 'cwd'],
   'verify-chain': [...RANGE],
   'verify-bundle': ['allow-hardlinks', 'allow-missing', 'json', 'key', 'max-bytes', 'strict'],
-  audit: ['media-type', 'redact-secrets', 'audit-id', 'in', 'json', 'actor', 'kind', 'findings', 'fingerprint', 'finding', 'out'],
+  'audit put-blob': ['media-type', 'redact-secrets'],
+  'audit record': ['audit-id', 'in', 'json', 'actor'],
+  'audit query': ['audit-id', 'fingerprint', 'kind', 'finding', 'findings', 'json'],
+  'audit export': ['audit-id', 'out'],
   rebuild: [],
   demo: ['dir', 'keep'],
   checkpoint: ['from', 'to', 'push', ...ANCHOR],
   verify: ['json', 'offline', 'remote', ...ANCHOR, ...RANGE],
-  anchor: ['json', ...ANCHOR],
+  'anchor status': ['json', ...ANCHOR],
+  'anchor keys': ['json', 'url'],
   export: ['out'],
   import: ['allow-secrets', 'in'],
   keys: [],
@@ -34,8 +38,20 @@ export const COMMAND_OPTIONS: Readonly<Record<string, readonly string[]>> = {
 /** Options that may be given more than once (their values are joined with commas). */
 export const REPEATABLE: ReadonlySet<string> = new Set(['allow-host', 'allow-origin']);
 
-/** Most positional arguments a command takes (absent: not checked, e.g. audit / anchor subcommands). */
+/** Commands whose options depend on a subcommand (the first positional). */
+const WITH_SUBCOMMANDS: ReadonlySet<string> = new Set(['audit', 'anchor']);
+
+/** Options that take a value but may be given bare on purpose (`--derived-from` alone: an explicit empty list). */
+const OPTIONAL_VALUE: ReadonlySet<string> = new Set(['derived-from']);
+
+/** Most positional arguments a command takes, the subcommand included (absent: not checked). */
 const MAX_POSITIONALS: Readonly<Record<string, number>> = {
+  'audit put-blob': 2,
+  'audit record': 1,
+  'audit query': 1,
+  'audit export': 1,
+  'anchor status': 1,
+  'anchor keys': 3,
   serve: 0,
   'verify-chain': 0,
   'verify-bundle': 1,
@@ -79,10 +95,40 @@ function closest(name: string, known: readonly string[]): string | null {
 }
 
 /**
- * Throw on an option the command does not take (with a did-you-mean), a single-value option given
- * twice, a boolean given a value other than true/false, or a stray positional. Unknown commands
- * are left to the caller.
+ * Throw on an option `label` does not take (with a did-you-mean), a value-taking option given no
+ * value, a single-value option given twice, a boolean given a value other than true/false, or a
+ * stray positional. Shared by the main CLI and `pulse` / `shim`.
  */
+export function checkOptions(
+  label: string,
+  known: readonly string[],
+  flags: Record<string, string | true>,
+  positional: readonly string[],
+  maxPositionals: number | undefined,
+  repeated: readonly string[],
+  booleans: ReadonlySet<string>,
+  repeatable: ReadonlySet<string> = REPEATABLE,
+): void {
+  for (const name of Object.keys(flags)) {
+    if (known.includes(name)) continue;
+    const hint = closest(name, known);
+    throw new Error(`unknown option --${name} for ${label}${hint ? ` (did you mean --${hint}?)` : ''}; see kronicle-lite help`);
+  }
+  for (const name of repeated) if (!repeatable.has(name)) throw new Error(`--${name} given more than once`);
+  for (const name of Object.keys(flags)) {
+    const v = flags[name];
+    if (booleans.has(name)) {
+      if (typeof v === 'string' && !['true', 'false', '1', '0'].includes(v)) throw new Error(`--${name} takes no value (or true / false), got ${JSON.stringify(v)}`);
+      if (v === 'false' || v === '0') delete flags[name];
+      else flags[name] = true;
+    } else if (v === true && !OPTIONAL_VALUE.has(name)) {
+      throw new Error(`--${name} needs a value`);
+    }
+  }
+  if (maxPositionals !== undefined && positional.length > maxPositionals) throw new Error(`unexpected argument ${JSON.stringify(positional[maxPositionals])} for ${label}`);
+}
+
+/** checkOptions for the main CLI: the command's table (or its subcommand's). Unknown commands are left to the caller. */
 export function validateFlags(
   cmd: string,
   flags: Record<string, string | true>,
@@ -90,22 +136,34 @@ export function validateFlags(
   repeated: readonly string[],
   booleans: ReadonlySet<string>,
 ): void {
-  if (!Object.hasOwn(COMMAND_OPTIONS, cmd)) return;
-  const known = [...COMMAND_OPTIONS[cmd]!, ...GLOBAL];
-  for (const name of Object.keys(flags)) {
-    if (known.includes(name)) continue;
-    const hint = closest(name, known);
-    throw new Error(`unknown option --${name} for ${cmd}${hint ? ` (did you mean --${hint}?)` : ''}; see kronicle-lite help`);
-  }
-  for (const name of repeated) if (!REPEATABLE.has(name)) throw new Error(`--${name} given more than once`);
-  for (const name of Object.keys(flags)) {
-    const v = flags[name];
-    if (booleans.has(name) && typeof v === 'string' && !['true', 'false', '1', '0'].includes(v)) {
-      throw new Error(`--${name} takes no value (or true / false), got ${JSON.stringify(v)}`);
+  let key = cmd;
+  if (WITH_SUBCOMMANDS.has(cmd)) {
+    const sub = positional[0];
+    if (sub === undefined || !Object.hasOwn(COMMAND_OPTIONS, `${cmd} ${sub}`)) {
+      const subs = Object.keys(COMMAND_OPTIONS).filter((k) => k.startsWith(`${cmd} `)).map((k) => k.slice(cmd.length + 1));
+      if (Object.keys(flags).some((f) => f !== 'data-dir')) throw new Error(`${cmd} needs a subcommand first (${subs.join(' | ')})`);
+      return;
     }
-    if (booleans.has(name) && (v === 'false' || v === '0')) delete flags[name];
-    else if (booleans.has(name)) flags[name] = true;
+    key = `${cmd} ${sub}`;
   }
-  const max = MAX_POSITIONALS[cmd];
-  if (max !== undefined && positional.length > max) throw new Error(`unexpected argument ${JSON.stringify(positional[max])} for ${cmd}`);
+  if (!Object.hasOwn(COMMAND_OPTIONS, key)) return;
+  checkOptions(key, [...COMMAND_OPTIONS[key]!, ...GLOBAL], flags, positional, MAX_POSITIONALS[key], repeated, booleans);
+}
+
+/** `pulse` and the shim subcommands (src/shim/cli.ts): their own tables, same rules. */
+const SHIM_GLOBAL = ['data-dir', 'cwd', 'json'];
+export const SHIM_OPTIONS: Readonly<Record<string, readonly string[]>> = {
+  pulse: ['state', 'default-data-dir', 'mode', 'actor', 'cursor', 'pending-actor', 'all-projects', 'invoking-actor', 'all-readers'],
+  'shim install': ['dir', 'commands', 'world', 'mode', 'pending-actor', 'on-timeout', 'all-readers', 'git-hook', 'repo', 'windows', 'no-windows', 'posix', 'no-posix'],
+  'shim uninstall': ['dir', 'git-hook', 'repo'],
+  'shim status': ['dir'],
+  'shim ack': ['actor', 'dir', 'operator', 'through'],
+  'shim exec': ['dir', 'tool', 'project'],
+  'shim help': [],
+};
+
+export function validateShimFlags(cmd: 'pulse' | 'shim', flags: Record<string, string | true>, positional: readonly string[], repeated: readonly string[], booleans: ReadonlySet<string>): void {
+  const key = cmd === 'pulse' ? 'pulse' : `shim ${positional[0] ?? 'help'}`;
+  if (!Object.hasOwn(SHIM_OPTIONS, key)) return; // unknown subcommand: the caller prints usage
+  checkOptions(key, [...SHIM_OPTIONS[key]!, ...SHIM_GLOBAL], flags, positional, cmd === 'pulse' ? 0 : 1, repeated, booleans, new Set());
 }

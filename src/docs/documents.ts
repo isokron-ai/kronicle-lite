@@ -158,12 +158,15 @@ export const INSTRUCTION_NAMESPACES = ['instructions/', 'memory/'] as const;
  * characters. MCP put_document and apply additionally refuse the reserved `instructions/` and
  * `memory/` namespaces (instruction import owns them).
  */
-export const SLUG_PATTERN = `^(?=.{1,128}$)(?:${SLUG_RE.source.slice(1, -1)}|${PATH_SLUG_RE.source.slice(1, -1)})$`;
+// No look-ahead: the pattern is published in the MCP schema and RE2-based clients cannot compile one.
+// The 128-character bound is the schema's maxLength, and isValidSlug checks it in code.
+export const SLUG_PATTERN = `^(?:${SLUG_RE.source.slice(1, -1)}|${PATH_SLUG_RE.source.slice(1, -1)})$`;
+export const MAX_SLUG_LENGTH = 128;
 const SLUG_ANY_RE = new RegExp(SLUG_PATTERN);
 export const SLUG_RULE = 'a slug is lowercase letters, digits, . _ - (starting with a letter or digit), or a namespaced path such as finding/G-2 (a lowercase namespace, then /-separated segments that may use upper case), at most 128 characters';
 
 export function isValidSlug(slug: string): boolean {
-  return SLUG_ANY_RE.test(slug);
+  return slug.length >= 1 && slug.length <= MAX_SLUG_LENGTH && SLUG_ANY_RE.test(slug);
 }
 
 export function isInstructionSlug(slug: string | null | undefined): boolean {

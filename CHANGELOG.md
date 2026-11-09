@@ -114,6 +114,33 @@ uses semantic versioning once past 0.x.
     every byte. `--max-bytes` without a value was ignored and is now an
     error, and the over-budget message for `events.jsonl` is accurate (the
     budget is the only limit; the fixed 512 MB cap is gone).
+  - **Review of #35.**
+    - **A hostile self-signed bundle no longer exhausts memory.**
+      `range.leaf_count` must equal `to_seq - from_seq + 1`, the number of
+      events and stubs the manifest lists, and `root.leaf_count`, before
+      anything is read. `events.jsonl` lines are checked as they stream
+      (hash, schema, index, chain link) and dropped, so what is kept is
+      bounded by the signed index. Lines longer than 1 MiB, more lines than
+      the index lists, and the first line that is not a JSON object stop the
+      read. Before, with `leaf_count` 1e12, a correct digest and 64 MiB of
+      `{}` lines, the verifier ran out of memory (exit 134, 4.5 GB RSS, 39 s).
+      The measured numbers are in EVIDENCE-BUNDLE.md.
+    - **Meaningful time bounds are absolute or relative.** The flight
+      recorder's lock wait (`BOOKKEEPING_WAIT_MS`) must be at most a fifth of
+      the busy timeout, and the locked run may exceed an unlocked baseline
+      only by that wait. The shim's fast-path overhead must stay under half a
+      node startup measured in the same run. Re-introducing a 9 s wait, or a
+      node start in the fast path, fails these tests.
+    - **Strict options everywhere.** `pulse` and the shim subcommands
+      validate their options, and each `audit` / `anchor` subcommand has its
+      own list. A value-taking option given no value (`--key`, `--cursor`,
+      `--title`, …) is an error (exit 2); a bare `verify-bundle --key` used
+      to run unauthenticated.
+    - The published slug pattern has no look-ahead, so RE2 clients can
+      compile it; the length bound is `maxLength` and is checked in code.
+      Catalogs re-pinned. `doctor --full` now checks the audit projection,
+      as `verify-chain` does.
+    - The lost-update lookup scans events since the cursor (#36).
   - **Dogfood follow-ups (pre-release audit run).**
     - **One slug rule (KL-5).** The CLI accepted `finding/G-2`, MCP
       `put_document` refused it: each path had its own regex. One pattern

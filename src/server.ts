@@ -23,7 +23,7 @@ import { AUDIT_KINDS, AuditEventInputSchema, PAYLOAD_SCHEMAS } from './audit/sch
 import { ChainConflictError } from './chain/index.js';
 import { bindGit } from './git/binding.js';
 import type { BlockSummary, DocumentSource } from './docs/documents.js';
-import { DocumentError, isInstructionSlug, SLUG_PATTERN } from './docs/documents.js';
+import { DocumentError, isInstructionSlug, MAX_SLUG_LENGTH, SLUG_PATTERN } from './docs/documents.js';
 import { revisionBlocks } from './docs/put-blocks.js';
 import { checkRevisionRow } from './docs/integrity.js';
 import { FOCUSES, type ProjectScope } from './orient/orient.js';
@@ -557,7 +557,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
         'token, private key, connection string): the chain cannot forget it.',
       inputSchema: lean(
         z.object({
-          slug: z.string().max(128).regex(new RegExp(SLUG_PATTERN)).describe('name or namespace/Path (finding/G-2); max 128'),
+          slug: z.string().min(1).max(MAX_SLUG_LENGTH).regex(new RegExp(SLUG_PATTERN)).describe('name or namespace/Path (finding/G-2); max 128'),
           title: z.string().min(1).max(300),
           markdown: z.string().max(2_000_000),
           idempotency_key: z.string().min(1).max(200).optional(),

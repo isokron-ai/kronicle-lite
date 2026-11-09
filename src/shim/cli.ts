@@ -9,6 +9,7 @@ import { join } from 'node:path';
 
 import { defaultDataDir } from '../db/open.js';
 import { VERSION } from '../version.js';
+import { validateShimFlags } from '../cli-flags.js';
 import { DEFAULT_COMMANDS } from './rules.js';
 import {
   PULSE_UNAVAILABLE_EXIT,
@@ -30,31 +31,39 @@ interface Parsed {
   positional: string[];
   flags: Record<string, string | true>;
   rest: string[];
+  /** Options given more than once. */
+  repeated: string[];
 }
 
 const BOOL = new Set(['json', 'all-projects', 'windows', 'no-windows', 'posix', 'no-posix', 'git-hook', 'all-readers', 'operator']);
 
 function parse(argv: string[]): Parsed {
   const positional: string[] = [];
-  const flags: Record<string, string | true> = {};
+  // null prototype: option names are user input
+  const flags: Record<string, string | true> = Object.create(null) as Record<string, string | true>;
+  const repeated: string[] = [];
+  const set = (k: string, v: string | true) => {
+    if (Object.hasOwn(flags, k) && !repeated.includes(k)) repeated.push(k);
+    flags[k] = v;
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
-    if (a === '--') return { positional, flags, rest: argv.slice(i + 1) };
+    if (a === '--') return { positional, flags, rest: argv.slice(i + 1), repeated };
     if (a.startsWith('--')) {
       const eq = a.indexOf('=');
       if (eq > 2) {
-        flags[a.slice(2, eq)] = a.slice(eq + 1);
+        set(a.slice(2, eq), a.slice(eq + 1));
         continue;
       }
       const key = a.slice(2);
       const next = argv[i + 1];
       if (!BOOL.has(key) && next !== undefined && !next.startsWith('--')) {
-        flags[key] = next;
+        set(key, next);
         i++;
-      } else flags[key] = true;
+      } else set(key, true);
     } else positional.push(a);
   }
-  return { positional, flags, rest: [] };
+  return { positional, flags, rest: [], repeated };
 }
 
 const str = (v: string | true | undefined): string | undefined => (typeof v === 'string' ? v : undefined);
@@ -117,7 +126,14 @@ Without --dir, status/ack/uninstall use the first shim dir on PATH.
 `;
 
 export async function runShimCli(cmd: 'pulse' | 'shim', argv: string[]): Promise<number> {
-  const { positional, flags, rest } = parse(argv);
+  const { positional, flags, rest, repeated } = parse(argv);
+  // 0.9.0: unknown / repeated / value-less options and stray positionals are errors (exit 2), as in the main CLI.
+  try {
+    validateShimFlags(cmd, flags, positional, repeated, BOOL);
+  } catch (err) {
+    process.stderr.write(`error: ${(err as Error).message}\n`);
+    return 2;
+  }
   const dataDirFlag = str(flags['data-dir']);
   const dataDir = dataDirFlag ?? defaultDataDir();
   const cwd = str(flags['cwd']);

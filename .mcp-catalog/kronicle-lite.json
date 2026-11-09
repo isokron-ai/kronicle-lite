@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-09T01:37:24.065Z",
+  "capturedAt": "2026-11-09T02:59:08.024Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -925,7 +925,8 @@
             "slug": {
               "description": "name or namespace/Path (finding/G-2); max 128",
               "maxLength": 128,
-              "pattern": "^(?=.{1,128}$)(?:[a-z0-9][a-z0-9._-]{0,127}|[a-z0-9][a-z0-9._-]{0,63}(?:\\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}){1,16})$",
+              "minLength": 1,
+              "pattern": "^(?:[a-z0-9][a-z0-9._-]{0,127}|[a-z0-9][a-z0-9._-]{0,63}(?:\\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}){1,16})$",
               "type": "string"
             },
             "source_path": {
@@ -1567,5 +1568,5 @@
     "title": "kronicle-lite",
     "version": "0.9.0"
   },
-  "sha256": "0bee094f8e840a4f02fdf4cb75356c9e8978a139572f70790dd52224a35cf7f4"
+  "sha256": "d7ffc5c9a73dc3353e87967552d5747299ad56f7a7c6d8e5635d56e6eac9cab7"
 }

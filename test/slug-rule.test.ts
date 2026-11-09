@@ -35,9 +35,10 @@ describe('one slug rule for MCP, CLI and the store', () => {
     await close();
   });
 
-  it('isValidSlug and the MCP schema pattern are the same rule', () => {
+  it('isValidSlug and the MCP schema (pattern + maxLength) are the same rule; the pattern has no look-around (RE2)', () => {
     const re = new RegExp(SLUG_PATTERN);
-    for (const s of [...VALID, ...INVALID]) expect(re.test(s), s).toBe(isValidSlug(s));
+    expect(SLUG_PATTERN).not.toMatch(/\(\?[=!<]/);
+    for (const s of [...VALID, ...INVALID]) expect(re.test(s) && s.length >= 1 && s.length <= 128, s).toBe(isValidSlug(s));
     for (const s of VALID) expect(isValidSlug(s), s).toBe(true);
     for (const s of INVALID) expect(isValidSlug(s), s).toBe(false);
   });

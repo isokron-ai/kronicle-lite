@@ -327,3 +327,44 @@ describe.skipIf(!POSIX)('verify-bundle: events.jsonl is read once, as a stream, 
   });
 });
 
+
+describe.skipIf(!POSIX)('verify-bundle: a hostile self-signed bundle cannot exhaust memory (nothing per line is retained)', () => {
+  it('range.leaf_count of 1e12 is refused from the manifest before anything is read', () => {
+    const dir = bundle();
+    selfSign(dir, (m) => {
+      (m.range as { leaf_count: number }).leaf_count = 1e12;
+      (m.root as { leaf_count: number }).leaf_count = 1e12;
+    });
+    let r!: ReturnType<typeof verifyBundle>;
+    const cost = rssAfter(() => (r = verifyBundle(dir)));
+    expect(r.ok).toBe(false);
+    expect(r.checks.find((c) => c.check === 'canonical')!.problem).toMatch(/leaf_count/);
+    expect(cost.mb).toBeLessThan(32);
+  });
+
+  it.each([
+    ['{}\n', 'huge', /leaf_count/],
+    ['x\n', 'huge', /leaf_count/],
+    ['{}\n', 'index', /more than the \d+ line/],
+    ['x\n', 'index', /line 1 is not usable JSON/],
+  ])('8 MiB of %j lines matching a self-signed digest (leaf_count: %s): refused early, flat memory', (unit, range, why) => {
+    const dir = bundle();
+    const text = (unit as string).repeat(Math.floor((8 * 1024 * 1024) / (unit as string).length));
+    writeFileSync(join(dir, 'events.jsonl'), text);
+    selfSign(dir, (m) => {
+      (m as { events_sha256: string }).events_sha256 = createHash('sha256').update(text).digest('hex');
+      if (range === 'huge') {
+        // the coordinator's repro: a consistent-looking range of 1e12 leaves, so the old line cap was 1e12
+        (m.range as { to_seq: number }).to_seq = m.range.from_seq + 1e12 - 1;
+        (m.range as { leaf_count: number }).leaf_count = 1e12;
+        (m.root as { leaf_count: number }).leaf_count = 1e12;
+      }
+    });
+    let r!: ReturnType<typeof verifyBundle>;
+    const cost = rssAfter(() => (r = verifyBundle(dir)));
+    rmSync(join(dir, 'events.jsonl'));
+    expect(r.ok).toBe(false);
+    expect(r.checks.find((c) => c.check === 'canonical')!.problem).toMatch(why as RegExp);
+    expect(cost.mb).toBeLessThan(48);
+  });
+});
