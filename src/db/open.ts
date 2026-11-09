@@ -269,6 +269,9 @@ function schemaCurrent(db: Db, identity: ServerIdentity): boolean {
       if (!cols.includes(c.column)) return false;
     }
     if (metaValue(db, 'schema_version') === null) return false;
+    // A one-time data migration not yet recorded must run (in setUp's write transaction).
+    const done = db.prepare(`SELECT 1 FROM meta WHERE key = ?`);
+    if (DATA_MIGRATIONS.some((m) => done.get(m.key) === undefined)) return false;
     // 0.9.0: the schema generation marker (an unknown, newer value is fine).
     const gen = metaValue(db, SCHEMA_GENERATION_KEY);
     if (gen === null || (SCHEMA_GENERATIONS as readonly string[]).indexOf(gen) !== -1 && (SCHEMA_GENERATIONS as readonly string[]).indexOf(gen) < (SCHEMA_GENERATIONS as readonly string[]).indexOf(CURRENT_SCHEMA_GENERATION)) return false;
