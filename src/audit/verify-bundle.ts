@@ -16,9 +16,10 @@
  * time.
  */
 
+import { constants as bufferConstants } from 'node:buffer';
 import { createHash, createPublicKey } from 'node:crypto';
-import { lstatSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync } from 'node:fs';
+import { basename, join } from 'node:path';
 
 import { checkpointSigningPayload } from '../chain/chain.js';
 import { recomputeEventHash, type ChainEvent } from '../chain/event.js';
@@ -64,6 +65,81 @@ function parseBounded(text: string): unknown {
   return JSON.parse(text);
 }
 
+/** Largest events.jsonl read: the longest string V8 can hold (a larger file cannot be checked anyway). */
+export const MAX_BUNDLE_FILE_BYTES = bufferConstants.MAX_STRING_LENGTH;
+/** Largest manifest.json read (about 700,000 index entries); it is read before anything is trusted. */
+export const MAX_MANIFEST_BYTES = 64 * 1024 * 1024;
+/** Default read budget for one bundle: manifest, events and blobs together (raise with max_bytes / --max-bytes). */
+export const DEFAULT_MAX_BUNDLE_BYTES = 1024 * 1024 * 1024;
+
+const hardlinked = (name: string, n: number) =>
+  `${name} has ${n} hard links: it may be a file outside the bundle (pass allow_hardlinks / --allow-hardlinks to accept)`;
+
+/**
+ * Read a bundle file only if it is a regular file (not a symlink, device, FIFO or
+ * directory) of at most `max` bytes (`followLinks`: a link to a regular file is fine, as for
+ * the operator's own --key). Opened O_NOFOLLOW | O_NONBLOCK and checked with fstat, so
+ * a FIFO cannot block, a link to /dev/zero cannot exhaust memory, and a file swapped after a
+ * check is still the file that was checked.
+ */
+export function readBundleFile(path: string, max: number, opts: { followLinks?: boolean; allowHardlinks?: boolean } = {}): Buffer {
+  const name = basename(path);
+  const follow = opts.followLinks === true;
+  if (!follow && lstatSync(path).isSymbolicLink()) throw new Error(`${name} is a symbolic link, not a regular file`);
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | (follow ? 0 : (constants.O_NOFOLLOW ?? 0)) | (constants.O_NONBLOCK ?? 0));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ELOOP') throw new Error(`${name} is a symbolic link, not a regular file`);
+    throw err;
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new Error(`${name} is not a regular file`);
+    if (!follow && opts.allowHardlinks !== true && st.nlink > 1) throw new Error(hardlinked(name, st.nlink));
+    if (st.size > max) throw new Error(`${name} is ${st.size} bytes; the limit is ${max}`);
+    const bytes = readFileSync(fd);
+    if (bytes.byteLength > max) throw new Error(`${name} grew past the limit of ${max} bytes while being read`);
+    return bytes;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Largest blob a store accepts (src/audit/log.ts MAX_BLOB_BYTES); a manifest listing a bigger one is refused unread. */
+export const MAX_BUNDLE_BLOB_BYTES = 64 * 1024 * 1024;
+
+/**
+ * sha256 of a regular file, read in 1 MiB chunks (never whole into memory), opened O_NOFOLLOW |
+ * O_NONBLOCK and checked with fstat: at most `max` bytes, exactly `size` when given, one link
+ * unless `allowHardlinks`. Throws on anything else.
+ */
+function hashRegularFile(path: string, opts: { size?: number; max: number; allowHardlinks: boolean }): { sha256: string; size: number } {
+  const name = basename(path);
+  const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new Error('not a regular file');
+    if (!opts.allowHardlinks && st.nlink > 1) throw new Error(hardlinked(name, st.nlink));
+    if (opts.size !== undefined && st.size !== opts.size) throw new Error('size differs');
+    if (st.size > opts.max) throw new Error(`${name} is ${st.size} bytes; the limit is ${opts.max}`);
+    const h = createHash('sha256');
+    const buf = Buffer.allocUnsafe(1024 * 1024);
+    let total = 0;
+    for (;;) {
+      const n = readSync(fd, buf, 0, buf.length, null);
+      if (n === 0) break;
+      total += n;
+      if (total > opts.max || (opts.size !== undefined && total > opts.size)) throw new Error(`${name} grew while being read`);
+      h.update(buf.subarray(0, n));
+    }
+    if (opts.size !== undefined && total !== opts.size) throw new Error('size differs');
+    return { sha256: h.digest('hex'), size: total };
+  } finally {
+    closeSync(fd);
+  }
+}
+
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const isList = (v: unknown): v is unknown[] => Array.isArray(v);
 const int = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v);
@@ -83,6 +159,11 @@ function shapeProblem(m: Record<string, unknown>): string | null {
   if (!isList(st) || !st.every((e) => isObj(e) && int(e['seq']) && typeof e['this_hash'] === 'string')) return 'stubs is not a list of {seq, this_hash}';
   const b = m['blobs'];
   if (!isList(b) || !b.every((e) => isObj(e) && typeof e['sha256'] === 'string' && HEX64.test(e['sha256']) && int(e['size']) && e['size'] >= 0)) return 'blobs is not a list of {sha256 (64 hex), size}';
+  const seenBlobs = new Set<string>();
+  for (const e of b as { sha256: string }[]) {
+    if (seenBlobs.has(e.sha256)) return `blobs lists ${e.sha256.slice(0, 12)}… more than once`;
+    seenBlobs.add(e.sha256);
+  }
   for (const k of ['redacted', 'missing'] as const) {
     const l = m[k];
     if (!isList(l) || !l.every((e) => isObj(e) && typeof e['sha256'] === 'string' && HEX64.test(e['sha256']))) return `${k} is not a list of {sha256 (64 hex), …}`;
@@ -94,7 +175,17 @@ function shapeProblem(m: Record<string, unknown>): string | null {
   return null;
 }
 
-export function verifyBundle(dir: string, opts: { public_key_pem?: string; allow_missing?: boolean } = {}): VerifyBundleResult {
+export interface VerifyBundleOptions {
+  /** The store's public key (PEM): without it the bundle is only checked under the key it names. */
+  public_key_pem?: string;
+  allow_missing?: boolean;
+  /** Most bytes read from the bundle (manifest, events, blobs); default DEFAULT_MAX_BUNDLE_BYTES. */
+  max_bytes?: number;
+  /** Accept bundle files with more than one hard link (by default refused: they may be files outside DIR). */
+  allow_hardlinks?: boolean;
+}
+
+export function verifyBundle(dir: string, opts: VerifyBundleOptions = {}): VerifyBundleResult {
   const checks = new Map<BundleCheck, string | null>(BUNDLE_CHECKS.map((c) => [c, null]));
   const fail = (c: BundleCheck, p: string) => {
     if (checks.get(c) === null) checks.set(c, p);
@@ -105,6 +196,10 @@ export function verifyBundle(dir: string, opts: { public_key_pem?: string; allow
   let m: BundleManifest | null = null;
   let msha: string | null = null;
   const allow_missing = opts.allow_missing === true;
+  const allowHardlinks = opts.allow_hardlinks === true;
+  const budget = opts.max_bytes !== undefined && Number.isFinite(opts.max_bytes) && opts.max_bytes > 0 ? Math.floor(opts.max_bytes) : DEFAULT_MAX_BUNDLE_BYTES;
+  let left = budget;
+  const overBudget = (what: string) => `${what} would take the read past the budget of ${budget} bytes (pass max_bytes / --max-bytes to raise it)`;
   const out = (): VerifyBundleResult => ({
     ok: [...checks.values()].every((v) => v === null),
     audit_id: m?.audit_id ?? null,
@@ -123,16 +218,23 @@ export function verifyBundle(dir: string, opts: { public_key_pem?: string; allow
   return out();
 
   function verifyInto(): void {
-    // 1. canonical: manifest.json and every events.jsonl line are RFC 8785 bytes (+ "\n").
-    let manifestText: string;
-    let eventsText: string;
+    // The path given is resolved once (a symlinked DIR, such as macOS /tmp, is fine); every
+    // component below it (manifest.json, events.jsonl, blobs/, blobs/<sha>) must not be a link.
     try {
-      manifestText = readFileSync(join(dir, 'manifest.json'), 'utf8');
-      eventsText = readFileSync(join(dir, 'events.jsonl'), 'utf8');
+      dir = realpathSync(dir);
     } catch (err) {
       failAll(`cannot read bundle: ${(err as Error).message}`);
       return;
     }
+    // 1. canonical (manifest): manifest.json is RFC 8785 bytes + "\n". Nothing else is read until step 2 passes.
+    let manifestText: string;
+    try {
+      manifestText = readBundleFile(join(dir, 'manifest.json'), Math.min(MAX_MANIFEST_BYTES, left), { allowHardlinks }).toString('utf8');
+    } catch (err) {
+      failAll(`cannot read bundle: ${(err as Error).message}`);
+      return;
+    }
+    left -= Buffer.byteLength(manifestText);
     msha = sha256Hex(manifestText);
     let raw: unknown;
     try {
@@ -146,27 +248,6 @@ export function verifyBundle(dir: string, opts: { public_key_pem?: string; allow
     if (shape) return failAll(`manifest: ${shape}`);
     m = raw as unknown as BundleManifest;
     if (manifestText !== canonicalize(raw as JsonValue) + '\n') fail('canonical', 'manifest.json is not canonical JSON');
-    const rawLines = eventsText.split('\n');
-    if (rawLines.pop() !== '') fail('canonical', 'events.jsonl does not end with a newline');
-    const lines: Record<string, unknown>[] = [];
-    for (const [i, l] of rawLines.entries()) {
-      let v: unknown;
-      try {
-        v = parseBounded(l);
-      } catch (err) {
-        fail('canonical', `events.jsonl line ${i + 1} is not usable JSON: ${(err as Error).message}`);
-        fail('chain', `events.jsonl line ${i + 1} is unreadable`);
-        continue;
-      }
-      if (!isObj(v)) {
-        fail('canonical', `events.jsonl line ${i + 1} is not an object`);
-        fail('chain', `events.jsonl line ${i + 1} is unreadable`);
-        continue;
-      }
-      if (l !== canonicalize(v as JsonValue)) fail('canonical', `events.jsonl line ${i + 1} is not canonical JSON`);
-      lines.push(v);
-    }
-    if (sha256Hex(eventsText) !== m.events_sha256) fail('canonical', 'events.jsonl does not hash to manifest.events_sha256');
 
     // 2. signature: the store key signed the whole manifest (index, lists, digests, root), and is the pinned key if one is given.
     const pem = opts.public_key_pem ?? m.root.public_key_pem;
@@ -178,9 +259,63 @@ export function verifyBundle(dir: string, opts: { public_key_pem?: string; allow
     } catch (err) {
       fail('signature', `cannot check the manifest signature: ${(err as Error).message}`);
     }
+    // An unsigned (or wrongly signed) manifest's digests, sizes and names are an attacker's: read nothing it lists.
+    if (checks.get('signature') !== null) {
+      for (const c of ['events', 'chain', 'root', 'artifacts', 'refs', 'missing'] as const) fail(c, 'not checked: the manifest signature does not verify, so nothing it lists is read');
+      return;
+    }
 
-    // 3. events: each full line re-hashes, belongs to the audit, validates; full lines and stubs match the signed index exactly.
+    // 1 (events): events.jsonl is first stream-hashed (constant memory) against the signed digest; only
+    // the file the manifest signs is read and parsed (and re-hashed in memory, so a swap is caught).
+    let lines: Record<string, unknown>[] | null = null;
+    const evPath = join(dir, 'events.jsonl');
+    let evHash: { sha256: string; size: number } | null = null;
+    try {
+      if (lstatSync(evPath).isSymbolicLink()) throw new Error('events.jsonl is a symbolic link, not a regular file');
+      evHash = hashRegularFile(evPath, { max: Math.min(MAX_BUNDLE_FILE_BYTES, left), allowHardlinks });
+    } catch (err) {
+      const msg = (err as Error).message;
+      fail('canonical', /the limit is/.test(msg) ? overBudget('events.jsonl') + ` (${msg})` : `cannot read events.jsonl: ${msg}`);
+    }
+    if (evHash && evHash.sha256 !== m.events_sha256) fail('canonical', 'events.jsonl does not hash to manifest.events_sha256');
+    if (evHash && evHash.sha256 === m.events_sha256) {
+      let eventsText: string | null = null;
+      try {
+        const bytes = readBundleFile(evPath, evHash.size, { allowHardlinks });
+        if (sha256Hex(bytes) !== m.events_sha256) throw new Error('events.jsonl changed while being verified');
+        eventsText = bytes.toString('utf8');
+        left -= bytes.byteLength;
+      } catch (err) {
+        fail('canonical', `cannot read events.jsonl: ${(err as Error).message}`);
+      }
+      if (eventsText !== null) {
+        const rawLines = eventsText.split('\n');
+        if (rawLines.pop() !== '') fail('canonical', 'events.jsonl does not end with a newline');
+        lines = [];
+        for (const [i, l] of rawLines.entries()) {
+          let v: unknown;
+          try {
+            v = parseBounded(l);
+          } catch (err) {
+            fail('canonical', `events.jsonl line ${i + 1} is not usable JSON: ${(err as Error).message}`);
+            fail('chain', `events.jsonl line ${i + 1} is unreadable`);
+            continue;
+          }
+          if (!isObj(v)) {
+            fail('canonical', `events.jsonl line ${i + 1} is not an object`);
+            fail('chain', `events.jsonl line ${i + 1} is unreadable`);
+            continue;
+          }
+          if (l !== canonicalize(v as JsonValue)) fail('canonical', `events.jsonl line ${i + 1} is not canonical JSON`);
+          lines.push(v);
+        }
+      }
+    }
+    if (lines === null) for (const c of ['events', 'chain', 'root', 'refs'] as const) fail(c, 'not checked: events.jsonl is not the file the manifest signs');
     const full: ChainEvent[] = [];
+    const r = m.range;
+    if (lines !== null) {
+    // 3. events: each full line re-hashes, belongs to the audit, validates; full lines and stubs match the signed index exactly.
     const stubIndex: { seq: number; this_hash: string }[] = [];
     for (const l of lines) {
       if (l['stub'] === true) {
@@ -215,7 +350,6 @@ export function verifyBundle(dir: string, opts: { public_key_pem?: string; allow
     if (canonicalize(stubIndex as unknown as JsonValue) !== canonicalize(m.stubs as unknown as JsonValue)) fail('events', 'stubs in events.jsonl differ from manifest.stubs');
 
     // 4. chain: contiguous seqs from_seq..to_seq, each prev_hash = previous this_hash (through stubs), first = range.first_prev_hash.
-    const r = m.range;
     if (lines.length !== r.to_seq - r.from_seq + 1 || lines.length !== r.leaf_count) fail('chain', `range ${r.from_seq}..${r.to_seq} needs ${r.to_seq - r.from_seq + 1} lines; events.jsonl has ${lines.length}`);
     let prev = r.first_prev_hash;
     for (const [i, l] of lines.entries()) {
@@ -245,35 +379,72 @@ export function verifyBundle(dir: string, opts: { public_key_pem?: string; allow
     } catch (err) {
       fail('root', `cannot check root: ${(err as Error).message}`);
     }
+    }
 
     // 6. artifacts: every listed blob is a regular file DIR/blobs/<64 hex>, hashing to its name and size; no unlisted entries.
-    const listed = new Set<string>();
+    // Only reached with a verified manifest signature (step 2 returns otherwise). Each listed blob (no duplicates:
+    // shape check) is stream-hashed once; together they must fit the read budget.
+    const listed = new Set<string>(m.blobs.map((b) => b.sha256));
     const blobsDir = join(dir, 'blobs');
-    for (const b of m.blobs) {
-      listed.add(b.sha256); // shape check: 64 hex, so the join stays inside DIR/blobs
-      const p = join(blobsDir, b.sha256);
-      let st: ReturnType<typeof lstatSync> | null = null;
-      try {
-        st = lstatSync(p);
-      } catch {
-        fail('artifacts', `blob ${b.sha256.slice(0, 12)}… listed but absent`);
-        continue;
-      }
-      if (!st.isFile()) {
-        fail('artifacts', `blob ${b.sha256.slice(0, 12)}… is not a regular file`);
-        continue;
-      }
-      const bytes = readFileSync(p);
-      if (createHash('sha256').update(bytes).digest('hex') !== b.sha256) fail('artifacts', `blob ${b.sha256.slice(0, 12)}… does not hash to its name`);
-      else if (bytes.byteLength !== b.size) fail('artifacts', `blob ${b.sha256.slice(0, 12)}… size differs`);
-    }
-    let entries: string[] = [];
+    let blobsSt: ReturnType<typeof lstatSync> | null = null;
     try {
-      entries = readdirSync(blobsDir);
+      blobsSt = lstatSync(blobsDir);
     } catch {
-      // no blobs/ directory: fine when nothing is listed (absences reported above)
+      // no blobs/ directory: fine when nothing is listed (absences reported below)
     }
-    for (const f of entries) if (!listed.has(f)) fail('artifacts', `unlisted entry blobs/${f}`);
+    if (blobsSt !== null && blobsSt.isSymbolicLink()) {
+      fail('artifacts', 'blobs/ is a symbolic link; a bundle directory must not link out');
+    } else if (blobsSt !== null && !blobsSt.isDirectory()) {
+      fail('artifacts', 'blobs/ is not a directory');
+    } else {
+      for (const b of m.blobs) {
+        const p = join(blobsDir, b.sha256); // shape check: 64 hex, so the join stays inside DIR/blobs
+        let st: ReturnType<typeof lstatSync> | null = null;
+        try {
+          st = lstatSync(p);
+        } catch {
+          fail('artifacts', `blob ${b.sha256.slice(0, 12)}… listed but absent`);
+          continue;
+        }
+        if (!st.isFile()) {
+          fail('artifacts', `blob ${b.sha256.slice(0, 12)}… is not a regular file`);
+          continue;
+        }
+        if (b.size > MAX_BUNDLE_BLOB_BYTES) {
+          fail('artifacts', `blob ${b.sha256.slice(0, 12)}… is listed at ${b.size} bytes; the limit is ${MAX_BUNDLE_BLOB_BYTES}`);
+          continue;
+        }
+        if (st.size !== b.size) {
+          fail('artifacts', `blob ${b.sha256.slice(0, 12)}… size differs`);
+          continue;
+        }
+        if (b.size > left) {
+          fail('artifacts', overBudget(`blob ${b.sha256.slice(0, 12)}… (${b.size} bytes)`));
+          break;
+        }
+        left -= b.size;
+        let digest: string;
+        try {
+          digest = hashRegularFile(p, { size: b.size, max: b.size, allowHardlinks }).sha256;
+        } catch (err) {
+          fail('artifacts', `blob ${b.sha256.slice(0, 12)}… cannot be read: ${(err as Error).message}`);
+          continue;
+        }
+        if (digest !== b.sha256) fail('artifacts', `blob ${b.sha256.slice(0, 12)}… does not hash to its name`);
+      }
+      // blobs/ swapped while it was read: the files hashed above may not be the bundle's.
+      if (blobsSt !== null) {
+        const now = lstatSync(blobsDir, { throwIfNoEntry: false });
+        if (!now || now.isSymbolicLink() || now.dev !== blobsSt.dev || now.ino !== blobsSt.ino) fail('artifacts', 'blobs/ changed during verification');
+      }
+      let entries: string[] = [];
+      try {
+        entries = blobsSt !== null ? readdirSync(blobsDir) : [];
+      } catch {
+        // unreadable: absences are reported above
+      }
+      for (const f of entries) if (!listed.has(f)) fail('artifacts', `unlisted entry blobs/${f}`);
+    }
 
     // 7. refs: every blob ref is present, or declared redacted / missing (exactly one); every evidence id is an event of the bundle.
     const redacted = new Set(m.redacted.map((x) => x.sha256));

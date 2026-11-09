@@ -107,7 +107,8 @@ describe('evidence bundle: export and offline verification', () => {
     // a pinned key that did not sign it
     {
       const { kl, dir } = fresh();
-      expect(failed(dir, { public_key_pem: ephemeralIdentity().signer.public_key_pem })).toEqual(['signature', 'root']);
+      // an untrusted manifest: nothing it lists is read (events, blobs), so every later step is "not checked" (fails closed)
+      expect(failed(dir, { public_key_pem: ephemeralIdentity().signer.public_key_pem })).toEqual(['signature', 'events', 'chain', 'root', 'artifacts', 'refs', 'missing']);
       expect(failed(dir, { public_key_pem: kl.identity.signer.public_key_pem })).toEqual([]);
       kl.close();
     }
@@ -118,7 +119,7 @@ describe('evidence bundle: export and offline verification', () => {
       const m = JSON.parse(readFileSync(p, 'utf8')) as { redacted: unknown[] };
       m.redacted = [];
       writeFileSync(p, canonicalize(m as never) + '\n');
-      expect(failed(dir)).toEqual(['signature', 'refs']);
+      expect(failed(dir)).toEqual(['signature', 'events', 'chain', 'root', 'artifacts', 'refs', 'missing']); // the broken signature stops the check before anything it lists is read
       kl.close();
     }
     // an extra file slipped into blobs/

@@ -83,6 +83,8 @@ const BOOLEAN_FLAGS = new Set([
   'redact-secrets',
   'findings',
   'allow-missing',
+  'allow-hardlinks',
+  'strict',
   'allow-secrets',
   'insecure-http',
 ]);
@@ -206,9 +208,11 @@ Usage:
                                                                  all or nothing; a retried event_key is a no-op
   kronicle-lite audit query  --audit-id A | --fingerprint F [--kind K] [--finding ID] [--findings] [--json]
   kronicle-lite audit export --audit-id A --out DIR             evidence bundle: manifest + events + blobs, signed root
-  kronicle-lite verify-bundle DIR [--key PEM-FILE] [--allow-missing] [--json]
+  kronicle-lite verify-bundle DIR [--key PEM-FILE] [--strict] [--allow-missing] [--allow-hardlinks] [--max-bytes N] [--json]
                                                                  verify a bundle offline (no store); exit 1 on any failure
-                                                                 (missing artifacts fail unless --allow-missing)
+                                                                 (missing artifacts fail unless --allow-missing). Without
+                                                                 --key the signer is NOT verified (tamper-evidence only);
+                                                                 --strict requires --key. Reads at most 1 GiB (--max-bytes)
   kronicle-lite shim install [--dir D] [--commands git,terraform,kubectl,…] [--world "make release,…"] [--mode deny|warn]
   [--git-hook]   | status | ack --operator [--through SEQ] | uninstall   PATH wrappers (+ git pre-push hook) that pulse before
                                                                  world-changing commands (git push, terraform apply, …)
@@ -422,10 +426,26 @@ async function main(argv: string[]): Promise<number> {
     }
     case 'verify-bundle': {
       const dir = positional[0];
-      if (!dir) throw new Error('usage: kronicle-lite verify-bundle DIR [--key PEM-FILE] [--allow-missing] [--json]');
-      const { verifyBundle } = await import('./audit/verify-bundle.js');
+      if (!dir) throw new Error('usage: kronicle-lite verify-bundle DIR [--key PEM-FILE] [--strict] [--allow-missing] [--allow-hardlinks] [--max-bytes N] [--json]');
+      const { verifyBundle, readBundleFile } = await import('./audit/verify-bundle.js');
       const key = str(flags['key']);
-      const r = verifyBundle(dir, { ...(key ? { public_key_pem: readFileSync(key, 'utf8') } : {}), allow_missing: flags['allow-missing'] === true });
+      if (!key) {
+        // Without a pinned key the bundle is checked under the key it names: anyone can make one that passes.
+        if (flags['strict'] === true) {
+          process.stderr.write('kronicle-lite verify-bundle --strict: refusing without --key: the signer of a bundle can only be verified against the store public key you pin (kronicle-lite keys on the store prints it)\n');
+          return 1;
+        }
+        process.stderr.write('warning: signer NOT verified (no --key): this checks that the bundle is intact and self-consistent under the key it names (tamper-evidence), not who made it; pass --key with the store public key for authenticity\n');
+      }
+      const maxBytes = num(flags['max-bytes']);
+      if (maxBytes !== undefined && maxBytes <= 0) throw new Error('--max-bytes must be a positive integer');
+      // A PEM public key is a few hundred bytes; a device, FIFO or huge file is refused, not read.
+      const r = verifyBundle(dir, {
+        ...(key ? { public_key_pem: readBundleFile(key, 64 * 1024, { followLinks: true }).toString('utf8') } : {}),
+        allow_missing: flags['allow-missing'] === true,
+        allow_hardlinks: flags['allow-hardlinks'] === true,
+        ...(maxBytes !== undefined ? { max_bytes: maxBytes } : {}),
+      });
       if (flags['json'] === true) process.stdout.write(JSON.stringify(r, null, 2) + '\n');
       else {
         for (const c of r.checks) process.stdout.write(`${c.ok ? 'ok  ' : 'FAIL'} ${c.check}${c.problem ? `: ${c.problem}` : ''}\n`);
