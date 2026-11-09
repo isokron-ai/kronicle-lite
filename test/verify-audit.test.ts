@@ -347,6 +347,42 @@ describe('verify-audit: a synthetic evidence pack end to end', () => {
     expect(all.match(/Signature Verified Successfully/g)?.length).toBe(3);
   });
 
+  const opensslTs = (() => {
+    if (process.platform === 'win32') return false;
+    const o = spawnSync('openssl', ['version'], { encoding: 'utf8' });
+    return o.status === 0 && /^OpenSSL [3-9]\./.test(o.stdout);
+  })();
+  it.skipIf(!opensslTs)("the pack's tsa-roots/ files verify real Sectigo and DigiCert tokens with openssl ts -verify -partial_chain", () => {
+    const real = join(__dirname, 'fixtures', 'verify-audit', 'real-tsa');
+    const roots = join(f.pkg, 'tsa-roots');
+    // sectigo.pem holds only the USERTrust-issued R46, the form the tokens embed; verify-audit still pins both forms
+    const certsIn = (file: string) => readFileSync(file, 'utf8').match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g)!.map((p) => new X509Certificate(p).fingerprint256.replace(/:/g, '').toLowerCase());
+    expect(certsIn(join(roots, 'sectigo.pem'))).toEqual(['b53ac15cc1afb6e2ac06828f555bb3bf5bad8b2bac1733ce4cb7aafe729356de']);
+    expect(certsIn(join(roots, 'digicert.pem'))).toEqual(['ca0b1554ecd901ea19dcad8749e9f2648c8d6dfcea1add9d2c2109415bb82ccd', '281734d4592d1291d27190709cb510b07e22c405d5e0d6119b70e73589f98acf']);
+    expect(SHIPPED_TSA_ROOTS.filter((r) => r.name === 'sectigo')).toHaveLength(2);
+    const ts = (tok: string, ca: string, extra: string[] = []) => {
+      const receipt = readFileSync(join(real, `${tok.split('.')[0]}.receipt.json`));
+      const r = spawnSync('openssl', ['ts', '-verify', '-digest', sha(receipt), '-in', join(real, tok), '-CAfile', ca, '-partial_chain', ...extra], { encoding: 'utf8' });
+      return { ok: r.status === 0 && /Verification: OK/.test(r.stdout), out: r.stdout + r.stderr };
+    };
+    const tokens = readdirSync(real).filter((t) => t.endsWith('.tsr'));
+    expect(tokens).toHaveLength(6);
+    for (const t of tokens) {
+      const ca = join(roots, t.includes('sectigo') ? 'sectigo.pem' : 'digicert.pem');
+      const now = ts(t, ca);
+      expect(now.ok, `${t}: ${now.out}`).toBe(true);
+      const at = ts(t, ca, ['-attime', String(Math.floor(Date.parse(inspectTimestamp(readFileSync(join(real, t))).gen_time) / 1000))]);
+      expect(at.ok, `${t} -attime: ${at.out}`).toBe(true);
+      // the same file verifies in-process (VERIFY.md picks each token's CA file this way)
+      const pems = readFileSync(ca, 'utf8').match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----\n?/g)!;
+      expect(verifyTimestamp(readFileSync(join(real, t)), { message: readFileSync(join(real, `${t.split('.')[0]}.receipt.json`)), roots: pems, at: 'gentime' }).ok, t).toBe(true);
+    }
+    // the 0.10.0 file (self-signed R46 first, then the USERTrust-issued form) fails every Sectigo token in openssl
+    const both = join(tempDir('kl-va-r46-'), 'sectigo-both.pem');
+    writeFileSync(both, SHIPPED_TSA_ROOTS.filter((r) => r.name === 'sectigo').map((r) => r.pem).join(''));
+    for (const t of tokens.filter((x) => x.includes('sectigo'))) expect(ts(t, both).out).toMatch(/ess cert id not found/);
+  });
+
   it('one byte flipped in an artifact: exit 1, integrity FAIL', () => {
     const d = copyPkg(f);
     const blobs = join(d, 'bundle', 'blobs');
@@ -395,6 +431,119 @@ describe('verify-audit: a synthetic evidence pack end to end', () => {
     } finally {
       store.close();
     }
+  });
+});
+
+describe('audit package text: the final root label and the anchor sections', () => {
+  const rawTools = (() => {
+    if (process.platform === 'win32') return false;
+    const o = spawnSync('openssl', ['version'], { encoding: 'utf8' });
+    return o.status === 0 && /^OpenSSL 3/.test(o.stdout) && spawnSync('jq', ['--version']).status === 0 && spawnSync('shasum', ['--version']).status === 0;
+  })();
+  const shBlocks = (md: string) => [...md.matchAll(/```sh\n([\s\S]*?)```/g)].map((m) => m[1]!);
+  /** No empty or comment-only command block. */
+  const expectNoEmptyBlocks = (md: string) => {
+    for (const b of shBlocks(md)) expect(b.split('\n').filter((l) => l.trim() && !l.trim().startsWith('#')).length).toBeGreaterThan(0);
+  };
+  /** Every raw command in VERIFY.md succeeds with openssl / jq / shasum alone. */
+  const expectRawCommandsPass = (pkg: string) => {
+    if (!rawTools) return;
+    const md = readFileSync(join(pkg, 'VERIFY.md'), 'utf8');
+    const script = shBlocks(md.slice(md.indexOf('## Without kronicle-lite')))
+      .join('\n')
+      .split('\n')
+      .filter((l) => !/^sha256sum /.test(l) || spawnSync('sha256sum', ['--version']).status === 0);
+    const r = spawnSync('bash', ['-euo', 'pipefail', '-c', script.join('\n')], { cwd: pkg, encoding: 'utf8' });
+    expect(r.stdout + r.stderr).not.toMatch(/Verification: FAILED|Signature Verification Failure|: FAILED/);
+    expect(r.status).toBe(0);
+  };
+
+  /** A small audit: `before` events, an anchor after them (stamped or not) when `anchor`, then `after` more events. */
+  async function pack(o: { anchor: boolean; stamp?: boolean; after?: number }) {
+    const dataDir = tempDir('kl-pt-store-');
+    const work = tempDir('kl-pt-work-');
+    const tsDir = join(work, 'timestamps');
+    mkdirSync(tsDir);
+    const tsa = makeTsa({ name: 'Alpha' });
+    const store = new KronicleLite({ dataDir });
+    const snap = (key: string) => ({ kind: 'catalog_snapshot' as const, event_key: key, payload: { fingerprint: H, server: { name: 'acme' }, tool_count: 3, bytes: 10, snapshot: store.audit.putBlob(Buffer.from(`{"tools":["${key}"]}`), 'application/json') } });
+    store.audit.record(AUDIT, [snap('catalog-1'), snap('catalog-2')], 'auditor');
+    let anchorRoot: string | null = null;
+    let anchorSeq = 0;
+    if (o.anchor) {
+      anchorSeq = store.chain.head().seq;
+      store.chain.checkpoint(1, anchorSeq);
+      const r = await pushCheckpoint(store, { anchorUrl: backend.url, licenseKey: STUB_LICENSE });
+      const row = store.chain.listAnchors().find((a) => a.anchor_id === r.anchor_id)!;
+      anchorRoot = row.root;
+      if (o.stamp) writeFileSync(join(tsDir, `${r.anchor_id}.alpha.tsr`), tsa.stamp(row.receipt_json));
+    }
+    for (let i = 0; i < (o.after ?? 0); i++) store.audit.record(AUDIT, [snap(`later-${i}`)], 'auditor');
+    const out = join(work, 'package');
+    const p = await buildAuditPackage(store, { audit_id: AUDIT, out, timestamps_dir: tsDir, tsa_roots: [tsa.root.pem], genesis: backend.genesis });
+    store.close();
+    return { p, out, anchorRoot, anchorSeq, completion: readFileSync(join(out, 'COMPLETION.txt'), 'utf8'), verify: readFileSync(join(out, 'VERIFY.md'), 'utf8') };
+  }
+
+  it('the last anchor commits the bundle root: "Final anchored root", every section present', async () => {
+    const r = await pack({ anchor: true, stamp: true });
+    expect(r.anchorRoot).toBe(r.p.root);
+    expect(r.completion).toContain('Tamper-evident, independently timestamped audit evidence.');
+    expect(r.completion).toContain(`Final anchored root   ${r.p.root}\n  covering            seq 1..${r.anchorSeq}`);
+    expect(r.completion).toMatch(/\n {2}anchor {14}01-catalog-snapshot, /);
+    expect(r.completion).toContain('\nMilestones\n');
+    expect(r.completion).not.toContain('Last anchored root');
+    expect(r.verify).toContain(`- Final anchored root: \`${r.p.root}\``);
+    expect(r.verify).not.toContain('Last anchored root');
+    for (const h of ['### 1. Files: SHA256SUMS and its signature', '### 2. Independent time: each RFC 3161 token', '### 3. Anchor receipts: Ed25519 signatures', '## Re-verifying in later years']) expect(r.verify).toContain(h);
+    expect(r.verify).not.toMatch(/no anchor receipts|no RFC 3161 timestamp tokens/);
+    expectNoEmptyBlocks(r.verify);
+    expectRawCommandsPass(r.out);
+  });
+
+  it('events after the last anchor: "Final root", and the last anchored root on its own line with its range', async () => {
+    const r = await pack({ anchor: true, stamp: true, after: 2 });
+    expect(r.anchorRoot).not.toBe(r.p.root);
+    expect(r.p.to_seq).toBe(r.anchorSeq + 2);
+    for (const t of [r.completion, r.verify]) expect(t).not.toContain('Final anchored root');
+    expect(r.completion).toContain(`Final root            ${r.p.root}\n  covering            seq 1..${r.p.to_seq}`);
+    expect(r.completion).toContain(`Last anchored root    ${r.anchorRoot} (seq 1..${r.anchorSeq})\n  anchor              01-catalog-snapshot, `);
+    expect(r.verify).toContain(`- Final root: \`${r.p.root}\`\n- Last anchored root: \`${r.anchorRoot}\` (seq 1..${r.anchorSeq})`);
+    expect(r.verify).toContain('### 2. Independent time: each RFC 3161 token');
+    expectNoEmptyBlocks(r.verify);
+    expectRawCommandsPass(r.out);
+  });
+
+  it('an anchor without tokens: one line instead of the timestamp sections, the receipt section stays', async () => {
+    const r = await pack({ anchor: true });
+    expect(r.completion).toContain(`Final anchored root   ${r.p.root}`);
+    expect(r.completion).toContain('Tamper-evident audit evidence.');
+    expect(r.completion).not.toContain('independently timestamped');
+    expect(r.verify).toContain('This pack has no RFC 3161 timestamp tokens.');
+    expect(r.verify).toContain('### 2. Anchor receipts: Ed25519 signatures');
+    expect(r.verify).not.toMatch(/Independent time|Re-verifying in later years|openssl ts /);
+    expectNoEmptyBlocks(r.verify);
+    expectRawCommandsPass(r.out);
+  });
+
+  it('no anchors: "Final root", one line saying so, no anchor or timestamp sections and no empty blocks', async () => {
+    const r = await pack({ anchor: false });
+    expect(r.p.anchors).toEqual([]);
+    for (const t of [r.completion, r.verify]) {
+      expect(t).not.toMatch(/anchored root/i);
+      expect(t).not.toContain('independently timestamped');
+      expect(t).not.toMatch(/immutable|tamper-proof|certified|trustless/i);
+    }
+    expect(r.completion).toContain('Tamper-evident audit evidence.');
+    expect(r.completion).toContain(`Final root            ${r.p.root}`);
+    expect(r.completion).toContain('Anchors               none (this pack has no anchor receipts)');
+    expect(r.completion).not.toMatch(/Milestones|\n {2}anchor |\n {2}timestamps /);
+    expect(r.verify).toContain(`- Final root: \`${r.p.root}\``);
+    expect(r.verify).toContain('This pack has no anchor receipts, so it carries no anchor signatures or RFC 3161 timestamp tokens to check.');
+    expect(r.verify).toContain('### 1. Files: SHA256SUMS and its signature');
+    expect(r.verify).not.toMatch(/### 2\.|Independent time|Anchor receipts:|Re-verifying in later years|holds no anchors/);
+    expectNoEmptyBlocks(r.verify);
+    expectRawCommandsPass(r.out);
   });
 });
 

@@ -315,10 +315,12 @@ kronicle-lite anchor keys              # the genesis pin in force and the kept s
   (status)`; before that it says nothing about anchoring, and `doctor`
   only probes the service when a license key or URL is configured.
 - **The service.** The default, `https://anchor.isokron.ai`, is IsoKron's
-  audit-verification service, operated for IsoKron's own audits. Anchoring is
-  optional, and you can self-host the service
-  ([isokron-anchor](https://github.com/rafe-walker/isokron-anchor)) and point
-  `--url` / `KRONICLE_ANCHOR_URL` at your deployment, with its genesis pin
+  audit-verification service, operated for IsoKron's own audits. It publishes
+  its service keys at [anchor.isokron.ai/keys](https://anchor.isokron.ai/keys)
+  and its pinned timestamping CAs at
+  [anchor.isokron.ai/.well-known/tsa-ca.json](https://anchor.isokron.ai/.well-known/tsa-ca.json).
+  Anchoring is optional. To use a self-hosted deployment of the service, point
+  `--url` / `KRONICLE_ANCHOR_URL` at it, with its genesis pin
   (`--genesis` / `KRONICLE_ANCHOR_GENESIS` / `"anchor_genesis"` in
   `config.json`, as `<sha256>@<valid_from>`). When it cannot be reached, `--push` stores the
   checkpoint locally and exits 2 with `anchor service unreachable at …`;
