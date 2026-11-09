@@ -356,7 +356,7 @@ timestamp authorities (Sectigo, DigiCert) on every receipt, and the keys and
 roots to check them. A client checks it offline with one command:
 
 ```sh
-npx -y kronicle-lite@0.10.0 verify-audit pack/ --key-fingerprint <SHA-256 of the auditor key, from the report or SOW>
+npx -y kronicle-lite@0.10.1 verify-audit pack/ --key-fingerprint <SHA-256 of the auditor key, from the report or SOW>
 ```
 
 ```sh

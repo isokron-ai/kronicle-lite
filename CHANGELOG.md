@@ -6,6 +6,8 @@ uses semantic versioning once past 0.x.
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-11-09
+
 ### Fixed
 
 - **`audit package`: `tsa-roots/sectigo.pem` verifies with openssl.** In
