@@ -134,6 +134,9 @@ export class KronicleLite {
     );
     let n = 0;
     for (const ev of this.chain.iterate()) {
+      // why: iterate() reads in batches, so a writer appending mid-export would add events past the
+      // header's head; the export is the chain as of that head (import checks the file ends there).
+      if (ev.seq > head.seq) break;
       out.write(JSON.stringify(ev) + '\n');
       n++;
     }
@@ -167,7 +170,7 @@ export class KronicleLite {
     if (this.chain.head().seq !== 0) throw new Error('import requires an empty store (head seq must be 0)');
     const lines = createInterface({ input, crlfDelay: Infinity });
     const events: ChainEvent[] = [];
-    let header: { key_id?: string; public_key_pem?: string } | null = null;
+    let header: { key_id?: string; public_key_pem?: string; head?: { seq?: unknown; hash?: unknown } } | null = null;
     let first = true;
     for await (const line of lines) {
       if (line.trim().length === 0) continue;
@@ -181,6 +184,20 @@ export class KronicleLite {
         }
       }
       events.push(ChainEventSchema.parse(obj));
+    }
+    // 0.9.0: the header names the head the export was taken at. A file that ends anywhere else was
+    // cut short (an interrupted `export --out`, a full disk, a partial copy): refuse it rather than
+    // import a shorter chain as if it were the whole one.
+    const claimed = header?.head;
+    if (claimed && typeof claimed === 'object' && typeof claimed.seq === 'number') {
+      const last = events.at(-1);
+      const endSeq = last?.seq ?? 0;
+      if (claimed.seq !== endSeq) {
+        throw new Error(`import: the export is truncated: its header names head seq ${claimed.seq}, but the file ends at seq ${endSeq}; nothing imported`);
+      }
+      if (last && typeof claimed.hash === 'string' && claimed.hash !== last.this_hash) {
+        throw new Error(`import: the last event (seq ${endSeq}) does not hash to the head the export header names; nothing imported`);
+      }
     }
     if (opts.allow_secrets !== true) {
       const findings = events.flatMap((ev) => scanValue(ev.payload, `seq ${ev.seq} ${ev.event_type}`));

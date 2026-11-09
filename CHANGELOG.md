@@ -74,6 +74,13 @@ uses semantic versioning once past 0.x.
     process migrates the store drops its TEMP tables as the real ones appear
     (`test/upgrade-old-stores.test.ts`, fixture `store-0.7.0.db.gz` made by
     the published 0.7.0).
+  - **Truncated exports are refused.** `import` read an export to its last
+    line and ignored the head its header names, so a file cut short (an
+    interrupted `export --out`, a full disk, a partial copy) imported as a
+    shorter chain with exit 0 and a chain that verifies. The file must now end
+    at the header's head seq and hash, else nothing is imported. `export`
+    stops at the head it wrote in the header, so a writer appending
+    mid-export no longer adds events past it.
   - **Safe export:** `--out` must be new or empty and free of symlinks, and
     every file is created with `O_EXCL|O_NOFOLLOW`, so no symlink planted in
     `--out` is written through.
