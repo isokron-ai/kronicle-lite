@@ -457,7 +457,7 @@ export function refuseInsidePack(packDir: string, p: string, flag: string): void
     return `${st.dev}:${st.ino}`;
   };
   const packId = id(pack);
-  const inside = () => new VerifyAuditUsageError(`${flag} ${p} is inside the pack; trust inputs must come from outside it (the auditor key fingerprint from the report or SOW)`);
+  const inside = () => new VerifyAuditUsageError(`${flag} ${p} is inside the pack; trust inputs must come from outside it (the auditor key fingerprint from the statement of work)`);
   // the input itself, then every directory above it, up to the root
   for (let d = real; ; ) {
     if (id(d) === packId) throw inside();
@@ -778,7 +778,7 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     } else if (opts.key_pem !== undefined) {
       add('pack', null, null, 'auditor key', filePem === null || spki(filePem) === chainId, filePem === null || spki(filePem) === chainId ? `${keyId}, SHA-256(SPKI) ${chainId} (--key)` : `auditor-key.pem (${short(spki(filePem))}) is not the pinned key ${keyId}`);
     } else {
-      add('pack', null, null, 'auditor key', false, `not pinned: pass --key-fingerprint with the auditor key fingerprint from the report or SOW (the pack's own key is ${keyId}, SHA-256(SPKI) ${chainId})`);
+      add('pack', null, null, 'auditor key', false, `not pinned: pass --key-fingerprint with the auditor key fingerprint from the statement of work (the pack's own key is ${keyId}, SHA-256(SPKI) ${chainId})`);
     }
 
     // ── 2. pack layout, then SHA256SUMS before anything the pack says about itself ──

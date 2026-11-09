@@ -275,7 +275,7 @@ describe('verify-audit: a synthetic evidence pack end to end', () => {
     expect(completion).toContain(`Manifest SHA-256      ${f.pack.manifest_sha256}`);
     expect(completion).toContain(`Final anchored root   ${f.pack.root}`);
     // N6: files in the pack carry no trust values, only where to get them
-    expect(completion).toContain('verify-audit <this directory> --key-fingerprint <auditor key fingerprint from your report or SOW> --genesis <the anchor service genesis pin');
+    expect(completion).toContain('verify-audit <this directory> --key-fingerprint <auditor key fingerprint from your statement of work> --genesis <the anchor service genesis pin');
     const verify = readFileSync(join(f.pkg, 'VERIFY.md'), 'utf8');
     for (const t of [completion, verify, readFileSync(join(f.pkg, 'claims.json'), 'utf8')]) {
       expect(t).not.toContain(f.fp);
@@ -1612,7 +1612,7 @@ describe('review round 2 (N1–N9): every R-case fails closed', () => {
     it('R5c: COMPLETION.txt and VERIFY.md name where the fingerprint comes from and never carry it', () => {
       const completion = readFileSync(join(f.pkg, 'COMPLETION.txt'), 'utf8');
       expect(completion).not.toContain(f.fp);
-      expect(completion).toMatch(/--key-fingerprint <auditor key fingerprint from your report or SOW>/);
+      expect(completion).toMatch(/--key-fingerprint <auditor key fingerprint from your statement of work>/);
       expect(readFileSync(join(f.pkg, 'VERIFY.md'), 'utf8')).not.toContain(f.fp);
       // the operator's own terminal gets it
       expect(f.pack.auditor_spki_sha256).toBe(f.fp);

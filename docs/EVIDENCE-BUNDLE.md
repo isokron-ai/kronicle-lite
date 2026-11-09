@@ -202,7 +202,7 @@ kronicle-lite audit stamp --out stamps/               # RFC 3161 over sha256(rec
 # at delivery
 kronicle-lite audit package --audit-id A --out pack/ --timestamps stamps/
 # client
-npx -y kronicle-lite@0.10.1 verify-audit pack/ --key-fingerprint <SHA-256 of the auditor key, from the report or SOW>
+npx -y kronicle-lite@0.10.2 verify-audit pack/ --key-fingerprint <SHA-256 of the auditor key, from the statement of work>
 ```
 
 Use one store per audit, so the bundle starts at seq 1 and every anchor's range
@@ -220,7 +220,7 @@ stamp carries a later time.
 | `anchors/NN-<label>.receipt.json` | anchor receipt v1 (FORMAT §9), canonical JSON, no trailing newline: `sha256(file)` is the digest the TSAs stamped. `<label>` names the milestone the anchor closes on (`harness-frozen`, `run-completed`, `report-issued`, or the kind at its last seq) |
 | `anchors/NN-<label>.<tsa>.tsr` | RFC 3161 TimeStampResp over `sha256(receipt file)`, with the TSA's certificate chain embedded (`certReq`) |
 | `anchors/index.json` | summary of the anchors (informational; `verify-audit` does not read it) |
-| `auditor-key.pem` | the auditor (store) public key; trusted only when its SHA-256(SPKI) equals the `--key-fingerprint` the client takes from the report or SOW |
+| `auditor-key.pem` | the auditor (store) public key; trusted only when its SHA-256(SPKI) equals the `--key-fingerprint` the client takes from the statement of work, never from the pack |
 | `anchor-keys.json` | the anchor service's published key list, as is (with its successor and status statements); trusted only as one chain from the genesis pin |
 | `tsa-roots/*.pem` | the pinned timestamping CAs: `sectigo.pem` = Sectigo Public Time Stamping Root R46 as issued by USERTrust RSA Certification Authority (the form Sectigo's tokens embed), `digicert.pem` = DigiCert Trusted G4 TimeStamping RSA4096 SHA256 2025 CA1 and the 2022 G4 RSA4096 SHA256 TimeStamping CA; `custom-N.pem` for other TSAs |
 | `claims.json` | what the pack claims (below) and, with `run_sequence`, the run count, each `run_seq` and every capture interruption |
@@ -280,13 +280,15 @@ checking is FAIL.
 | `harness_frozen_before_runs` | the freeze event (`harness_frozen`, or the 0.9.0 `finding` with `class: protocol_freeze`) records a harness digest; every run names that digest; the freeze is first committed by a timestamped anchor that covers no run; every run is committed by a later timestamped anchor; every run carries the freeze nonce (the freeze receipt's digest). The nonce is the only basis, in every bundle format: `measured_at` is the auditor's own record. A `/1` bundle (whose `call_measured` runs cannot carry a nonce) is not declared by `audit package` and fails if it declares the claim |
 | `run_sequence` | `run_seq` over the `run_completed` events is integers ≥ 1, 1..N with no gap or repeat; N equals `planned_runs`, the report's `run_count` and `claims.json` `runs.count` where present; `claims.json` lists exactly the runs recorded as `capture: "interrupted"` |
 
-The output ends with the values to compare against the report and
-`COMPLETION.txt`: manifest SHA-256, auditor key, final root and its timestamp
-times. Files in the pack never carry trust values: `COMPLETION.txt` and
-`VERIFY.md` print `--key-fingerprint <auditor key fingerprint from your report
-or SOW>` (and, for a self-hosted anchor service, a `--genesis` placeholder),
-never the values; `audit package` prints the fingerprint on the operator's
-terminal for the report. `--json` (`kronicle-lite-verify-audit/1`) has `claims[]`,
+The output ends with the values to compare against `COMPLETION.txt` and the
+completion letter sent separately from the pack: manifest SHA-256, auditor key,
+final root and its timestamp times. Files in the pack never carry trust values:
+`COMPLETION.txt` and `VERIFY.md` print `--key-fingerprint <auditor key
+fingerprint from your statement of work>` (and, for a self-hosted anchor
+service, a `--genesis` placeholder), never the values; `audit package` prints
+the fingerprint on the operator's terminal, to go in the statement of work. The
+report is one of the files in the pack, so it cannot be the source of the
+fingerprint or the manifest SHA-256. `--json` (`kronicle-lite-verify-audit/1`) has `claims[]`,
 `checks[]` (each with `claim`, `status` pass \| fail \| not_applicable and
 `evidence`), `anchors[]`, `ordering`, `run_sequence`, `timeline[]` and `final`;
 `VerifyAuditJsonSchema` in `src/audit/verify-audit.ts` is its schema.

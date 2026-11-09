@@ -347,7 +347,7 @@ export async function buildAuditPackage(
   const finalAnchored = last !== undefined && last.to_seq === m.range.to_seq && last.root === m.root.root;
   const rootLabel = finalAnchored ? 'Final anchored root' : 'Final root';
   const tagline = claims.claims.includes('independent_timestamps') ? 'Tamper-evident, independently timestamped audit evidence.' : 'Tamper-evident audit evidence.';
-  const keyLine = `${signer.key_id} (compare its SPKI SHA-256 with the fingerprint in your report or SOW)`;
+  const keyLine = `${signer.key_id} (compare its SPKI SHA-256 with the fingerprint in your statement of work)`;
   const finalTimes = last ? (last.timestamps.length ? last.timestamps.map((t) => `${t.gen_time} (${t.tsa})`).join(', ') : `${last.received_at} (anchor service)`) : '-';
   writeNew(
     join(out, 'COMPLETION.txt'),
@@ -370,8 +370,8 @@ export async function buildAuditPackage(
         : ['Anchors               none (this pack has no anchor receipts)']),
       `Claims                ${claims.claims.join(', ')}`,
       '',
-      `Verify:  npx -y kronicle-lite@${VERSION} verify-audit <this directory> --key-fingerprint <auditor key fingerprint from your report or SOW>${genesisArg}`,
-      '         (this file does not carry the fingerprint: take it from the report or SOW)',
+      `Verify:  npx -y kronicle-lite@${VERSION} verify-audit <this directory> --key-fingerprint <auditor key fingerprint from your statement of work>${genesisArg}`,
+      '         (this file does not carry the fingerprint: take it from the statement of work, never from the pack)',
       'Raw commands without kronicle-lite: VERIFY.md',
       '',
     ].join('\n'),
@@ -518,19 +518,19 @@ function verifyMd(v: { audit_id: string; tagline: string; keyLine: string; manif
     ...(v.lastAnchored ? [`- Last anchored root: \`${v.lastAnchored.root}\` (seq ${v.lastAnchored.from_seq}..${v.lastAnchored.to_seq})`] : []),
     `- Claims: ${v.claims.join(', ')}`,
     '',
-    'This file does not carry the auditor key fingerprint: take it from your report or statement of',
-    'work, and compare `auditor-key.pem` with it before you rely on anything else here.',
+    'This file does not carry the auditor key fingerprint: take it from your statement of work, never',
+    'from the pack, and compare `auditor-key.pem` with it before you rely on anything else here.',
     '',
     '## One command',
     '',
     '```sh',
-    `npx -y kronicle-lite@${VERSION} verify-audit . --key-fingerprint <the auditor key fingerprint from your report or SOW>${v.genesisArg}`,
+    `npx -y kronicle-lite@${VERSION} verify-audit . --key-fingerprint <the auditor key fingerprint from your statement of work>${v.genesisArg}`,
     '```',
     '',
     'It pins the auditor key by the fingerprint you give it, verifies SHA256SUMS before it reads',
     '`claims.json`, always checks integrity and chain, then the claims in `claims.json`, and prints',
-    'PASS or FAIL for each with its evidence, then the values to compare with the report. Exit 0 means',
-    'every checked claim passed.',
+    'PASS or FAIL for each with its evidence, then the values to compare with the completion letter',
+    'you were sent. Exit 0 means every checked claim passed.',
     '',
     '## Without kronicle-lite',
     '',
