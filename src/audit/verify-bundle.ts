@@ -16,7 +16,6 @@
  * time.
  */
 
-import { constants as bufferConstants } from 'node:buffer';
 import { createHash, createPublicKey } from 'node:crypto';
 import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync } from 'node:fs';
 import { basename, join } from 'node:path';
@@ -65,8 +64,8 @@ function parseBounded(text: string): unknown {
   return JSON.parse(text);
 }
 
-/** Largest events.jsonl read: the longest string V8 can hold (a larger file cannot be checked anyway). */
-export const MAX_BUNDLE_FILE_BYTES = bufferConstants.MAX_STRING_LENGTH;
+/** Longest events.jsonl line (one chain event; real ones are a few KB): a longer one stops the read. */
+export const MAX_EVENT_LINE_BYTES = 16 * 1024 * 1024;
 /** Largest manifest.json read (about 700,000 index entries); it is read before anything is trusted. */
 export const MAX_MANIFEST_BYTES = 64 * 1024 * 1024;
 /** Default read budget for one bundle: manifest, events and blobs together (raise with max_bytes / --max-bytes). */
@@ -135,6 +134,85 @@ function hashRegularFile(path: string, opts: { size?: number; max: number; allow
     }
     if (opts.size !== undefined && total !== opts.size) throw new Error('size differs');
     return { sha256: h.digest('hex'), size: total };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * One streaming pass over events.jsonl: sha256 of every byte, and each line parsed as it completes
+ * (canonical-form problems collected). Stops early, without reading the rest, when the file
+ * passes `max` bytes (`budget`), a line passes MAX_EVENT_LINE_BYTES or there are more lines than
+ * `maxLines` (the signed range): then `sha256` is null.
+ */
+function streamEvents(
+  path: string,
+  opts: { max: number; maxLines: number; allowHardlinks: boolean },
+): { sha256: string | null; bytes: number; lines: Record<string, unknown>[]; problems: string[]; stopped: 'budget' | 'shape' | null; stoppedWhy: string | null } {
+  const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+  const lines: Record<string, unknown>[] = [];
+  const problems: string[] = [];
+  const out = (sha256: string | null, bytes: number, stopped: 'budget' | 'shape' | null, stoppedWhy: string | null) => ({ sha256, bytes, lines, problems, stopped, stoppedWhy });
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new Error('events.jsonl is not a regular file');
+    if (!opts.allowHardlinks && st.nlink > 1) throw new Error(hardlinked('events.jsonl', st.nlink));
+    if (st.size > opts.max) return out(null, 0, 'budget', null);
+    const h = createHash('sha256');
+    const buf = Buffer.allocUnsafe(1024 * 1024);
+    let carry: Buffer[] = [];
+    let carryLen = 0;
+    let total = 0;
+    let n = 0; // lines seen
+    const line = (bytes: Buffer): string | null => {
+      n++;
+      if (n > opts.maxLines) return `events.jsonl has more than the ${opts.maxLines} line(s) the manifest's range holds`;
+      const l = bytes.toString('utf8');
+      let v: unknown;
+      try {
+        v = parseBounded(l);
+      } catch (err) {
+        problems.push(`events.jsonl line ${n} is not usable JSON: ${(err as Error).message}`);
+        return null;
+      }
+      if (!isObj(v)) {
+        problems.push(`events.jsonl line ${n} is not an object`);
+        return null;
+      }
+      if (l !== canonicalize(v as JsonValue)) problems.push(`events.jsonl line ${n} is not canonical JSON`);
+      lines.push(v);
+      return null;
+    };
+    for (;;) {
+      const got = readSync(fd, buf, 0, buf.length, null);
+      if (got === 0) break;
+      total += got;
+      if (total > opts.max) return out(null, total, 'budget', null);
+      const chunk = buf.subarray(0, got);
+      h.update(chunk);
+      let start = 0;
+      for (let i = chunk.indexOf(10); i !== -1; i = chunk.indexOf(10, start)) {
+        const piece = chunk.subarray(start, i);
+        const whole = carryLen === 0 ? piece : Buffer.concat([...carry, piece]);
+        carry = [];
+        carryLen = 0;
+        if (whole.byteLength > MAX_EVENT_LINE_BYTES) return out(null, total, 'shape', `events.jsonl line ${n + 1} is longer than ${MAX_EVENT_LINE_BYTES} bytes`);
+        const stop = line(whole);
+        if (stop) return out(null, total, 'shape', stop);
+        start = i + 1;
+      }
+      if (start < chunk.length) {
+        carry.push(Buffer.from(chunk.subarray(start)));
+        carryLen += chunk.length - start;
+        if (carryLen > MAX_EVENT_LINE_BYTES) return out(null, total, 'shape', `events.jsonl line ${n + 1} is longer than ${MAX_EVENT_LINE_BYTES} bytes`);
+      }
+    }
+    if (carryLen > 0) {
+      problems.push('events.jsonl does not end with a newline');
+      const stop = line(Buffer.concat(carry));
+      if (stop) return out(null, total, 'shape', stop);
+    }
+    return out(h.digest('hex'), total, null, null);
   } finally {
     closeSync(fd);
   }
@@ -265,51 +343,24 @@ export function verifyBundle(dir: string, opts: VerifyBundleOptions = {}): Verif
       return;
     }
 
-    // 1 (events): events.jsonl is first stream-hashed (constant memory) against the signed digest; only
-    // the file the manifest signs is read and parsed (and re-hashed in memory, so a swap is caught).
+    // 1 (events): events.jsonl is read ONCE, as a stream: each 1 MiB chunk is hashed and split into lines, each
+    // line (at most MAX_EVENT_LINE_BYTES; at most range.leaf_count lines) parsed as it completes. Every byte read
+    // counts against the budget. Only when the whole file hashes to the signed events_sha256 do steps 3-5 use it.
     let lines: Record<string, unknown>[] | null = null;
     const evPath = join(dir, 'events.jsonl');
-    let evHash: { sha256: string; size: number } | null = null;
     try {
       if (lstatSync(evPath).isSymbolicLink()) throw new Error('events.jsonl is a symbolic link, not a regular file');
-      evHash = hashRegularFile(evPath, { max: Math.min(MAX_BUNDLE_FILE_BYTES, left), allowHardlinks });
+      const ev = streamEvents(evPath, { max: left, maxLines: m.range.leaf_count, allowHardlinks });
+      left -= ev.bytes;
+      for (const p of ev.problems) {
+        fail('canonical', p);
+        if (/line \d+ is (not usable JSON|not an object)/.test(p)) fail('chain', p.replace(/ is .*$/, ' is unreadable'));
+      }
+      if (ev.stopped !== null) fail('canonical', ev.stopped === 'budget' ? overBudget('events.jsonl') : ev.stoppedWhy!);
+      else if (ev.sha256 !== m.events_sha256) fail('canonical', 'events.jsonl does not hash to manifest.events_sha256');
+      else lines = ev.lines;
     } catch (err) {
-      const msg = (err as Error).message;
-      fail('canonical', /the limit is/.test(msg) ? overBudget('events.jsonl') + ` (${msg})` : `cannot read events.jsonl: ${msg}`);
-    }
-    if (evHash && evHash.sha256 !== m.events_sha256) fail('canonical', 'events.jsonl does not hash to manifest.events_sha256');
-    if (evHash && evHash.sha256 === m.events_sha256) {
-      let eventsText: string | null = null;
-      try {
-        const bytes = readBundleFile(evPath, evHash.size, { allowHardlinks });
-        if (sha256Hex(bytes) !== m.events_sha256) throw new Error('events.jsonl changed while being verified');
-        eventsText = bytes.toString('utf8');
-        left -= bytes.byteLength;
-      } catch (err) {
-        fail('canonical', `cannot read events.jsonl: ${(err as Error).message}`);
-      }
-      if (eventsText !== null) {
-        const rawLines = eventsText.split('\n');
-        if (rawLines.pop() !== '') fail('canonical', 'events.jsonl does not end with a newline');
-        lines = [];
-        for (const [i, l] of rawLines.entries()) {
-          let v: unknown;
-          try {
-            v = parseBounded(l);
-          } catch (err) {
-            fail('canonical', `events.jsonl line ${i + 1} is not usable JSON: ${(err as Error).message}`);
-            fail('chain', `events.jsonl line ${i + 1} is unreadable`);
-            continue;
-          }
-          if (!isObj(v)) {
-            fail('canonical', `events.jsonl line ${i + 1} is not an object`);
-            fail('chain', `events.jsonl line ${i + 1} is unreadable`);
-            continue;
-          }
-          if (l !== canonicalize(v as JsonValue)) fail('canonical', `events.jsonl line ${i + 1} is not canonical JSON`);
-          lines.push(v);
-        }
-      }
+      fail('canonical', `cannot read events.jsonl: ${(err as Error).message}`);
     }
     if (lines === null) for (const c of ['events', 'chain', 'root', 'refs'] as const) fail(c, 'not checked: events.jsonl is not the file the manifest signs');
     const full: ChainEvent[] = [];

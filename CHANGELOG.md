@@ -66,8 +66,10 @@ uses semantic versioning once past 0.x.
     (on a writable directory SQLite may create the `-wal` / `-shm` sidecars of
     a WAL database, and doctor's handle checkpoints them on close); commands
     that open read-write (`orient`, `export`, `get`, `pending`) migrate the
-    store first, as before. The release is a new `schema_generation` meta key
-    (written on migration), else inferred from what the store holds. A table
+    store first, as before. The release is the newest shown by a new
+    `schema_generation` meta key (written on migration), `writer_version`,
+    the migration records and the objects the store holds, so a key forged
+    down cannot hide a dropped table. A table
     missing from a store whose release had it is damage, not an older store:
     `verify-chain` and `doctor` report it and exit 1, as do edited events,
     hashes and a deleted head. A connection that stays open while another
@@ -88,17 +90,29 @@ uses semantic versioning once past 0.x.
     read in full, and `--key /dev/zero` aborted too. Now: the manifest (at
     most 64 MiB) and its signature are checked first, and when the signature
     does not verify nothing it lists is read (every later step reports `not
-    checked`); `events.jsonl` is stream-hashed against the signed digest
-    before it is loaded; blobs are listed once each, at most 64 MiB, and
-    stream-hashed once; all reads share a 1 GiB budget (`--max-bytes`);
+    checked`); `events.jsonl` is read once as a stream (hashed and parsed
+    line by line; a line over 16 MiB, more lines than the signed range or
+    the budget stops it); blobs are listed once each, at most 64 MiB, and
+    stream-hashed once; every byte read counts against a 1 GiB budget
+    (`--max-bytes N`; the flag without a value is an error);
     bundle files must be regular files with one link (no symlinks, a linked
     `blobs/` directory included; hard links need `--allow-hardlinks`); `--key`
     must be a regular file of at most 64 KB. Without `--key` the CLI warns
     that the signer is not verified (tamper-evidence, not authenticity) and
     `--strict` refuses to run. Measured: an edited bundle listing sparse
-    multi-GB blobs, or one blob 50 times, fails in about 10 ms; a sparse
-    500 MB `events.jsonl` in about 0.6 s with flat memory; a re-signed
-    bundle with 16 sparse 64 MiB blobs in about 1.3 s, flat memory.
+    multi-GB blobs, or one blob 50 times, fails in about 10 ms; a
+    self-signed bundle whose sparse 500 MiB `events.jsonl` matches its
+    digest in about 40 ms (it took 12.5 s and 1.14 GB RSS when the file was
+    hashed, then loaded); a re-signed bundle with 16 sparse 64 MiB blobs in
+    about 2 s; memory stays flat in each case (Linux, Node 22).
+  - **Release follow-ups (after #30–#33).** A `schema_generation` key forged
+    down to an older release hid a dropped `reads` / `blobs` table (exit 0):
+    the generation is now the newest any evidence shows. `verify-bundle` read
+    a matching `events.jsonl` twice (once hashed, once loaded) and counted it
+    once against the budget: it now reads it once, streaming, and counts
+    every byte. `--max-bytes` without a value was ignored and is now an
+    error, and the over-budget message for `events.jsonl` is accurate (the
+    budget is the only limit; the fixed 512 MB cap is gone).
   - **Identifiers and object keys get the secret guard.** It scanned
     content only, so a token as an `actor_id` (every write tool), a
     `put_document` `idempotency_key`, `slug` or `source_path`, an `apply` op

@@ -73,9 +73,14 @@ Hostile input fails cleanly:
   `manifest.json` is read and checked first (at most 64 MiB). When its
   signature does not verify (or not under `--key`), every later step reports
   `not checked` and fails: the digests, sizes and names it lists could be an
-  attacker's. Then `events.jsonl` is stream-hashed (constant memory) against
-  the signed `events_sha256`; only a file that matches is loaded and parsed
-  (steps 3 to 5), so a large or sparse impostor costs one streamed read.
+  attacker's. Then `events.jsonl` is read once, as a stream, in 1 MiB
+  chunks: each chunk is hashed and each line parsed as it completes. A line
+  longer than 16 MiB, more lines than the signed range holds, or more bytes
+  than the read budget stop the read at once. Steps 3 to 5 use the lines
+  only when the whole file hashes to the signed `events_sha256`. Measured
+  (Linux, Node 22): a self-signed bundle with a sparse 500 MiB
+  `events.jsonl` that matches its digest fails in about 40 ms, and memory
+  stays flat.
 - **Files.** `manifest.json`, `events.jsonl` and every blob must be regular
   files with one link, not symlinks, hard links (which may be files outside
   `DIR`; `--allow-hardlinks` accepts them), devices, FIFOs or directories, and
@@ -86,10 +91,10 @@ Hostile input fails cleanly:
 - **Blobs** are hashed as a stream in 1 MiB chunks, each file once. A blob
   listed above 64 MiB (the store's limit) or whose size differs from the
   manifest is reported without being read.
-- **Read budget.** At most 1 GiB is read per bundle (manifest, events and
-  blobs together; `events.jsonl` at most about 512 MB, the longest string
-  Node can hold). A bundle that needs more fails with the budget named;
-  raise it with `--max-bytes N` (API `max_bytes`).
+- **Read budget.** At most 1 GiB is read per bundle: every byte of the
+  manifest, events and blobs counts, and each file is read once. A bundle
+  that needs more fails with the budget named; raise it with `--max-bytes N`
+  (API `max_bytes`; the flag needs a value).
 
 ### 1. `canonical`
 1. `manifest.json` must equal `JCS(manifest) + "\n"`.

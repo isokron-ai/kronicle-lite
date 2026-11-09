@@ -5,6 +5,7 @@
  * regular file.
  */
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { linkSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -67,7 +68,7 @@ describe.skipIf(!POSIX)('verify-bundle: bundle files that are not small regular 
       const t0 = Date.now();
       expect(verifyBundle(dir).ok).toBe(false);
       expect(Date.now() - t0).toBeLessThan(2000);
-      expect(problems(dir)).toMatch(/limit/);
+      expect(problems(dir)).toMatch(/limit|budget/);
     });
   }
 
@@ -220,12 +221,12 @@ describe.skipIf(!POSIX)('verify-bundle: duplicates, read budget, hard links, unk
     expect(verifyBundle(dir, { max_bytes: small + 1000 }).ok).toBe(true);
   });
 
-  it('events.jsonl replaced by a sparse 500 MB file: stream-hashed against the signed digest, never loaded', () => {
+  it('events.jsonl replaced by a sparse 500 MB file: streamed, stopped at the first over-long line, never loaded', () => {
     const dir = bundle();
     truncateSync(join(dir, 'events.jsonl'), 500 * 1024 * 1024);
     let r!: ReturnType<typeof verifyBundle>;
     const cost = rssAfter(() => (r = verifyBundle(dir)));
-    expect(r.checks.find((c) => c.check === 'canonical')!.problem).toMatch(/does not hash/);
+    expect(r.checks.find((c) => c.check === 'canonical')!.problem).toMatch(/longer than \d+ bytes/);
     expect(r.checks.find((c) => c.check === 'events')!.problem).toMatch(/not checked/);
     expect(cost.mb).toBeLessThan(64);
   });
@@ -264,3 +265,64 @@ describe.skipIf(!POSIX)('verify-bundle: duplicates, read budget, hard links, unk
     expect(pinned.stderr).not.toMatch(/NOT verified/);
   });
 });
+
+/** Re-sign `dir`'s manifest with a fresh key after `edit` (a self-signed bundle: what anyone can make without --key). */
+function selfSign(dir: string, edit: (m: BundleManifest) => void): void {
+  const m = JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8')) as BundleManifest;
+  edit(m);
+  const id = ephemeralIdentity();
+  const signed = signManifest({ ...m, root: { ...m.root, key_id: id.signer.key_id, public_key_pem: id.signer.public_key_pem } }, id.signer);
+  writeFileSync(join(dir, 'manifest.json'), canonicalize(signed as unknown as JsonValue) + '\n');
+}
+const zeroSha = (size: number) => {
+  const h = createHash('sha256');
+  const z = Buffer.alloc(1 << 20);
+  for (let left = size; left > 0; left -= z.length) h.update(left >= z.length ? z : z.subarray(0, left));
+  return h.digest('hex');
+};
+
+describe.skipIf(!POSIX)('verify-bundle: events.jsonl is read once, as a stream, within the budget', () => {
+  it('a self-signed bundle whose sparse 500 MiB events.jsonl matches its digest: stopped early, flat memory', () => {
+    const dir = bundle();
+    const size = 500 * 1024 * 1024;
+    truncateSync(join(dir, 'events.jsonl'), size);
+    selfSign(dir, (m) => ((m as { events_sha256: string }).events_sha256 = zeroSha(size)));
+    let r!: ReturnType<typeof verifyBundle>;
+    const cost = rssAfter(() => (r = verifyBundle(dir)));
+    expect(r.checks.find((c) => c.check === 'signature')!.ok).toBe(true);
+    expect(r.checks.find((c) => c.check === 'canonical')!.problem).toMatch(/longer than \d+ bytes/);
+    expect(r.ok).toBe(false);
+    expect(cost.ms).toBeLessThan(1000);
+    expect(cost.mb).toBeLessThan(64);
+  });
+
+  it('more lines than the signed range holds stop the read', () => {
+    const dir = bundle();
+    const text = readFileSync(join(dir, 'events.jsonl'), 'utf8');
+    const extra = text + '{}\n'.repeat(100000);
+    writeFileSync(join(dir, 'events.jsonl'), extra);
+    selfSign(dir, (m) => ((m as { events_sha256: string }).events_sha256 = createHash('sha256').update(extra).digest('hex')));
+    expect(verifyBundle(dir).checks.find((c) => c.check === 'canonical')!.problem).toMatch(/more than the \d+ line/);
+  });
+
+  it('every byte of events.jsonl counts against max_bytes; the over-budget message names --max-bytes, and raising it passes', () => {
+    const dir = bundle();
+    const manifest = readFileSync(join(dir, 'manifest.json')).byteLength;
+    const events = readFileSync(join(dir, 'events.jsonl')).byteLength;
+    const blob = 'artifact bytes'.length;
+    const under = verifyBundle(dir, { max_bytes: manifest + events - 1 });
+    expect(under.checks.find((c) => c.check === 'canonical')!.problem).toMatch(/events\.jsonl would take the read past the budget of \d+ bytes.*--max-bytes/);
+    // manifest + events + blob is exactly enough; one byte less fails at the blob (events counted once, in full)
+    expect(verifyBundle(dir, { max_bytes: manifest + events + blob }).ok).toBe(true);
+    expect(verifyBundle(dir, { max_bytes: manifest + events + blob - 1 }).checks.find((c) => c.check === 'artifacts')!.problem).toMatch(/budget/);
+  });
+
+  it('CLI: --max-bytes without a value is an error, not ignored', () => {
+    const dir = bundle();
+    const home = tempDir('kl-vbf-h-');
+    const r = spawnSync(process.execPath, [CLI, 'verify-bundle', dir, '--max-bytes'], { env: cleanEnv({ HOME: home, USERPROFILE: home }), encoding: 'utf8' });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/--max-bytes needs a value/);
+  });
+});
+

@@ -437,6 +437,7 @@ async function main(argv: string[]): Promise<number> {
         }
         process.stderr.write('warning: signer NOT verified (no --key): this checks that the bundle is intact and self-consistent under the key it names (tamper-evidence), not who made it; pass --key with the store public key for authenticity\n');
       }
+      if (flags['max-bytes'] === true) throw new Error('--max-bytes needs a value: a positive number of bytes');
       const maxBytes = num(flags['max-bytes']);
       if (maxBytes !== undefined && maxBytes <= 0) throw new Error('--max-bytes must be a positive integer');
       // A PEM public key is a few hundred bytes; a device, FIFO or huge file is refused, not read.
