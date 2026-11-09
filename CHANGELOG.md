@@ -2061,7 +2061,7 @@ fields the new revision requires.
 
 ## [0.2.0] — 2026-10-31
 
-Small additive release so a companion projection ([sea-lite](https://github.com/rafe-walker/sea-lite),
+Small additive release so a companion projection ([sea-lite](https://github.com/isokron-ai/sea-lite),
 a fenced work queue) can share the same SQLite file and chain cleanly.
 
 ### Added

@@ -3,7 +3,7 @@
   "name": "io.github.rafe-walker/kronicle-lite",
   "description": "Hash-chained local document store with signed receipts and an orient protocol for stale agent memory",
   "repository": {
-    "url": "https://github.com/rafe-walker/kronicle-lite",
+    "url": "https://github.com/isokron-ai/kronicle-lite",
     "source": "github"
   },
   "version": "0.10.2",
