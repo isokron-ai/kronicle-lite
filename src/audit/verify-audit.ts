@@ -435,11 +435,20 @@ export function genesisFromCli(flag: string | undefined, env: NodeJS.ProcessEnv 
 export function refuseInsidePack(packDir: string, p: string, flag: string): void {
   // Decided by filesystem identity (dev, ino), not by comparing path strings: on a case- or
   // normalization-insensitive filesystem (APFS, NTFS) `…/PACKAGE/x` and `…/package/x` are one file.
+  // realpathSync.native first (the OS's canonical path); the JS resolver where the native one fails
+  // (libuv's Windows realpath refuses some non-ASCII paths). Either way the decision below is by identity.
+  const resolve = (x: string) => {
+    try {
+      return realpathSync.native(x);
+    } catch {
+      return realpathSync(x);
+    }
+  };
   let pack: string;
   let real: string;
   try {
-    pack = realpathSync.native(packDir);
-    real = realpathSync.native(p);
+    pack = resolve(packDir);
+    real = resolve(p);
   } catch (err) {
     throw new VerifyAuditUsageError(`${flag} ${p}: ${(err as Error).message}`);
   }
