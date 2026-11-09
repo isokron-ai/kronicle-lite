@@ -54,7 +54,7 @@
     "agent-memory",
     "staleness"
   ],
-  "author": "Joshua Bryan",
+  "author": "IsoKron (https://isokron.ai)",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/rafe-walker/kronicle-lite.git"

@@ -796,5 +796,4 @@ Apache-2.0. See `LICENSE` and `NOTICE`.
 
 ---
 
-Built off-grid in Cochise County, AZ by a laid-off support engineer —
-https://theexiledentrepreneur.com
+Built and maintained by [IsoKron](https://isokron.ai).
