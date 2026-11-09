@@ -13,6 +13,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 import { AnchorClient } from './anchor/client.js';
+import { AuditLog } from './audit/log.js';
 import { CONFIG_KEYS, DEFAULT_ANCHOR_URL, KEYS_CACHE_FILE } from './anchor/config.js';
 import { PINS_FILE, receiptChainRefusal, trustedServiceKeys, verifyReceiptWithPins } from './anchor/trust.js';
 import { CATALOG_FINGERPRINT, CATALOG_VERSION, liveCatalogFingerprint } from './catalog.js';
@@ -202,7 +203,11 @@ function checkChain(db: Database.Database, full: boolean): DoctorCheck {
 function checkProjection(db: Database.Database): DoctorCheck {
   try {
     if (!tableExists(db, 'blocks')) return { id: 'projection', status: 'skip', detail: 'no blocks table' };
-    const r = verifyProjection(db, new Chain(db, noSigner));
+    const chain = new Chain(db, noSigner);
+    let r = verifyProjection(db, chain);
+    // 0.9.0: the audit projection too, as verify-chain does (a store whose audit tables are gone fails both).
+    const audit = new AuditLog(db, chain).checkProjection();
+    if (audit) r = { ...r, ok: false, mismatch_count: r.mismatch_count + 1, mismatches: [...r.mismatches, { table: 'audit_events', key: 'count', field: 'rows', detail: audit }] };
     return r.ok
       ? { id: 'projection', status: 'ok', detail: describeProjection(r), data: { ...r } }
       : {

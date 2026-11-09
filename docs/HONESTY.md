@@ -45,7 +45,7 @@ First matching row wins. Row 0 applies to matches withheld from `hits`.
 
 After the table: if the read-time secret scrub changed the text being
 served, `can_act` is capped to `inspect_only` with reason `read_scrubbed`
-(the text shown is not the chained text the evidence was about). 0.8.1: if
+(the text shown is not the chained text the evidence was about). 0.9.0: if
 the document is a derived note whose sources could not all be determined
 (its inferred lineage was cut short by the bound, recorded as
 `derived_from_inferred_truncated`, or it sits more than 4 notes below its
@@ -53,7 +53,7 @@ sources), `can_act` is capped to `inspect_only` with reason
 `lineage_unknown`: a note is never `can_act` on the strength of its file
 when what it was derived from is unknown (§6).
 
-0.8.1: row 0 also covers matches recall withholds because the projection
+0.9.0: row 0 also covers matches recall withholds because the projection
 disagrees with the chain (`projection_mismatch`: the block is served as
 live but the chain retired it; `lineage_mismatch`: the note's lineage rows
 are not the chain's) or because the store file failed its check
@@ -185,7 +185,7 @@ the copy is wrong and, before this, came back next session unmarked
   version). Lineage is also **inferred**: every block the writing actor read
   (recall hits, document reads; its own writes excluded) is recorded as
   `derived_from_inferred`, one edge per block (the latest version read),
-  within a bound that is the union of (0.8.1) its session — every read made
+  within a bound that is the union of (0.9.0) its session — every read made
   at or after the chain position of the `cursor` it passes, else of its
   latest briefing (reads are placed by chain position, never by wall clock)
   — and the blocks it read in the last 24 hours, at most the 200 most
@@ -200,7 +200,7 @@ the copy is wrong and, before this, came back next session unmarked
   file's text).
 - An edge is **fresh** while its source's supersession lineage reaches a
   live block through format-only edits only (docs/FORMAT.md §3.8: since
-  0.8.1 raw-text equivalence — line endings, trailing whitespace, reflow,
+  0.9.0 raw-text equivalence — line endings, trailing whitespace, reflow,
   blank lines; an emphasis-marker, list-marker or renumbering edit, or a
   reorder inside the section, makes it stale), or when
   the note also has an edge to the current version (it was re-derived:
@@ -215,7 +215,7 @@ the copy is wrong and, before this, came back next session unmarked
   inferred, via?}]`, placed right after `content`.
 - `get_system_state` lists a retraction of kind `derived` for each note made
   stale by a change in the window (the note's slug and text, the source's
-  diff, `derived_from_change`), 0.8.1: also for notes derived from such a
+  diff, `derived_from_change`), 0.9.0: also for notes derived from such a
   note (`derived_from_change.via` names it, up to 4 notes deep; format-only
   source edits never produce one), and `pending` lists it for every actor that
   read or wrote the note until that actor reads the source's current
@@ -223,7 +223,7 @@ the copy is wrong and, before this, came back next session unmarked
 - A `put` with an explicit `derived_from` (even `[]`) replaces the note's
   lineage: the author's statement of what the text now rests on. Every other
   write (inferred edges, `supersede_block`) adds to it, with one exception
-  (0.8.1): an inferred edge to a REMOVED source (tombstoned, or moved to
+  (0.9.0): an inferred edge to a REMOVED source (tombstoned, or moved to
   another document) has no current version to re-derive from, so a `put`
   of the note drops it (`derived_from_released` on the chain) when the
   author acknowledged the removal (read the document after it) or, changing

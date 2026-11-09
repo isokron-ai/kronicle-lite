@@ -7,8 +7,9 @@
  * served as an empty TEMP table on that connection only (the file is never written), and each data
  * migration the store has not run is derived into its TEMP target.
  *
- * Only tables the store's release never had are shimmed. The release is the `schema_generation`
- * meta key (written by every migration since 0.9.0), else inferred from what the store holds. A
+ * Only tables the store's release never had are shimmed. The release is the newest of the
+ * `schema_generation` meta key (written by every migration since 0.9.0), `writer_version`, the
+ * migration records and the objects the store holds: a forged key can only raise it. A
  * table missing from a store whose release had it is damage: it is not shimmed, and
  * `schemaDamage` reports it (verify-chain and doctor then fail, as before 0.9.0).
  *
@@ -61,21 +62,38 @@ type Prep = (sql: string) => Database.Statement;
 const mainHas = (prep: Prep, type: 'table' | 'index', name: string) => prep(`SELECT 1 FROM main.sqlite_master WHERE type = ? AND name = ?`).get(type, name) !== undefined;
 
 /**
- * The schema generation of the store: its `schema_generation` meta key, else the newest release
- * whose objects it holds (an unknown, newer key counts as current or later).
+ * The schema generation of the store: the newest release shown by its `schema_generation` meta key
+ * (an unknown, newer key counts as current), `writer_version`, migration records or objects.
  */
 export function storeGeneration(db: Db): number {
   const prep: Prep = (sql) => db.prepare(sql);
   const metaHas = mainHas(prep, 'table', 'meta');
   const meta = (key: string) => (metaHas ? ((prep(`SELECT value FROM main.meta WHERE key = ?`).get(key) as { value: string } | undefined)?.value ?? null) : null);
+  // The marker, the migration records and the store's own objects are all evidence; the generation is the
+  // newest any of them shows, so a marker (or a forged one) can only raise the expected tables, never lower them.
+  let gen = genIndex('0.7.0');
+  const raise = (g: number) => {
+    if (g > gen) gen = g;
+  };
   const marked = meta(SCHEMA_GENERATION_KEY);
-  if (marked !== null) return genIndex(marked) === -1 ? SCHEMA_GENERATIONS.length - 1 : genIndex(marked);
+  if (marked !== null) raise(genIndex(marked) === -1 ? SCHEMA_GENERATIONS.length - 1 : genIndex(marked));
+  // writer_version (0.8.1+): the release that last appended; a generation at or below it is implied.
+  const writer = meta('writer_version');
+  if (writer !== null) for (const [i, g] of SCHEMA_GENERATIONS.entries()) if (compareVersions(writer, g) >= 0) raise(i);
   const tables = (since: string) => Object.entries(TABLE_SINCE).filter(([, s]) => s === since).map(([t]) => t);
-  if (tables('0.9.0').some((t) => mainHas(prep, 'table', t))) return genIndex('0.9.0');
-  if (mainHas(prep, 'table', 'doc_lineage_gaps') || meta('migration.lineage_gaps') !== null) return genIndex('0.8.1');
+  if (tables('0.9.0').some((t) => mainHas(prep, 'table', t))) raise(genIndex('0.9.0'));
+  if (mainHas(prep, 'table', 'doc_lineage_gaps') || meta('migration.lineage_gaps') !== null) raise(genIndex('0.8.1'));
   // 0.8.0 added these tables and indexes (the indexes on events / blocks outlive a dropped table).
-  if (['doc_lineage', 'reads'].some((t) => mainHas(prep, 'table', t)) || ['events_retired_block_idx', 'blocks_superseded_by_idx'].some((i) => mainHas(prep, 'index', i))) return genIndex('0.8.0');
-  return genIndex('0.7.0');
+  if (['doc_lineage', 'reads'].some((t) => mainHas(prep, 'table', t)) || ['events_retired_block_idx', 'blocks_superseded_by_idx'].some((i) => mainHas(prep, 'index', i))) raise(genIndex('0.8.0'));
+  return gen;
+}
+
+/** Numeric x.y.z comparison (a pre-release suffix is ignored); an unparseable version compares as 0.0.0. */
+function compareVersions(a: string, b: string): number {
+  const parse = (v: string) => (/^(\d+)\.(\d+)\.(\d+)/.exec(v) ?? ['', '0', '0', '0']).slice(1).map(Number);
+  const [x, y] = [parse(a), parse(b)];
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i]! - y[i]!;
+  return 0;
 }
 
 /** Missing schema tables, split into those the store's release never had (shim) and those it had (damage). */

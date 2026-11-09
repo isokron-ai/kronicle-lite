@@ -37,13 +37,16 @@ function fromRow(r: Row): FlightRecord {
   return { ...r, record: JSON.parse(r.record_json) as Record<string, unknown> };
 }
 
+/** C2-08: how long a briefing's flight-recorder row waits for another process's write lock before it is skipped. */
+export const BOOKKEEPING_WAIT_MS = 1000;
+
 export class FlightRecorder {
   constructor(private readonly db: Db) {}
 
   record(rec: FlightRecord): void {
     // 0.8.1: a read-only or full store still briefs; the briefing is just not kept. Behind
     // another process's long write it waits at most 1 s (C2-08), then skips the row.
-    boundedBookkeepingWrite(this.db, 1000, () => this.insert(rec));
+    boundedBookkeepingWrite(this.db, BOOKKEEPING_WAIT_MS, () => this.insert(rec));
   }
 
   private insert(rec: FlightRecord): void {

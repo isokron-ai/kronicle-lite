@@ -70,12 +70,28 @@ Hostile input fails cleanly:
 - Any manifest shape, any nesting depth (more than 64 levels is refused before
   parsing) and any file name yields `ok: false` with a reason, never a crash.
 - **Order: nothing a manifest lists is read before its signature verifies.**
-  `manifest.json` is read and checked first (at most 64 MiB). When its
-  signature does not verify (or not under `--key`), every later step reports
-  `not checked` and fails: the digests, sizes and names it lists could be an
-  attacker's. Then `events.jsonl` is stream-hashed (constant memory) against
-  the signed `events_sha256`; only a file that matches is loaded and parsed
-  (steps 3 to 5), so a large or sparse impostor costs one streamed read.
+  `manifest.json` is read and checked first (at most 64 MiB): its
+  `range.leaf_count` must equal `to_seq - from_seq + 1`, the number of
+  events and stubs it lists, and `root.leaf_count`. When its signature does
+  not verify (or not under `--key`), every later step reports `not checked`
+  and fails: the digests, sizes and names it lists could be an attacker's.
+  Then `events.jsonl` is read once, as a stream, in 1 MiB chunks: each chunk
+  is hashed, and each line is checked as it completes (steps 3 and 4: event
+  hash, schema, index, chain link) and dropped, so what is kept is bounded by
+  the signed index (a Merkle leaf per line; refs and evidence ids per audit
+  event). A line longer than 1 MiB, more lines than the index lists, a line
+  that is not a JSON object, or more bytes than the read budget stop the read
+  at once. The findings of steps 3 to 5 count only when the whole file
+  hashes to the signed `events_sha256`. Measured on a self-signed bundle
+  with no `--key`, a correct digest and 64 MiB of `{}` or `x` lines (macOS
+  arm64, Node 25): with `leaf_count` 1e12 (refused from the manifest) or a
+  consistent one (stopped at the first surplus or bad line), exit 1 in about
+  0.1 s at about 70 MB RSS. Before, the verifier ran out of heap after 52 s
+  and 103 s at 4.4 GB (exit 134). Memory is bounded by the signed index,
+  not by the bundle: a 56 MB manifest listing 600k stubs takes 2.5 to 4.8 s
+  at about 1 GB. A self-signed sparse 500 MiB
+  `events.jsonl` that matches its digest fails in about 40 ms (Linux,
+  Node 22).
 - **Files.** `manifest.json`, `events.jsonl` and every blob must be regular
   files with one link, not symlinks, hard links (which may be files outside
   `DIR`; `--allow-hardlinks` accepts them), devices, FIFOs or directories, and
@@ -86,10 +102,10 @@ Hostile input fails cleanly:
 - **Blobs** are hashed as a stream in 1 MiB chunks, each file once. A blob
   listed above 64 MiB (the store's limit) or whose size differs from the
   manifest is reported without being read.
-- **Read budget.** At most 1 GiB is read per bundle (manifest, events and
-  blobs together; `events.jsonl` at most about 512 MB, the longest string
-  Node can hold). A bundle that needs more fails with the budget named;
-  raise it with `--max-bytes N` (API `max_bytes`).
+- **Read budget.** At most 1 GiB is read per bundle: every byte of the
+  manifest, events and blobs counts, and each file is read once. A bundle
+  that needs more fails with the budget named; raise it with `--max-bytes N`
+  (API `max_bytes`; the flag needs a value).
 
 ### 1. `canonical`
 1. `manifest.json` must equal `JCS(manifest) + "\n"`.

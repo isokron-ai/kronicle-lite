@@ -25,7 +25,7 @@ with a bug, a partial restore from backup, disk corruption):
   against the chain's `block.superseded` / `block.tombstoned` events
   (`UNVERIFIED / projection_mismatch`); the `kronicle://docs/{slug}`
   resource refuses a revision whose markdown does not match; orient's
-  integrity pass re-hashes the newest 2000 live blocks. 0.8.1: every orient
+  integrity pass re-hashes the newest 2000 live blocks. 0.9.0: every orient
   focus (pulse included) and recall also cross-check block lifecycle
   (no live row the chain retired, no retired row it did not, block and
   retirement counts, supersession pointers) and the lineage rows
@@ -78,7 +78,7 @@ service, `https://anchor.isokron.ai`, is deployed with a Free tier; when it
 cannot be reached, `--push` and `--remote` report "anchor service
 unreachable" and every local command behaves exactly as without them.
 
-**What the client checks (0.8.1).** The person rewriting the chain usually
+**What the client checks (0.9.0).** The person rewriting the chain usually
 also controls `config.json`, `anchor_url`, the network path and the
 `anchors` table, so `verify --remote`, `verify --remote --offline`, MCP
 `anchor_status` and `doctor` trust none of those:
@@ -121,6 +121,17 @@ The service key document is not itself signed; a status change it reports
 can tighten a pin but a man-in-the-middle can withhold one.
 
 ## What it does not give you
+
+**Plain export is not signed (0.9.0).** `kronicle-lite export` writes the
+events and a header naming the head and the store's public key; nothing in
+it is signed. `import` recomputes every hash and link and refuses a file that
+does not end at its header's head, which catches damage and truncation, but
+not someone who edits an event (an actor, a date, a verdict) and re-hashes the
+chain from that point: the result imports and `verify-chain` passes. Ship
+evidence as a signed bundle (`audit export`, checked with `verify-bundle
+--key STORE.pem`; it covers `audit.*` events, not documents yet) or anchor a
+checkpoint off-box. Signed exports:
+[#34](https://github.com/rafe-walker/kronicle-lite/issues/34).
 
 **It is not notarization.** The signing key lives next to the database and
 is readable by the same user. Anyone (or any process) who can write the

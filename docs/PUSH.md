@@ -39,7 +39,7 @@ kronicle-lite orient --data-dir DIR --actor push-hook --json --cwd PROJECT --cur
     kronicle-lite: do not rely on recalled text") and make a pre-command
     pulse BLOCK world-changing commands until the operator runs
     `kronicle-lite verify-chain`. Orient never throws on a bad row; every
-    focus, `pulse` included, reports it (0.8.1: the pulse runs the same pass
+    focus, `pulse` included, reports it (0.9.0: the pulse runs the same pass
     as `focus=retractions` — events since the cursor, live blocks, the
     projection's block lifecycle and lineage rows against the chain — and a
     store file that is damaged or cannot be read, `SQLITE_CORRUPT` included,
@@ -69,7 +69,7 @@ Fields a hook reads:
 | `retractions[].hint` | `"likely_typo"` on an edit shaped like a one-letter typo fix: a label only (severity and delivery unchanged; such edits include Karen→Karin) |
 | `retractions[].new_heading_path` | set when the block moved to another section (`heading_path` is the old one; `diff` starts `section: [-old-]{+new+}`) |
 | `retractions[].reason_line` | one sentence: "You previously relied on X; current truth is Y. Reconcile before proceeding." |
-| `format_only_edits[]` (alias `cosmetic_edits`) | edits whose raw text is byte-identical up to line endings, trailing whitespace, reflow inside a paragraph and blank lines (docs/FORMAT.md §3.8; since 0.8.1 a double space or tab inside a line, emphasis-marker, list-marker and renumbering edits and reorders are retractions): recorded, **not** in `retractions`, so a hook does not push them. `--include-format-only` folds them back into `retractions` with `format_only: true`. Nothing else is ever left out |
+| `format_only_edits[]` (alias `cosmetic_edits`) | edits whose raw text is byte-identical up to line endings, trailing whitespace, reflow inside a paragraph and blank lines (docs/FORMAT.md §3.8; since 0.9.0 a double space or tab inside a line, emphasis-marker, list-marker and renumbering edits and reorders are retractions): recorded, **not** in `retractions`, so a hook does not push them. `--include-format-only` folds them back into `retractions` with `format_only: true`. Nothing else is ever left out |
 | `integrity.ok`, `integrity.problem`, `integrity.seq` | `false`: the store was edited outside kronicle-lite (see "integrity failure" above) |
 | `drift_banner.surfaced` | the actor has not oriented for a while |
 | `retractions[]` with `kind: "derived"` (0.8.0) | a NOTE derived from a block that changed in this window and was not re-derived: `doc_slug` / `old_text` are the note's, `diff` is the source's word diff (`source <slug>: [-old-]{+new+}`), `derived_from_change` names the source version, its current version and the change (`superseded` \| `moved` \| `tombstoned` \| `missing`); `seq` / `event_type` are the source change's. Severity `safety` when the source was removed, else `behavioral` |
@@ -215,9 +215,9 @@ kronicle-lite shim install [--dir D] [--commands git,terraform,tofu,kubectl,helm
                            [--data-dir DIR] [--mode deny|warn] [--pending-actor A[,B] | --all-readers]
                            [--on-timeout allow|deny] [--git-hook [--repo PATH]] [--windows]
 export PATH="D:$PATH"          # D FIRST on PATH (default D: ~/.kronicle-lite/shims)
-export KRONICLE_LITE_ACTOR=agent-a     # in each agent's environment: whose re-read clears its gate (0.8.1)
+export KRONICLE_LITE_ACTOR=agent-a     # in each agent's environment: whose re-read clears its gate (0.9.0)
 kronicle-lite shim status      # per tool: active on PATH? real binary? git hook? anything blocking in this project?
-kronicle-lite shim ack --operator --through SEQ   # OPERATOR override: clear a denial without a re-read (0.8.1: TTY or --operator, logged)
+kronicle-lite shim ack --operator --through SEQ   # OPERATOR override: clear a denial without a re-read (0.9.0: TTY or --operator, logged)
 kronicle-lite shim uninstall [--git-hook [--repo PATH]]   # removes only files carrying the shim marker, D/.kronicle-shim and our pre-push hooks
 ```
 
@@ -225,9 +225,9 @@ kronicle-lite shim uninstall [--git-hook [--repo PATH]]   # removes only files c
 is left out. Install refuses system directories (`/`, `/bin`, `/usr/…`,
 `/etc`, `/dev`, …), never overwrites a file that is not one of its shims,
 and never writes through a symlink. Re-running install keeps the existing
-starting point (0.8.1): it never acknowledges pending changes.
+starting point (0.9.0): it never acknowledges pending changes.
 
-**Two layers, two jobs** (0.8.1). The **PATH shim** catches the commands an
+**Two layers, two jobs** (0.9.0). The **PATH shim** catches the commands an
 agent launches through its shell (and their children: `npm run`, `make`,
 scripts) for every shimmed tool. The **git pre-push hook** (`--git-hook`)
 catches **every push** from the repository, whatever started git: an
@@ -255,9 +255,9 @@ an agent runs it). Use both for git.
 | exit 0 (allow, warn, first check) | runs the command |
 | exit 77 (unreconciled retractions, or an integrity failure) | refuses: exit 77, nothing runs |
 | timeout (124/137/142: no answer within `KRONICLE_SHIM_TIMEOUT` s) | **loud, every time**: ``kronicle-lite check TIMED OUT after Ns — `<cmd>` was NOT checked; see D/.kronicle-shim/shim.log`` on stderr. `--on-timeout allow` (the default, for compatibility): runs the command. `--on-timeout deny`: refuses it, exit 77 (``… was NOT checked and NOT run (--on-timeout deny)``) |
-| no store found, or two different stores (0.8.1, [below](#which-store-the-shims-check)) | `--mode deny`: **refused**, exit 77, saying where it looked / which stores it found. `--mode warn`: runs, with a loud line every time |
-| the store file is damaged (0.8.1: bad header, SQLITE_CORRUPT / NOTADB, "database disk image is malformed") or there but unreadable for a reason that is not a lock (permissions, I/O error, a directory) | misconfiguration or damage: `--mode deny` **refuses** (exit 77), `--mode warn` runs with a loud `running UNCHECKED — the kronicle-lite store is CORRUPT` (or `UNREADABLE`) line every time. Never "unavailable" |
-| store locked or busy (SQLITE_BUSY / "database is locked": exit 3) | transient: `--on-timeout allow` (default): **fail open** as below. `--on-timeout deny` (0.8.1): refused, exit 77 (``kronicle-lite store UNAVAILABLE … was NOT checked and NOT run``) |
+| no store found, or two different stores (0.9.0, [below](#which-store-the-shims-check)) | `--mode deny`: **refused**, exit 77, saying where it looked / which stores it found. `--mode warn`: runs, with a loud line every time |
+| the store file is damaged (0.9.0: bad header, SQLITE_CORRUPT / NOTADB, "database disk image is malformed") or there but unreadable for a reason that is not a lock (permissions, I/O error, a directory) | misconfiguration or damage: `--mode deny` **refuses** (exit 77), `--mode warn` runs with a loud `running UNCHECKED — the kronicle-lite store is CORRUPT` (or `UNREADABLE`) line every time. Never "unavailable" |
+| store locked or busy (SQLITE_BUSY / "database is locked": exit 3) | transient: `--on-timeout allow` (default): **fail open** as below. `--on-timeout deny` (0.9.0): refused, exit 77 (``kronicle-lite store UNAVAILABLE … was NOT checked and NOT run``) |
 | anything else: CLI missing, crash | **fail open**: runs the command; one line on stderr the first time (`D/.kronicle-shim/unavailable` marks it; cleared on the next good check), every occurrence logged in `D/.kronicle-shim/shim.log`, the reason in `last-error` |
 
 A timeout is a safety check that did not happen, so it is never quiet. Pick
@@ -296,12 +296,12 @@ after the shell removed quotes, so `"git" "push"` is `git push`.
 | `terraform`, `tofu` | `apply`, `destroy` | `--help` | `-chdir=…` |
 | `kubectl`, `oc` | `apply`, `delete`, `patch`, `replace`, `rollout`, `create`, `scale`, `set`, `edit`, `label`, `annotate`, `drain`, `cordon`, `uncordon`, `taint`, `autoscale`, `expose` | `rollout status`, `rollout history`, `--help` | `-n`, `--namespace`, `--context`, `--kubeconfig`, `--cluster`, `--user`, `-s`, `--server`, `--as`, `--token`, … |
 | `helm` | `install`, `upgrade`, `uninstall` (`delete`, `del`, `un`), `rollback` | `--help` | `-n`, `--namespace`, `--kube-context`, `--kubeconfig`, … |
-| `npm`, `pnpm`, `yarn` | `publish` (`yarn npm publish`); `run`/`run-script` SCRIPT and, for pnpm/yarn, a bare SCRIPT whose name contains the word `deploy`, `migrate`, `publish`, `release` or (0.8.1) `ship` (`deploy:prod`, `db-migrate`, `ship`; not `predeploy`) | `--help` | `--prefix`, `-w`, `--workspace`, `-C`, `--dir`, `--filter`, `--cwd`, `--registry`, … |
+| `npm`, `pnpm`, `yarn` | `publish` (`yarn npm publish`); `run`/`run-script` SCRIPT and, for pnpm/yarn, a bare SCRIPT whose name contains the word `deploy`, `migrate`, `publish`, `release` or (0.9.0) `ship` (`deploy:prod`, `db-migrate`, `ship`; not `predeploy`) | `--help` | `--prefix`, `-w`, `--workspace`, `-C`, `--dir`, `--filter`, `--cwd`, `--registry`, … |
 | `make` (opt-in) | any target with one of those words (`make release`, `make ship`, `make -C sub deploy`) | `--help`; `VAR=value` arguments | — |
 | `--world "TOOL WORD…"` | that verb sequence as a prefix (`docker push`, `gh release create`, `aws s3 *`: `*` = any one word) | | |
 | `--world "TOOL"`, or a `--commands` name with no rules | every invocation (a deploy script) | | |
 
-A tool given by path is the same tool (0.8.1): `shim exec --tool
+A tool given by path is the same tool (0.9.0): `shim exec --tool
 /usr/bin/make` and `pulse -- /usr/bin/git -C x push` use the rules and the
 target of `make` / `git`. The PATH shim itself never sees `/usr/bin/make
 release` (no PATH lookup; see below).
@@ -339,7 +339,7 @@ helm and npm run by absolute path, under `sudo` or with an edited PATH are
 not checked. Keep the cc-anchor PreToolUse pulse (or your client's
 equivalent) in front of the shell for those.
 
-### Git pre-push hook (`--git-hook`, 0.8.1)
+### Git pre-push hook (`--git-hook`, 0.9.0)
 
 ```sh
 kronicle-lite shim install --git-hook [--repo PATH]   # PATH: the repository (default: the working directory)
@@ -374,7 +374,7 @@ once, as for the shims.
 
 ### Which store the shims check
 
-0.8.1 (protocol finding P2-01: the README's own Cursor and Copilot snippets
+0.9.0 (protocol finding P2-01: the README's own Cursor and Copilot snippets
 ran the server on a project-local `.kronicle-lite/` while the shim checked
 `~/.kronicle-lite`, so a push after a change landed silently). The shims
 resolve the store the way the server does:
@@ -403,7 +403,7 @@ exits 3 without a store, as before.
 
 ### Which project a command is checked against
 
-0.8.1: the project the command **acts on**, not only the working directory
+0.9.0: the project the command **acts on**, not only the working directory
 (the same key `orient --cwd` uses, taken from that directory):
 
 | tool | target |
@@ -423,7 +423,7 @@ refuses).
 ### Reconciling: re-read the current version
 
 The shim keeps one cursor per project in `D/.kronicle-shim/cursors/`
-(and, 0.8.1, one per project and invoking actor), starting from the head at
+(and, 0.9.0, one per project and invoking actor), starting from the head at
 install time. Each blocking retraction since the
 cursor (severity `safety` or `behavioral`; format-only edits are never
 retractions) is checked the way [`pending`](#pending-version-bound-reconciliation-080-additive)
@@ -439,7 +439,7 @@ is (0.8.0):
 - **Pending actors**, in this order:
   1. `shim install --pending-actor A[,B]` (stored in the shim config;
      `pulse --pending-actor` for a hook): those actors must re-read.
-  2. **The invoking actor** (0.8.1 default): `KRONICLE_LITE_ACTOR` in the
+  2. **The invoking actor** (0.9.0 default): `KRONICLE_LITE_ACTOR` in the
      environment of the command (set it in each agent's environment to the
      `--actor` / `KRONICLE_LITE_ACTOR` of its `serve`; `pulse
      --invoking-actor A` for a hook). A change blocks that actor when it
@@ -480,14 +480,14 @@ Then:
   agent-b).`), then `If you cannot re-read them yourself, stop and ask
   the operator.` Re-read the document and run the command again: an agent
   that recalls the runbook again clears the gate itself. The refusal
-  never mentions `ack` (0.8.1, round-2 H2-12: an agent that ran the
+  never mentions `ack` (0.9.0, round-2 H2-12: an agent that ran the
   override the 0.8.0 refusal printed cleared the gate without reading).
 - **Operator override**: `kronicle-lite shim ack --through SEQ` clears the
   gate without a read (SEQ: the head; `shim status` prints it as
   `through seq SEQ`, `pulse --json` as `ack_through`). A change after SEQ
   still blocks: acknowledging 42 never clears 43. Acknowledging in one
   project does not clear another; it clears every actor's position in
-  that project up to SEQ. 0.8.1: ack is an **operator action**. It runs
+  that project up to SEQ. 0.9.0: ack is an **operator action**. It runs
   only from an interactive terminal (stdin is a TTY) or with an explicit
   `--operator` (confirming that the person running it is the operator), and
   otherwise exits 2 without changing anything. Every ack, and every
@@ -508,7 +508,7 @@ Then:
   runs.
 - **Integrity failure**: refused in both modes, whatever was read (fail
   closed).
-- (0.8.1) **No usable stored position** — none yet (a new worktree, a
+- (0.9.0) **No usable stored position** — none yet (a new worktree, a
   wiped state dir), or one that does not decode or verify (junk bytes, a
   regenerated `cursor-secret`, a chain rolled back below it): the
   version-bound gate does not need a cursor, so the pending actors'
@@ -516,7 +516,7 @@ Then:
   and any unreconciled change refuses
   (`reason: "pending"`, nothing seeded, a plain retry is refused again).
   A regenerated `cursor-secret` is reported on stderr when the store opens.
-- (0.8.1) A denial is never recorded as the shim actor's briefing, so it
+- (0.9.0) A denial is never recorded as the shim actor's briefing, so it
   can never become the position a later pulse recovers from.
 
 ### `kronicle-lite pulse` (the check itself)
@@ -536,15 +536,15 @@ cursors itself. `--json` prints one object:
 | field | meaning |
 |---|---|
 | `decision` | `allow` \| `deny` \| `warn` \| `seed` |
-| `reason` | `clear` \| `retractions` \| `integrity` \| `seeded` \| `genesis` (unreadable cursor: re-seeded) \| `target` (0.8.1: the command names a directory that does not resolve; refused) \| `pending` (0.8.1: no usable position and a pending actor — configured, else the invoking actor — has unreconciled changes; refused, nothing seeded) |
-| `pending[]` | (0.8.1) with `reason: "pending"`: `{actor_id, count}` per actor with unreconciled changes |
+| `reason` | `clear` \| `retractions` \| `integrity` \| `seeded` \| `genesis` (unreadable cursor: re-seeded) \| `target` (0.9.0: the command names a directory that does not resolve; refused) \| `pending` (0.9.0: no usable position and a pending actor — configured, else the invoking actor — has unreconciled changes; refused, nothing seeded) |
+| `pending[]` | (0.9.0) with `reason: "pending"`: `{actor_id, count}` per actor with unreconciled changes |
 | `blocking[]`, `informational[]` | retractions (same shape as orient's `retractions[]`); `blocking[]` are the unresolved ones |
 | `blocking[].pending_actors`, `.unread_by` | (0.8.0) the actors checked for this change and those that have not read its current version (`[]` / `[]`: no reader recorded) |
 | `resolved[]` | (0.8.0) blocking retractions since the cursor that every pending actor has re-read at the current version (same shape as `blocking[]`) |
 | `pending_actors` | (0.8.0) the configured actors (`--pending-actor`, or the shim config), `null` = not configured |
-| `pending_mode`, `invoking_actor` | (0.8.1) `configured` \| `actor` (only `invoking_actor`'s reads count) \| `readers` (every reader); the invoking actor, when known |
-| `not_relied_on[]` | (0.8.1) actor mode: blocking changes to text only other actors read (not blocking for this actor) |
-| `target` | (0.8.1) `{dir, explicit, via}`: the directory whose project was checked and what named it (`-C`, `--git-dir`, `GIT_DIR`, `--project`, …; `via: null` = the working directory) |
+| `pending_mode`, `invoking_actor` | (0.9.0) `configured` \| `actor` (only `invoking_actor`'s reads count) \| `readers` (every reader); the invoking actor, when known |
+| `not_relied_on[]` | (0.9.0) actor mode: blocking changes to text only other actors read (not blocking for this actor) |
+| `target` | (0.9.0) `{dir, explicit, via}`: the directory whose project was checked and what named it (`-C`, `--git-dir`, `GIT_DIR`, `--project`, …; `via: null` = the working directory) |
 | `cursor` | carry it: the head when allowed / warned, the unchanged cursor when denied |
 | `ack_through` | denied for retractions: the head an operator acknowledges through (not in `message`) |
 | `integrity` | orient's integrity summary (`ok: false` ⇒ `decision: "deny"`) |

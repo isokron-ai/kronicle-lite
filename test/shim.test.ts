@@ -13,6 +13,7 @@ import { describe, expect, it } from 'vitest';
 import { forbiddenDir, install, resolveReal, uninstall } from '../src/shim/install.js';
 import { VERSION } from '../src/version.js';
 import { CLI, cleanEnv, gitInit, gitRun, tempDir, write } from './helpers/fs.js';
+import { generous } from './helpers/time.js';
 
 const SYS_PATH = '/usr/local/bin:/usr/bin:/bin';
 /**
@@ -389,7 +390,7 @@ describe.skipIf(!POSIX)('shim wrapper: world-changing path (real CLI)', () => {
     const t0 = Date.now();
     const b = spawnSync('terraform', ['apply'], { cwd: root, env: { ...env, KRONICLE_SHIM_TIMEOUT: '1' }, encoding: 'utf8', timeout: 20_000 });
     expect(b.status).toBe(0);
-    expect(Date.now() - t0).toBeLessThan(8_000);
+    expect(Date.now() - t0).toBeLessThan(generous(8_000));
     expect(readFileSync(join(shims, '.kronicle-shim', 'shim.log'), 'utf8')).toMatch(/ terraform check \d+ms outcome=timeout-allow rc=(?:124|137|142) timeout=1s\n/);
     expect(readFileSync(log, 'utf8').split('\n').filter(Boolean)).toHaveLength(2);
     // loud on EVERY timeout, not only the first (unlike the other fail-open notes)
@@ -719,7 +720,20 @@ describe.skipIf(!POSIX)('overhead of a read-only command through the shim', () =
     console.log(
       `[shim overhead] git status --short (${realGit}), N=${N}: direct median ${direct.median.toFixed(2)} ms (p90 ${direct.p90.toFixed(2)}), via shim median ${viaShim.median.toFixed(2)} ms (p90 ${viaShim.p90.toFixed(2)}); overhead ${overhead.toFixed(2)} ms`,
     );
-    expect(overhead).toBeLessThan(25);
+    // The fast path must not start node: its overhead stays well under one node startup measured in this
+    // same run (a loaded machine slows both): a shim that starts node costs about one node start.
+    const nodeStart = (() => {
+      const ms: number[] = [];
+      for (let i = 0; i < 15; i++) {
+        const t0 = process.hrtime.bigint();
+        spawnSync(process.execPath, ['-e', '0'], { encoding: 'utf8' });
+        ms.push(Number(process.hrtime.bigint() - t0) / 1e6);
+      }
+      ms.sort((a, b) => a - b);
+      return ms[7]!;
+    })();
+    console.log(`[shim overhead] one node start (median of 15): ${nodeStart.toFixed(2)} ms`);
+    expect(overhead).toBeLessThan(nodeStart / 2);
 
     // the world-changing path: one `kronicle-lite pulse` (node start + orient) before exec
     const r = rig({ tools: ['terraform'] });

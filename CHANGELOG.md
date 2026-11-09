@@ -50,9 +50,10 @@ uses semantic versioning once past 0.x.
   - **Reserved keys:** the `audit:` and `apply:` idempotency-key prefixes are
     reserved, and `put_document` refuses them (`reserved_key`).
   - **0.8.x stores:** verification works on a 0.8.x store without migrating
-    it. Before this fix, `verify-chain` / `verify` on a 0.8.1 store failed
+    it. Before this fix, `verify-chain` / `verify` on a store made by the
+    unpublished 0.8.1 development line failed
     with "no such table: audit_events" and exit 1, the divergence code. The
-    test uses a real 0.8.1 store (`test/fixtures/store-0.8.1.db.gz`) and a
+    test uses a real such store (`test/fixtures/store-0.8.1.db.gz`) and a
     read-only medium.
   - **0.7.0 and 0.8.0 stores verify too.** A store made by the published
     0.7.0 has no `doc_lineage`, `doc_lineage_gaps` or `reads` table, one made
@@ -66,8 +67,10 @@ uses semantic versioning once past 0.x.
     (on a writable directory SQLite may create the `-wal` / `-shm` sidecars of
     a WAL database, and doctor's handle checkpoints them on close); commands
     that open read-write (`orient`, `export`, `get`, `pending`) migrate the
-    store first, as before. The release is a new `schema_generation` meta key
-    (written on migration), else inferred from what the store holds. A table
+    store first, as before. The release is the newest shown by a new
+    `schema_generation` meta key (written on migration), `writer_version`,
+    the migration records and the objects the store holds, so a key forged
+    down cannot hide a dropped table. A table
     missing from a store whose release had it is damage, not an older store:
     `verify-chain` and `doctor` report it and exit 1, as do edited events,
     hashes and a deleted head. A connection that stays open while another
@@ -88,17 +91,88 @@ uses semantic versioning once past 0.x.
     read in full, and `--key /dev/zero` aborted too. Now: the manifest (at
     most 64 MiB) and its signature are checked first, and when the signature
     does not verify nothing it lists is read (every later step reports `not
-    checked`); `events.jsonl` is stream-hashed against the signed digest
-    before it is loaded; blobs are listed once each, at most 64 MiB, and
-    stream-hashed once; all reads share a 1 GiB budget (`--max-bytes`);
+    checked`); `events.jsonl` is read once as a stream (hashed and parsed
+    line by line; a line over 16 MiB, more lines than the signed range or
+    the budget stops it); blobs are listed once each, at most 64 MiB, and
+    stream-hashed once; every byte read counts against a 1 GiB budget
+    (`--max-bytes N`; the flag without a value is an error);
     bundle files must be regular files with one link (no symlinks, a linked
     `blobs/` directory included; hard links need `--allow-hardlinks`); `--key`
     must be a regular file of at most 64 KB. Without `--key` the CLI warns
     that the signer is not verified (tamper-evidence, not authenticity) and
     `--strict` refuses to run. Measured: an edited bundle listing sparse
-    multi-GB blobs, or one blob 50 times, fails in about 10 ms; a sparse
-    500 MB `events.jsonl` in about 0.6 s with flat memory; a re-signed
-    bundle with 16 sparse 64 MiB blobs in about 1.3 s, flat memory.
+    multi-GB blobs, or one blob 50 times, fails in about 10 ms; a
+    self-signed bundle whose sparse 500 MiB `events.jsonl` matches its
+    digest in about 40 ms (it took 12.5 s and 1.14 GB RSS when the file was
+    hashed, then loaded); a re-signed bundle with 16 sparse 64 MiB blobs in
+    about 2 s; memory stays flat in each case (Linux, Node 22).
+  - **Release follow-ups (after #30–#33).** A `schema_generation` key forged
+    down to an older release hid a dropped `reads` / `blobs` table (exit 0):
+    the generation is now the newest any evidence shows. `verify-bundle` read
+    a matching `events.jsonl` twice (once hashed, once loaded) and counted it
+    once against the budget: it now reads it once, streaming, and counts
+    every byte. `--max-bytes` without a value was ignored and is now an
+    error, and the over-budget message for `events.jsonl` is accurate (the
+    budget is the only limit; the fixed 512 MB cap is gone).
+  - **Review of #35.**
+    - **A hostile self-signed bundle no longer exhausts memory.**
+      `range.leaf_count` must equal `to_seq - from_seq + 1`, the number of
+      events and stubs the manifest lists, and `root.leaf_count`, before
+      anything is read. `events.jsonl` lines are checked as they stream
+      (hash, schema, index, chain link) and dropped, so what is kept is
+      bounded by the signed index. Lines longer than 1 MiB, more lines than
+      the index lists, and the first line that is not a JSON object stop the
+      read. Before, with `leaf_count` 1e12, a correct digest and 64 MiB of
+      `{}` lines, the verifier ran out of memory (exit 134, 4.4 GB RSS, 52 s
+      on macOS arm64; `x` lines: 103 s); now exit 1 in about 0.1 s at about
+      70 MB RSS (EVIDENCE-BUNDLE.md).
+    - **Meaningful time bounds are absolute or relative.** The flight
+      recorder's lock wait (`BOOKKEEPING_WAIT_MS`) must be at most a fifth of
+      the busy timeout, and the locked run may exceed an unlocked baseline
+      only by that wait. The shim's fast-path overhead must stay under half a
+      node startup measured in the same run. Re-introducing a 9 s wait, or a
+      node start in the fast path, fails these tests.
+    - **Strict options everywhere.** `pulse` and the shim subcommands
+      validate their options, and each `audit` / `anchor` subcommand has its
+      own list. A value-taking option given no value (`--key`, `--cursor`,
+      `--title`, …) is an error (exit 2); a bare `verify-bundle --key` used
+      to run unauthenticated.
+    - The published slug pattern has no look-ahead, so RE2 clients can
+      compile it; the length bound is `maxLength` and is checked in code.
+      Catalogs re-pinned. `doctor --full` now checks the audit projection,
+      as `verify-chain` does.
+    - Deferred: the lost-update lookup still scans events since the cursor;
+      an index for it is tracked in #36.
+  - **Dogfood follow-ups (pre-release audit run).**
+    - **One slug rule (KL-5).** The CLI accepted `finding/G-2`, MCP
+      `put_document` refused it: each path had its own regex. One pattern
+      (`SLUG_PATTERN`: a plain slug, or a lowercase namespace then
+      `/`-separated segments, at most 128 characters) now drives the MCP
+      schema, the CLI and the store; MCP `put_document` refuses the reserved
+      `instructions/` and `memory/` namespaces, as `apply` does. The full and
+      core catalogs are re-pinned (put_document's `slug` schema).
+    - **Lost updates surface (KL-6).** The stale-write advisory only
+      measured drift volume, so agent-a overwriting agent-b's change with a
+      four-event-old cursor got `advisory: false`. Another actor's change to
+      the very document (or block's document) being written, after the
+      writer's cursor or latest briefing, now raises it with who and which
+      seq; CLI `put --cursor` prints it on stderr (and in `--json`).
+    - **Version references (KL-9).** 0.8.1 was never published. Docs, doctor
+      and messages now say 0.9.0 for everything first shipped in it; the
+      `[0.8.1]` section below says so, and that a rebuild by any earlier
+      release (published 0.8.0 included) fails with "no such function:
+      kl_writer_guard".
+    - **Plain export is unsigned (KL-2).** Documented in the README tour and
+      THREAT-MODEL: an edited and re-hashed export imports and verifies; use
+      the signed bundle or an anchor. Signed exports are #34 (0.10).
+    - **Strict CLI options (KL-11).** Unknown or misspelt options, a
+      single-value option given twice, a boolean given a value, and stray
+      positionals exit 2 with a reason (and a did-you-mean) instead of being
+      ignored (`orient --bogus` exited 0). `--allow-host` / `--allow-origin`
+      may repeat (values accumulate; before, all but the last were dropped).
+    - **Tests under load.** Wall-clock bounds are scaled
+      (`KL_TEST_TIME_FACTOR`, default 5) and the default test timeout is
+      60 s; resource bounds (RSS, work counters) carry the precise checks.
   - **Identifiers and object keys get the secret guard.** It scanned
     content only, so a token as an `actor_id` (every write tool), a
     `put_document` `idempotency_key`, `slug` or `source_path`, an `apply` op
@@ -262,7 +336,13 @@ uses semantic versioning once past 0.x.
   hashes, receipts and cursors are unchanged; stores from 0.8.x open and
   gain the new tables on first open.
 
-## [0.8.1] — 2026-11-01
+## [0.8.1] — never published (ships in 0.9.0)
+
+0.8.1 was prepared on 2026-11-01 but never published to npm or tagged: npm
+goes from 0.8.0 to 0.9.0, and every change below first ships in 0.9.0. The
+docs and messages say 0.9.0 for these features; "0.8.1" below and in test
+names refers to that development line (the `store-0.8.1.db.gz` fixture was
+made by it).
 
 Safety patch from agent-memory-bench hardening round 2. Every item was
 reproduced on 0.8.0 before it was fixed and has a regression test.
@@ -702,8 +782,9 @@ the PR for the upstream issue text.
     project keys the chain does not derive (fail; `kronicle-lite rebuild`
     repairs) and events appended after the last 0.8.1+ append (warn: an older
     version wrote since);
-  - a guard trigger makes the rebuild of 0.7.0 and older fail with "no such
-    function: kl_writer_guard" and roll back (only rebuild deletes document
+  - a guard trigger makes a rebuild by any earlier release (the published
+    0.8.0 included) fail with the raw SQLite error "no such function:
+    kl_writer_guard" and roll back (only rebuild deletes document
     revisions; normal puts by older versions, e.g. sea-lite 0.6.0's bundled
     kronicle-lite 0.7.0, are unaffected);
   - `meta.min_writer_generation` (now 1): a future version that bumps it

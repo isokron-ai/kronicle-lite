@@ -128,6 +128,20 @@ describe.each(['0.7.0', '0.8.0'] as const)('a store made by %s, opened read-only
     },
   );
 
+  it.each(['reads', 'blobs', 'doc_lineage_gaps'])('a schema_generation key forged down to 0.7.0 cannot hide a dropped %s (exit 1)', (table) => {
+    const data = store(v);
+    new KronicleLite({ dataDir: data }).close(); // migrates and marks 0.9.0
+    const db = new Database(join(data, 'kronicle-lite.db'));
+    db.exec(`UPDATE meta SET value = '0.7.0' WHERE key = 'schema_generation'; DROP TABLE ${table};`);
+    db.pragma('wal_checkpoint(TRUNCATE)');
+    db.close();
+    for (const args of [['verify-chain'], ['doctor', '--no-network', '--full']]) {
+      const r = run(args, data);
+      expect(r.status, `${table} ${args.join(' ')}: ${r.stdout}${r.stderr}`).toBe(1);
+      expect(r.stdout + r.stderr).toMatch(new RegExp(`${table}.*missing|no such table: ${table}`));
+    }
+  });
+
   it('a long-lived read-only connection follows a migration made by another connection (no stale TEMP shadow)', () => {
     const data = store(v);
     const ro = new KronicleLite({ dataDir: data, readOnly: true });
@@ -153,5 +167,27 @@ describe.each(['0.7.0', '0.8.0'] as const)('a store made by %s, opened read-only
     expect(kl.verifyAll().ok).toBe(true);
     kl.close();
     expect(tablesOnDisk(data)).toEqual(expect.arrayContaining([...MISSING[v]]));
+  });
+});
+
+describe('doctor and verify-chain agree when every 0.9.0 table and every marker is gone', () => {
+  it('a store holding audit events, its audit / blob / apply tables dropped and its meta keys deleted: both exit 1', () => {
+    const data = join(tempDir('kl-allgone-'), 'data');
+    mkdirSync(data, { recursive: true });
+    chmodSync(data, 0o700);
+    const kl = new KronicleLite({ dataDir: data });
+    kl.docs.putDocument({ slug: 'deploy', title: 'D', markdown: '# D\n\nport 8080\n', actor_id: 'w' });
+    kl.audit.record('A', [{ kind: 'finding', event_key: 'f', payload: { finding_id: 'F', status: 'discovered' } }], 'auditor');
+    kl.close();
+    const db = new Database(join(data, 'kronicle-lite.db'));
+    for (const t of ['blobs', 'audit_events', 'audit_event_fingerprints', 'audit_findings', 'apply_confirmations', 'apply_results']) db.exec(`DROP TABLE ${t}`);
+    db.exec(`DELETE FROM meta WHERE key IN ('schema_generation', 'writer_version', 'writer_head_seq') OR key LIKE 'migration.%'`);
+    db.pragma('wal_checkpoint(TRUNCATE)');
+    db.close();
+    for (const args of [['verify-chain'], ['doctor', '--no-network', '--full']]) {
+      const r = run(args, data);
+      expect(r.status, `${args.join(' ')}: ${r.stdout}${r.stderr}`).toBe(1);
+      expect(r.stdout + r.stderr).toMatch(/audit events but the store has no audit_events table|audit_events/);
+    }
   });
 });

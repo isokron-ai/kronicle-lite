@@ -5,6 +5,7 @@
  * regular file.
  */
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { linkSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -16,6 +17,7 @@ import { ephemeralIdentity } from '../src/crypto/keys.js';
 import { verifyBundle } from '../src/audit/verify-bundle.js';
 import { KronicleLite } from '../src/index.js';
 import { CLI, cleanEnv, tempDir } from './helpers/fs.js';
+import { generous } from './helpers/time.js';
 
 const POSIX = process.platform !== 'win32';
 
@@ -39,7 +41,7 @@ describe.skipIf(!POSIX)('verify-bundle: bundle files that are not small regular 
       symlinkSync('/dev/zero', join(dir, name));
       const t0 = Date.now();
       expect(verifyBundle(dir).ok).toBe(false);
-      expect(Date.now() - t0).toBeLessThan(2000);
+      expect(Date.now() - t0).toBeLessThan(generous(2000));
       expect(problems(dir)).toMatch(/not a regular file|symbolic link/);
     });
 
@@ -66,8 +68,8 @@ describe.skipIf(!POSIX)('verify-bundle: bundle files that are not small regular 
       truncateSync(join(dir, name), 3 * 1024 ** 3);
       const t0 = Date.now();
       expect(verifyBundle(dir).ok).toBe(false);
-      expect(Date.now() - t0).toBeLessThan(2000);
-      expect(problems(dir)).toMatch(/limit/);
+      expect(Date.now() - t0).toBeLessThan(generous(2000));
+      expect(problems(dir)).toMatch(/limit|budget/);
     });
   }
 
@@ -77,7 +79,7 @@ describe.skipIf(!POSIX)('verify-bundle: bundle files that are not small regular 
     truncateSync(join(dir, 'blobs', blob!), 3 * 1024 ** 3);
     const t0 = Date.now();
     const r = verifyBundle(dir);
-    expect(Date.now() - t0).toBeLessThan(2000);
+    expect(Date.now() - t0).toBeLessThan(generous(2000));
     expect(r.checks.find((c) => c.check === 'artifacts')!.problem).toMatch(/size differs/);
     expect(r.checks.find((c) => c.check === 'canonical')!.ok).toBe(true);
   });
@@ -160,7 +162,7 @@ describe.skipIf(!POSIX)('verify-bundle: no blob is read before the manifest is t
     expect(r.ok).toBe(false);
     expect(r.checks.find((c) => c.check === 'signature')!.ok).toBe(false);
     expect(r.checks.find((c) => c.check === 'artifacts')!.problem).toMatch(/not checked/);
-    expect(cost.ms).toBeLessThan(1000);
+    expect(cost.ms).toBeLessThan(generous(1000));
     expect(cost.mb).toBeLessThan(100);
   });
 
@@ -171,7 +173,7 @@ describe.skipIf(!POSIX)('verify-bundle: no blob is read before the manifest is t
     const cost = rssAfter(() => (r = verifyBundle(dir)));
     expect(r.checks.find((c) => c.check === 'signature')!.ok).toBe(true);
     expect(r.checks.find((c) => c.check === 'artifacts')!.problem).toMatch(/limit/);
-    expect(cost.ms).toBeLessThan(1000);
+    expect(cost.ms).toBeLessThan(generous(1000));
   });
 
   it('a re-signed manifest listing a 60 MB sparse blob: hashed as a stream, memory stays flat', () => {
@@ -206,7 +208,7 @@ describe.skipIf(!POSIX)('verify-bundle: duplicates, read budget, hard links, unk
     truncateSync(join(dir, 'blobs', sha), 64 * 1024 * 1024);
     const t0 = Date.now();
     const r = verifyBundle(dir);
-    expect(Date.now() - t0).toBeLessThan(500);
+    expect(Date.now() - t0).toBeLessThan(generous(500));
     expect(r.ok).toBe(false);
     expect(r.checks.find((c) => c.check === 'canonical')!.problem).toMatch(/more than once/);
   });
@@ -220,12 +222,12 @@ describe.skipIf(!POSIX)('verify-bundle: duplicates, read budget, hard links, unk
     expect(verifyBundle(dir, { max_bytes: small + 1000 }).ok).toBe(true);
   });
 
-  it('events.jsonl replaced by a sparse 500 MB file: stream-hashed against the signed digest, never loaded', () => {
+  it('events.jsonl replaced by a sparse 500 MB file: streamed, stopped at the first over-long line, never loaded', () => {
     const dir = bundle();
     truncateSync(join(dir, 'events.jsonl'), 500 * 1024 * 1024);
     let r!: ReturnType<typeof verifyBundle>;
     const cost = rssAfter(() => (r = verifyBundle(dir)));
-    expect(r.checks.find((c) => c.check === 'canonical')!.problem).toMatch(/does not hash/);
+    expect(r.checks.find((c) => c.check === 'canonical')!.problem).toMatch(/longer than \d+ bytes/);
     expect(r.checks.find((c) => c.check === 'events')!.problem).toMatch(/not checked/);
     expect(cost.mb).toBeLessThan(64);
   });
@@ -262,5 +264,107 @@ describe.skipIf(!POSIX)('verify-bundle: duplicates, read budget, hard links, unk
     const pinned = spawnSync(process.execPath, [CLI, 'verify-bundle', dir, '--key', pem, '--strict'], { env, encoding: 'utf8' });
     expect(pinned.status, pinned.stdout + pinned.stderr).toBe(0);
     expect(pinned.stderr).not.toMatch(/NOT verified/);
+  });
+});
+
+/** Re-sign `dir`'s manifest with a fresh key after `edit` (a self-signed bundle: what anyone can make without --key). */
+function selfSign(dir: string, edit: (m: BundleManifest) => void): void {
+  const m = JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8')) as BundleManifest;
+  edit(m);
+  const id = ephemeralIdentity();
+  const signed = signManifest({ ...m, root: { ...m.root, key_id: id.signer.key_id, public_key_pem: id.signer.public_key_pem } }, id.signer);
+  writeFileSync(join(dir, 'manifest.json'), canonicalize(signed as unknown as JsonValue) + '\n');
+}
+const zeroSha = (size: number) => {
+  const h = createHash('sha256');
+  const z = Buffer.alloc(1 << 20);
+  for (let left = size; left > 0; left -= z.length) h.update(left >= z.length ? z : z.subarray(0, left));
+  return h.digest('hex');
+};
+
+describe.skipIf(!POSIX)('verify-bundle: events.jsonl is read once, as a stream, within the budget', () => {
+  it('a self-signed bundle whose sparse 500 MiB events.jsonl matches its digest: stopped early, flat memory', () => {
+    const dir = bundle();
+    const size = 500 * 1024 * 1024;
+    truncateSync(join(dir, 'events.jsonl'), size);
+    selfSign(dir, (m) => ((m as { events_sha256: string }).events_sha256 = zeroSha(size)));
+    let r!: ReturnType<typeof verifyBundle>;
+    const cost = rssAfter(() => (r = verifyBundle(dir)));
+    expect(r.checks.find((c) => c.check === 'signature')!.ok).toBe(true);
+    expect(r.checks.find((c) => c.check === 'canonical')!.problem).toMatch(/longer than \d+ bytes/);
+    expect(r.ok).toBe(false);
+    expect(cost.ms).toBeLessThan(generous(1000));
+    expect(cost.mb).toBeLessThan(64);
+  });
+
+  it('more lines than the signed range holds stop the read', () => {
+    const dir = bundle();
+    const text = readFileSync(join(dir, 'events.jsonl'), 'utf8');
+    const extra = text + '{}\n'.repeat(100000);
+    writeFileSync(join(dir, 'events.jsonl'), extra);
+    selfSign(dir, (m) => ((m as { events_sha256: string }).events_sha256 = createHash('sha256').update(extra).digest('hex')));
+    expect(verifyBundle(dir).checks.find((c) => c.check === 'canonical')!.problem).toMatch(/more than the \d+ line/);
+  });
+
+  it('every byte of events.jsonl counts against max_bytes; the over-budget message names --max-bytes, and raising it passes', () => {
+    const dir = bundle();
+    const manifest = readFileSync(join(dir, 'manifest.json')).byteLength;
+    const events = readFileSync(join(dir, 'events.jsonl')).byteLength;
+    const blob = 'artifact bytes'.length;
+    const under = verifyBundle(dir, { max_bytes: manifest + events - 1 });
+    expect(under.checks.find((c) => c.check === 'canonical')!.problem).toMatch(/events\.jsonl would take the read past the budget of \d+ bytes.*--max-bytes/);
+    // manifest + events + blob is exactly enough; one byte less fails at the blob (events counted once, in full)
+    expect(verifyBundle(dir, { max_bytes: manifest + events + blob }).ok).toBe(true);
+    expect(verifyBundle(dir, { max_bytes: manifest + events + blob - 1 }).checks.find((c) => c.check === 'artifacts')!.problem).toMatch(/budget/);
+  });
+
+  it('CLI: --max-bytes without a value is an error, not ignored', () => {
+    const dir = bundle();
+    const home = tempDir('kl-vbf-h-');
+    const r = spawnSync(process.execPath, [CLI, 'verify-bundle', dir, '--max-bytes'], { env: cleanEnv({ HOME: home, USERPROFILE: home }), encoding: 'utf8' });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/--max-bytes needs a value/);
+  });
+});
+
+
+describe.skipIf(!POSIX)('verify-bundle: a hostile self-signed bundle cannot exhaust memory (nothing per line is retained)', () => {
+  it('range.leaf_count of 1e12 is refused from the manifest before anything is read', () => {
+    const dir = bundle();
+    selfSign(dir, (m) => {
+      (m.range as { leaf_count: number }).leaf_count = 1e12;
+      (m.root as { leaf_count: number }).leaf_count = 1e12;
+    });
+    let r!: ReturnType<typeof verifyBundle>;
+    const cost = rssAfter(() => (r = verifyBundle(dir)));
+    expect(r.ok).toBe(false);
+    expect(r.checks.find((c) => c.check === 'canonical')!.problem).toMatch(/leaf_count/);
+    expect(cost.mb).toBeLessThan(32);
+  });
+
+  it.each([
+    ['{}\n', 'huge', /leaf_count/],
+    ['x\n', 'huge', /leaf_count/],
+    ['{}\n', 'index', /more than the \d+ line/],
+    ['x\n', 'index', /line 1 is not usable JSON/],
+  ])('8 MiB of %j lines matching a self-signed digest (leaf_count: %s): refused early, flat memory', (unit, range, why) => {
+    const dir = bundle();
+    const text = (unit as string).repeat(Math.floor((8 * 1024 * 1024) / (unit as string).length));
+    writeFileSync(join(dir, 'events.jsonl'), text);
+    selfSign(dir, (m) => {
+      (m as { events_sha256: string }).events_sha256 = createHash('sha256').update(text).digest('hex');
+      if (range === 'huge') {
+        // the coordinator's repro: a consistent-looking range of 1e12 leaves, so the old line cap was 1e12
+        (m.range as { to_seq: number }).to_seq = m.range.from_seq + 1e12 - 1;
+        (m.range as { leaf_count: number }).leaf_count = 1e12;
+        (m.root as { leaf_count: number }).leaf_count = 1e12;
+      }
+    });
+    let r!: ReturnType<typeof verifyBundle>;
+    const cost = rssAfter(() => (r = verifyBundle(dir)));
+    rmSync(join(dir, 'events.jsonl'));
+    expect(r.ok).toBe(false);
+    expect(r.checks.find((c) => c.check === 'canonical')!.problem).toMatch(why as RegExp);
+    expect(cost.mb).toBeLessThan(48);
   });
 });

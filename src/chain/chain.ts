@@ -201,6 +201,19 @@ export class Chain {
     private readonly signer: Signer,
   ) {}
 
+  /** 0.9.0: the newest event after `after_seq` that touched document `doc_id`, by an actor other than `actor_id` (null: none). */
+  latestDocEventByOthers(doc_id: string, after_seq: number, actor_id: string): { seq: number; actor_id: string; event_type: string } | null {
+    return (
+      (this.db
+        .prepare(
+          `SELECT seq, actor_id, event_type FROM events
+            WHERE seq > ? AND actor_id <> ? AND json_valid(payload_canonical) AND json_extract(payload_canonical, '$.doc_id') = ?
+            ORDER BY seq DESC LIMIT 1`,
+        )
+        .get(after_seq, actor_id, doc_id) as { seq: number; actor_id: string; event_type: string } | undefined) ?? null
+    );
+  }
+
   head(): ChainHead {
     const row = this.db
       .prepare(`SELECT seq, hash FROM chain_head WHERE id = 1`)

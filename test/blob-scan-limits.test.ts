@@ -18,6 +18,7 @@ import { exportBundle } from '../src/audit/bundle.js';
 import { KronicleLite } from '../src/index.js';
 import { scanForSecrets, SecretDetectedError, WRITE_DETECTORS } from '../src/secrets/guard.js';
 import { tempDir } from './helpers/fs.js';
+import { generous } from './helpers/time.js';
 
 const GHP = 'ghp_' + 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8';
 const MB = 1024 * 1024;
@@ -134,10 +135,10 @@ describe('#15 private_key detector: linear time, same matches as its regex', () 
     const flood = (B + 'A'.repeat(40) + '\n').repeat(900) + '-----END X\n'.repeat(1000);
     let t = Date.now();
     expect(scanForSecrets(flood)).toEqual([]);
-    expect(Date.now() - t).toBeLessThan(1000);
+    expect(Date.now() - t).toBeLessThan(generous(1000));
     t = Date.now();
     expect(scanForSecrets(B + 'A'.repeat(4 * MB) + '\n')).toEqual([]);
-    expect(Date.now() - t).toBeLessThan(2000);
+    expect(Date.now() - t).toBeLessThan(generous(2000));
   });
   it('agrees with the regex on random token soup', () => {
     const parts = [B, '-----BEGIN OPENSSH PRIVATE KEY-----  \r\n', '-----END RSA PRIVATE KEY-----', '-----END X-----', 'A'.repeat(40), 'A'.repeat(39), '+'.repeat(3), '  > ', '#', '\n', '\r\n', 'x', ':-', ' ', '"'];

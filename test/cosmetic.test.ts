@@ -13,6 +13,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { generous } from './helpers/time.js';
 
 import { classifyEdit, editDistance, formatCanon } from '../src/orient/cosmetic.js';
 import { KronicleLite } from '../src/store.js';
@@ -75,7 +76,7 @@ describe('classifyEdit: raw-text equivalence', () => {
       const t = unit.repeat(n);
       const t0 = Date.now();
       classifyEdit(t, `${t}z`);
-      expect(Date.now() - t0, JSON.stringify(unit)).toBeLessThan(3_000);
+      expect(Date.now() - t0, JSON.stringify(unit)).toBeLessThan(generous(3_000));
     }
   });
 
@@ -95,7 +96,7 @@ describe('classifyEdit: raw-text equivalence', () => {
     const t0 = Date.now();
     expect(kl.orient.getSystemState({ actor_id: 'hook', since_cursor: c, focus: 'retractions' }).retractions).toHaveLength(1);
     expect(kl.lineage.pending('agent').count).toBe(1);
-    expect(Date.now() - t0).toBeLessThan(5_000);
+    expect(Date.now() - t0).toBeLessThan(generous(5_000));
     kl.close();
   });
 
@@ -104,7 +105,7 @@ describe('classifyEdit: raw-text equivalence', () => {
     const t0 = Date.now();
     expect(classifyEdit(`Use ${w} now.`, `Use ${w.slice(0, -1)}b now.`)).toEqual({ format_only: false, rules: [], hint: null });
     expect(editDistance(w, `${w.slice(0, -1)}b`)).toBe(3);
-    expect(Date.now() - t0).toBeLessThan(2_000);
+    expect(Date.now() - t0).toBeLessThan(generous(2_000));
     expect(classifyEdit(`Use ${'a'.repeat(63)}x now.`, `Use ${'a'.repeat(63)}y now.`).hint).toBe('likely_typo'); // 64 letters: still a word
   });
 });

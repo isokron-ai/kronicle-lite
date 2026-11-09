@@ -11,10 +11,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { openDatabase, openDbReadOnly } from '../src/db/open.js';
+import { BUSY_TIMEOUT_MS, openDatabase, openDbReadOnly } from '../src/db/open.js';
 import { isStoreUnreadable, StoreUnreadableError } from '../src/db/storage.js';
 import { checkWriters, describeWriters } from '../src/db/writers.js';
 import { runDoctor } from '../src/doctor.js';
+import { BOOKKEEPING_WAIT_MS } from '../src/orient/flight-recorder.js';
 import { KronicleLite } from '../src/store.js';
 
 const CLI = join(__dirname, '..', 'dist', 'cli.js');
@@ -136,17 +137,26 @@ describe.skipIf(!existsSync(CLI))('F14: export into a closed pipe', () => {
 describe('C2-08: a reader never queues behind another process’s write lock', () => {
   it('open + orient + pending finish while a writer holds the lock (no BEGIN IMMEDIATE on a current schema)', () => {
     const data = seeded(tmp());
-    const holder = new Database(join(data, 'kronicle-lite.db'));
-    holder.exec('BEGIN IMMEDIATE');
-    holder.prepare(`INSERT INTO meta (key, value) VALUES ('hold', '1')`).run();
-    try {
+    const work = () => {
       const t0 = Date.now();
       const s = new KronicleLite({ dataDir: data });
       s.orient.getSystemState({ actor_id: 'reader', focus: 'retractions' });
       s.lineage.pending('reader', { project_keys: null, limit: 5 });
       s.close();
-      // The busy timeout is 10 s; the flight-recorder row waits at most 1 s, then is skipped.
-      expect(Date.now() - t0).toBeLessThan(5000);
+      return Date.now() - t0;
+    };
+    // The bookkeeping wait is a fraction of the busy timeout, by construction (absolute, not scaled).
+    expect(BOOKKEEPING_WAIT_MS).toBeLessThanOrEqual(BUSY_TIMEOUT_MS / 5);
+    const base = work(); // the same work with no lock held: this run's own speed
+    const holder = new Database(join(data, 'kronicle-lite.db'));
+    holder.exec('BEGIN IMMEDIATE');
+    holder.prepare(`INSERT INTO meta (key, value) VALUES ('hold', '1')`).run();
+    try {
+      const locked = work();
+      // Behind the lock, the only extra time is the bounded wait (once per briefing row), plus the
+      // run's own speed again; never the 10 s busy timeout. The wait is real time, so it is not scaled.
+      expect(locked - base).toBeLessThan(BOOKKEEPING_WAIT_MS + 1500);
+      expect(locked).toBeLessThan(BUSY_TIMEOUT_MS);
     } finally {
       holder.exec('ROLLBACK');
       holder.close();
@@ -215,7 +225,7 @@ describe('C2-01: older writers', () => {
     s.db.prepare(`UPDATE meta SET value = '1' WHERE key = 'writer_head_seq'`).run();
     const d = describeWriters(checkWriters(s.db));
     expect(d.status).toBe('warn');
-    expect(d.detail).toMatch(/events 2\.\.\d+ were appended by a kronicle-lite older than 0\.8\.1/);
+    expect(d.detail).toMatch(/events 2\.\.\d+ were appended by a kronicle-lite older than 0\.9\.0/);
     s.close();
   });
 
