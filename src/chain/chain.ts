@@ -13,6 +13,7 @@ import type { Signer } from '../crypto/keys.js';
 import { verifyEd25519 } from '../crypto/keys.js';
 import type { Db } from '../db/open.js';
 import { markWriter } from '../db/storage.js';
+import { guardIdentifiers } from '../secrets/guard.js';
 import { VERSION } from '../version.js';
 import {
   computeEventHash,
@@ -214,6 +215,8 @@ export class Chain {
    */
   append(input: AppendInput): AppendResult {
     assertJsonObject(input.payload);
+    // 0.9.0: the actor id and idempotency key are chained (and exported) beside the payload.
+    guardIdentifiers({ actor_id: input.actor_id, idempotency_key: input.idempotency_key }, `${input.event_type} event`);
     const run = this.db.transaction((): AppendResult => {
       if (input.idempotency_key !== undefined) {
         const existing = this.db

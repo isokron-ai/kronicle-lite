@@ -64,8 +64,9 @@ error carries `index`. Each event is checked in this order:
 1. **Kind and schema.** The payload must validate against the schema for its
    `kind` (below). Unknown fields are refused. `audit_id` and `event_key` are
    filled into the payload.
-2. **Secrets.** The write-time secret guard runs on the payload, so a key is
-   never burned into the chain. Redact first; store the artifact as a ref with
+2. **Secrets.** The write-time secret guard runs on the payload (values and
+   object keys, such as `deltas` and `tokens` names) and on the actor id, so a
+   key is never burned into the chain. Redact first; store the artifact as a ref with
    `redacted: true`.
 3. **Blob refs.** Each ref must name a stored blob of that size, unless it is
    `redacted: true`.

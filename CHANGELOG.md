@@ -99,6 +99,14 @@ uses semantic versioning once past 0.x.
     multi-GB blobs, or one blob 50 times, fails in about 10 ms; a sparse
     500 MB `events.jsonl` in about 0.6 s with flat memory; a re-signed
     bundle with 16 sparse 64 MiB blobs in about 1.3 s, flat memory.
+  - **Identifiers and object keys get the secret guard.** It scanned
+    content only, so a token as an `actor_id` (every write tool), a
+    `put_document` `idempotency_key`, `slug` or `source_path`, an `apply` op
+    id or `idempotency_key`, or an audit `deltas` / `tokens` key was chained
+    and exported verbatim (and the store could no longer round-trip through
+    `import`). These are refused now in every mode (an identifier cannot be
+    redacted); `import` also scans actor ids, idempotency keys and payload
+    keys.
   - **Safe export:** `--out` must be new or empty and free of symlinks, and
     every file is created with `O_EXCL|O_NOFOLLOW`, so no symlink planted in
     `--out` is written through.

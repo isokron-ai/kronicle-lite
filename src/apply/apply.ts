@@ -35,7 +35,7 @@ import { chainIdFromPublicKeyPem } from '../crypto/keys.js';
 import type { Db } from '../db/open.js';
 import { DocumentError, isInstructionSlug, type DocumentStore } from '../docs/documents.js';
 import { snippet, wordDiff } from '../orient/textdiff.js';
-import { SecretDetectedError } from '../secrets/guard.js';
+import { guardIdentifiers, SecretDetectedError } from '../secrets/guard.js';
 
 export const APPLY_MODES = ['all_or_nothing', 'best_effort'] as const;
 export type ApplyMode = (typeof APPLY_MODES)[number];
@@ -197,6 +197,8 @@ export class ApplyEngine {
   apply(input: ApplyInput): ApplyResult {
     const mode: ApplyMode = input.mode ?? 'all_or_nothing';
     const ops = validatePlan(input.ops);
+    // 0.9.0: op ids and the idempotency key go into apply.committed and apply_results / apply_confirmations as given.
+    guardIdentifiers({ actor_id: input.actor_id, idempotency_key: input.idempotency_key, ...Object.fromEntries(ops.map((o, i) => [`ops[${i}].id`, o.id])) }, 'this apply');
     const plan_hash = planHash(mode, ops);
     const request_hash = sha256Hex(canonicalize({ mode, ops } as unknown as JsonValue));
     const key = input.idempotency_key ?? null;

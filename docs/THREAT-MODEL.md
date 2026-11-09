@@ -229,7 +229,8 @@ only safe moment to stop a credential is before it is chained.
 | `put_document`, `supersede_block` (MCP) | refuse: `secret_detected` with `{field, detector, line}` findings, nothing appended | `redact_secrets: true` chains a copy with `[REDACTED:<detector>]` and returns `redactions` |
 | `tombstone_block` reason | refuse | reword the reason |
 | `kronicle-lite put`, `put --from-instructions`, `watch` | refuse (exit 1; a refused instruction file syncs as `error`) | `--redact-secrets` (an unchanged file then stays `unchanged`; no re-put loop) |
-| `kronicle-lite import` | refuse the whole import, nothing committed | `--allow-secrets` imports **verbatim**: chained bytes cannot be redacted without breaking their hashes |
+| identifiers on every write (0.9.0): `actor_id`, `idempotency_key`, `slug`, `source_path`, `apply` op ids, audit payload object keys | refuse in every mode (an identifier cannot be redacted without changing what it names) | none: use an identifier that is not a credential |
+| `kronicle-lite import` | refuse the whole import (payload values and keys, actor ids, idempotency keys), nothing committed | `--allow-secrets` imports **verbatim**: chained bytes cannot be redacted without breaking their hashes |
 | everything served (`recall` content, orient retractions and delta payloads, `audit_assumptions`, `kronicle://docs/{slug}`) | independent read-time scrub: `[REDACTED:read:<rule>]`; a hit says `read_scrubbed` and loses `can_act` | none |
 
 The write ruleset aims at precision so a refusal is worth reading: provider

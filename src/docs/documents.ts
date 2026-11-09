@@ -23,7 +23,7 @@ import { blake3Hex } from '../crypto/hash.js';
 import { checkGitBinding, type DiffStat, type SourceState } from '../git/binding.js';
 import type { Db } from '../db/open.js';
 import { ReadLog, type ReadRow } from '../lineage/read-log.js';
-import { guardFields, type SecretFinding, type SecretPolicy } from '../secrets/guard.js';
+import { guardFields, guardIdentifiers, scanValue, SecretDetectedError, type SecretFinding, type SecretPolicy } from '../secrets/guard.js';
 import { normalizeMarkdown, parseMarkdown, renderBlocks, type BlockKind, type ParsedBlock } from './parser.js';
 
 export interface BlockRow {
@@ -516,6 +516,10 @@ export class DocumentStore {
     /** Unreleased: infer lineage from the author's reads (default true when an inference is wired). */
     infer_lineage?: boolean;
   }): PutDocumentResult {
+    // 0.9.0: identifiers and the source are chained as given; they cannot be redacted, so refuse in every mode.
+    guardIdentifiers({ slug: args.slug, actor_id: args.actor_id, idempotency_key: args.idempotency_key }, 'this document put');
+    const sourceFindings = args.source !== undefined ? scanValue(args.source, 'source') : [];
+    if (sourceFindings.length > 0) throw new SecretDetectedError(sourceFindings, 'this document put', 'use a source path that is not a credential (it cannot be redacted)');
     const guarded = guardFields({ title: args.title, markdown: args.markdown }, args.secrets ?? 'refuse', `document ${args.slug}`);
     args = { ...args, ...guarded.fields };
     if (!isValidSlug(args.slug)) {
