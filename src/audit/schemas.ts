@@ -13,11 +13,29 @@ import { createHash } from 'node:crypto';
 
 import { z } from 'zod';
 
-export const AUDIT_KINDS = ['catalog_snapshot', 'call_measured', 'finding', 'gate_result', 'fix_applied', 'regression_result'] as const;
+/** The 0.9.0 kinds: a bundle that holds only these is written as format /1, which 0.9.0 readers verify. */
+export const AUDIT_KINDS_V1 = ['catalog_snapshot', 'call_measured', 'finding', 'gate_result', 'fix_applied', 'regression_result'] as const;
+/** Audit milestones (0.10.0): a bundle holding any of these is written as format /2 (0.9.0 readers refuse it by format). */
+export const MILESTONE_KINDS = ['harness_frozen', 'run_completed', 'report_issued'] as const;
+export const AUDIT_KINDS = [...AUDIT_KINDS_V1, ...MILESTONE_KINDS] as const;
 export type AuditKind = (typeof AUDIT_KINDS)[number];
 export const AUDIT_EVENT_PREFIX = 'audit.';
-/** Evidence bundle format tag (src/audit/bundle.ts, docs/EVIDENCE-BUNDLE.md). */
-export const BUNDLE_FORMAT = 'kronicle-lite-evidence-bundle/1';
+/** Evidence bundle format tags (src/audit/bundle.ts, docs/EVIDENCE-BUNDLE.md). */
+export const BUNDLE_FORMAT_V1 = 'kronicle-lite-evidence-bundle/1';
+export const BUNDLE_FORMAT_V2 = 'kronicle-lite-evidence-bundle/2';
+export const BUNDLE_FORMATS = [BUNDLE_FORMAT_V1, BUNDLE_FORMAT_V2] as const;
+export type BundleFormat = (typeof BUNDLE_FORMATS)[number];
+/** @deprecated the /1 tag; kept for 0.9.0 callers. */
+export const BUNDLE_FORMAT = BUNDLE_FORMAT_V1;
+/** The kinds a bundle of `format` may hold. */
+export function kindsOfFormat(format: BundleFormat): readonly AuditKind[] {
+  return format === BUNDLE_FORMAT_V1 ? AUDIT_KINDS_V1 : AUDIT_KINDS;
+}
+/** The oldest format that can carry every kind in `kinds` (older readers keep working when they can). */
+export function formatForKinds(kinds: Iterable<AuditKind>): BundleFormat {
+  for (const k of kinds) if (!(AUDIT_KINDS_V1 as readonly string[]).includes(k)) return BUNDLE_FORMAT_V2;
+  return BUNDLE_FORMAT_V1;
+}
 export const auditEventType = (kind: AuditKind): string => `${AUDIT_EVENT_PREFIX}${kind}`;
 export function kindOfEventType(event_type: string): AuditKind | null {
   if (!event_type.startsWith(AUDIT_EVENT_PREFIX)) return null;
@@ -111,6 +129,35 @@ export const PAYLOAD_SCHEMAS = {
     diff: BlobRefSchema.optional(),
     evidence: EVIDENCE.optional(),
   }),
+  harness_frozen: z.strictObject({
+    ...Common,
+    harness_id: ID.describe('name of the frozen harness / protocol version'),
+    fingerprint: SHA256.describe('sha256 of the harness manifest (e.g. HARNESS_SHA256.txt)'),
+    manifest: BlobRefSchema.describe('the frozen harness (a tar or its manifest)'),
+    hypotheses: BlobRefSchema.optional().describe('pre-registered hypotheses / expected outcomes'),
+    planned_runs: COUNT.optional().describe('number of runs declared at freeze time (completeness signal)'),
+    title: SHORT.optional(),
+  }),
+  run_completed: z.strictObject({
+    ...Common,
+    run_id: ID,
+    run_seq: z.number().int().positive().describe('1-based run sequence number: the runs of an audit are numbered 1..N with no gaps'),
+    fingerprint: SHA256.describe('harness fingerprint the run executed under'),
+    status: z.string().min(1).max(32),
+    capture: z.enum(['complete', 'interrupted']).optional().describe('whether evidence capture ran uninterrupted (default complete)'),
+    interruption: SHORT.optional().describe('what interrupted capture, when capture is interrupted'),
+    nonce: SHA256.optional().describe('freeze nonce: sha256 of the harness-freeze anchor receipt, known only after the freeze'),
+    result: BlobRefSchema.optional(),
+    evidence: EVIDENCE.optional(),
+  }),
+  report_issued: z.strictObject({
+    ...Common,
+    report_id: ID,
+    report: BlobRefSchema,
+    run_count: COUNT.optional().describe('number of runs the report covers (completeness signal)'),
+    title: SHORT.optional(),
+    evidence: EVIDENCE.optional(),
+  }),
   regression_result: z.strictObject({
     ...Common,
     finding_id: ID.optional(),
@@ -144,7 +191,7 @@ export function parseAuditPayload(kind: AuditKind, payload: unknown): { ok: true
 /** Every blob ref in a payload, with the field it sits in. */
 export function blobRefsOf(payload: Record<string, unknown>): { field: string; ref: BlobRef }[] {
   const out: { field: string; ref: BlobRef }[] = [];
-  for (const field of ['snapshot', 'request', 'response', 'detail', 'report', 'diff'] as const) {
+  for (const field of ['snapshot', 'request', 'response', 'detail', 'report', 'diff', 'manifest', 'hypotheses', 'result'] as const) {
     const r = BlobRefSchema.safeParse(payload[field]);
     if (r.success) out.push({ field, ref: r.data });
   }

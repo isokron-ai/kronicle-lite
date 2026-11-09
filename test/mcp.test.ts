@@ -290,7 +290,7 @@ describe('MCP server (in-process, 2026-07-28 client via serveStdio over InMemory
     expect(q.findings).toBeNull();
     const schemas = await client.readResource({ uri: 'kronicle://schemas/audit' });
     expect(Object.keys(JSON.parse((schemas.contents[0] as { text: string }).text) as object).sort()).toEqual(
-      ['call_measured', 'catalog_snapshot', 'finding', 'fix_applied', 'gate_result', 'regression_result'],
+      ['call_measured', 'catalog_snapshot', 'finding', 'fix_applied', 'gate_result', 'harness_frozen', 'regression_result', 'report_issued', 'run_completed'],
     );
 
     store.docs.putDocument({ slug: 'batch-verify', title: 'b', markdown: '# B\n\nzebra crossing one.\n', actor_id: 'h' });

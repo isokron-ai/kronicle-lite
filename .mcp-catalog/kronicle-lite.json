@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-09T02:59:08.024Z",
+  "capturedAt": "2026-11-09T05:44:18.084Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -453,7 +453,10 @@
                 "finding",
                 "gate_result",
                 "fix_applied",
-                "regression_result"
+                "regression_result",
+                "harness_frozen",
+                "run_completed",
+                "report_issued"
               ],
               "type": "string"
             },
@@ -524,7 +527,10 @@
                       "finding",
                       "gate_result",
                       "fix_applied",
-                      "regression_result"
+                      "regression_result",
+                      "harness_frozen",
+                      "run_completed",
+                      "report_issued"
                     ],
                     "type": "string"
                   },
@@ -1568,5 +1574,5 @@
     "title": "kronicle-lite",
     "version": "0.9.0"
   },
-  "sha256": "d7ffc5c9a73dc3353e87967552d5747299ad56f7a7c6d8e5635d56e6eac9cab7"
+  "sha256": "e637c91cb88459555de409fdd3b52b1055faef81f116d91c0ecb20e627a276fd"
 }

@@ -27,7 +27,7 @@ import { canonicalize, type JsonValue } from '../crypto/canonical.js';
 import { sha256Hex } from '../crypto/hash.js';
 import { keyIdFromPublicKey, verifyEd25519 } from '../crypto/keys.js';
 import { manifestSigningPayload, type BundleManifest } from './bundle.js';
-import { blobRefsOf, BUNDLE_FORMAT, evidenceOf, kindOfEventType, parseAuditPayload } from './schemas.js';
+import { blobRefsOf, BUNDLE_FORMATS, evidenceOf, kindOfEventType, kindsOfFormat, parseAuditPayload, type BundleFormat } from './schemas.js';
 
 export const BUNDLE_CHECKS = ['canonical', 'signature', 'events', 'chain', 'root', 'artifacts', 'refs', 'missing'] as const;
 export type BundleCheck = (typeof BUNDLE_CHECKS)[number];
@@ -115,7 +115,7 @@ export const MAX_BUNDLE_BLOB_BYTES = 64 * 1024 * 1024;
  * O_NONBLOCK and checked with fstat: at most `max` bytes, exactly `size` when given, one link
  * unless `allowHardlinks`. Throws on anything else.
  */
-function hashRegularFile(path: string, opts: { size?: number; max: number; allowHardlinks: boolean }): { sha256: string; size: number } {
+export function hashRegularFile(path: string, opts: { size?: number; max: number; allowHardlinks: boolean }): { sha256: string; size: number } {
   const name = basename(path);
   const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
   try {
@@ -222,7 +222,7 @@ const int = (v: unknown): v is number => typeof v === 'number' && Number.isSafeI
 
 /** The manifest's shape, or the first problem. Everything below relies on it. */
 function shapeProblem(m: Record<string, unknown>): string | null {
-  if (m['format'] !== BUNDLE_FORMAT) return `unknown format ${JSON.stringify(m['format'])} (expected ${BUNDLE_FORMAT})`;
+  if (!(BUNDLE_FORMATS as readonly unknown[]).includes(m['format'])) return `unknown format ${JSON.stringify(m['format'])} (expected one of ${BUNDLE_FORMATS.join(', ')})`;
   if (typeof m['audit_id'] !== 'string') return 'audit_id is not a string';
   const r = m['range'];
   if (!isObj(r) || !int(r['from_seq']) || !int(r['to_seq']) || !int(r['leaf_count']) || typeof r['first_prev_hash'] !== 'string' || r['from_seq'] < 1 || r['to_seq'] < r['from_seq']) {
@@ -400,6 +400,8 @@ export function verifyBundle(dir: string, opts: VerifyBundleOptions = {}): Verif
       if (h !== ev.this_hash) later('events', `seq ${String(ev.seq)}: this_hash does not recompute`);
       const kind = kindOfEventType(String(ev.event_type));
       if (!kind) return later('events', `seq ${String(ev.seq)}: ${String(ev.event_type)} is not an audit event type`);
+      // A /1 bundle holds 0.9.0 kinds only (what a 0.9.0 reader accepts); milestone kinds need /2.
+      if (!kindsOfFormat(m!.format as BundleFormat).includes(kind)) return later('events', `seq ${String(ev.seq)}: ${kind} is not allowed in a ${m!.format} bundle`);
       if (!isObj(ev.payload) || ev.payload['audit_id'] !== m!.audit_id) return later('events', `seq ${String(ev.seq)}: audit_id is not ${m!.audit_id}`);
       const p = parseAuditPayload(kind, ev.payload);
       if (!p.ok) later('events', `seq ${String(ev.seq)} (${kind}): ${p.problem}`);
