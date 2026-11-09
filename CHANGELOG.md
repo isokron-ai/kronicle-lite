@@ -59,13 +59,21 @@ uses semantic versioning once past 0.x.
     by 0.8.0 no `doc_lineage_gaps`. Opened without migrating (`verify-chain`,
     `verify`, `doctor`, a read-only medium), they failed with "no such table"
     and exit 1, the divergence code; on a read-only medium `orient` reported
-    an integrity failure and `get` / `pending` failed. Every table an older
-    store lacks is now served as an empty TEMP table on that connection (the
-    file is never written), with the data migrations it has not run derived
-    into it, so reads answer as on a migrated store; a tampered 0.7.0 / 0.8.0
-    store still exits 1, and a gaps table the store migrated and then lost
-    is still a divergence (`test/upgrade-old-stores.test.ts`, new fixture
-    `store-0.7.0.db.gz` made by the published 0.7.0).
+    an integrity failure and `get` / `pending` failed. A table the store's
+    release never had is now served as an empty TEMP table on that connection,
+    with the data migrations the store has not run derived into it, so reads
+    answer as on a migrated store. `kronicle-lite.db` itself is not written
+    (on a writable directory SQLite may create the `-wal` / `-shm` sidecars of
+    a WAL database, and doctor's handle checkpoints them on close); commands
+    that open read-write (`orient`, `export`, `get`, `pending`) migrate the
+    store first, as before. The release is a new `schema_generation` meta key
+    (written on migration), else inferred from what the store holds. A table
+    missing from a store whose release had it is damage, not an older store:
+    `verify-chain` and `doctor` report it and exit 1, as do edited events,
+    hashes and a deleted head. A connection that stays open while another
+    process migrates the store drops its TEMP tables as the real ones appear
+    (`test/upgrade-old-stores.test.ts`, fixture `store-0.7.0.db.gz` made by
+    the published 0.7.0).
   - **Truncated exports are refused.** `import` read an export to its last
     line and ignored the head its header names, so a file cut short (an
     interrupted `export --out`, a full disk, a partial copy) imported as a
