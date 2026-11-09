@@ -54,6 +54,26 @@ uses semantic versioning once past 0.x.
     with "no such table: audit_events" and exit 1, the divergence code. The
     test uses a real 0.8.1 store (`test/fixtures/store-0.8.1.db.gz`) and a
     read-only medium.
+  - **0.7.0 and 0.8.0 stores verify too.** A store made by the published
+    0.7.0 has no `doc_lineage`, `doc_lineage_gaps` or `reads` table, one made
+    by 0.8.0 no `doc_lineage_gaps`. Opened without migrating (`verify-chain`,
+    `verify`, `doctor`, a read-only medium), they failed with "no such table"
+    and exit 1, the divergence code; on a read-only medium `orient` reported
+    an integrity failure and `get` / `pending` failed. A table the store's
+    release never had is now served as an empty TEMP table on that connection,
+    with the data migrations the store has not run derived into it, so reads
+    answer as on a migrated store. `kronicle-lite.db` itself is not written
+    (on a writable directory SQLite may create the `-wal` / `-shm` sidecars of
+    a WAL database, and doctor's handle checkpoints them on close); commands
+    that open read-write (`orient`, `export`, `get`, `pending`) migrate the
+    store first, as before. The release is a new `schema_generation` meta key
+    (written on migration), else inferred from what the store holds. A table
+    missing from a store whose release had it is damage, not an older store:
+    `verify-chain` and `doctor` report it and exit 1, as do edited events,
+    hashes and a deleted head. A connection that stays open while another
+    process migrates the store drops its TEMP tables as the real ones appear
+    (`test/upgrade-old-stores.test.ts`, fixture `store-0.7.0.db.gz` made by
+    the published 0.7.0).
   - **Safe export:** `--out` must be new or empty and free of symlinks, and
     every file is created with `O_EXCL|O_NOFOLLOW`, so no symlink planted in
     `--out` is written through.

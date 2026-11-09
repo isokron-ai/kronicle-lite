@@ -28,6 +28,8 @@ import { recomputeEventHash } from '../chain/event.js';
 import { blake3Hex } from '../crypto/hash.js';
 import type { Db } from '../db/open.js';
 import { SCHEMA_SQL } from '../db/schema.js';
+import { schemaDamage } from '../db/shim.js';
+import { lineageGapsState } from '../db/storage.js';
 import { isPayloadUnparseable } from '../chain/index.js';
 import { DocumentStore } from './documents.js';
 
@@ -114,7 +116,7 @@ export function checkRevisionRow(chain: Chain, row: RevisionRowLike): RowProblem
 }
 
 export interface ProjectionMismatch {
-  table: 'documents' | 'document_revisions' | 'blocks' | 'doc_sources' | 'doc_lineage' | 'doc_lineage_gaps' | 'blocks_fts' | 'audit_events';
+  table: 'documents' | 'document_revisions' | 'blocks' | 'doc_sources' | 'doc_lineage' | 'doc_lineage_gaps' | 'blocks_fts' | 'audit_events' | 'schema';
   /** Primary key of the row (doc_id, doc_id@revision or block_id). */
   key: string;
   /** missing (in the chain, not stored) | extra (stored, not in the chain) | a column name | content_hash. */
@@ -200,6 +202,13 @@ export function verifyProjection(db: Db, chain: Chain): ProjectionResult {
     if (mismatches.length < MAX_REPORTED) mismatches.push(m);
   };
 
+  // 0.9.0: a table the store's release had is missing: damage (an older release's store is shimmed instead).
+  const damage = schemaDamage(db);
+  if (damage.tables.length > 0) {
+    for (const t of damage.tables) report({ table: 'schema', key: t, field: 'missing', detail: `table ${t} is missing, but this store's schema (${damage.generation}) has it: the store is damaged` });
+    return { ok: false, events_replayed: 0, documents_checked: 0, revisions_checked: 0, blocks_checked: 0, mismatch_count: count, mismatches };
+  }
+
   const mem = new Database(':memory:');
   let events = 0;
   try {
@@ -226,6 +235,15 @@ export function verifyProjection(db: Db, chain: Chain): ProjectionResult {
 
     const counts: Record<string, number> = {};
     for (const t of TABLES) {
+      if (t.table === 'doc_lineage_gaps') {
+        // A 0.8.0 store opened read-only (never migrated) has not derived this table yet.
+        const st = lineageGapsState(db);
+        if (st === 'not_derived') continue;
+        if (st === 'missing') {
+          report({ table: t.table, key: 'table', field: 'missing', detail: 'the table is missing although the store ran its migration' });
+          continue;
+        }
+      }
       const sql = (d: Db) =>
         d.prepare(`SELECT ${t.key} AS k, ${t.cols.join(', ')} FROM ${t.table} ORDER BY ${t.order}`).all() as Record<string, unknown>[];
       const want = new Map(sql(mem).map((r) => [String(r['k']), r]));

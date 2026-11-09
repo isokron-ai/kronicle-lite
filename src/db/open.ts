@@ -13,6 +13,7 @@ import {
 import { ensureDir } from '../util/once-file.js';
 import { VERSION } from '../version.js';
 import { ADDED_COLUMNS, DATA_MIGRATIONS, SCHEMA_SQL, SCHEMA_VERSION } from './schema.js';
+import { CURRENT_SCHEMA_GENERATION, SCHEMA_GENERATION_KEY, SCHEMA_GENERATIONS, shimMissingTables } from './shim.js';
 import { isStorageWriteError, StoreUnreadableError, WRITER_GENERATION } from './storage.js';
 
 export type Db = Database.Database;
@@ -170,6 +171,7 @@ export function openDbReadOnly(dbFile: string, cause: unknown = null): { db: Db;
     db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
     db.prepare('SELECT seq FROM chain_head WHERE id = 1').get();
     registerFunctions(db);
+    shimMissingTables(db);
     return db;
   };
   const attempt = (label: string, fn: () => Db): Db | null => {
@@ -267,6 +269,9 @@ function schemaCurrent(db: Db, identity: ServerIdentity): boolean {
       if (!cols.includes(c.column)) return false;
     }
     if (metaValue(db, 'schema_version') === null) return false;
+    // 0.9.0: the schema generation marker (an unknown, newer value is fine).
+    const gen = metaValue(db, SCHEMA_GENERATION_KEY);
+    if (gen === null || (SCHEMA_GENERATIONS as readonly string[]).indexOf(gen) !== -1 && (SCHEMA_GENERATIONS as readonly string[]).indexOf(gen) < (SCHEMA_GENERATIONS as readonly string[]).indexOf(CURRENT_SCHEMA_GENERATION)) return false;
     if (Number(metaValue(db, 'min_writer_generation') ?? 0) < WRITER_GENERATION) return false;
     if (!db.prepare(`SELECT 1 FROM chain_head WHERE id = 1`).get()) return false;
     if (!db.prepare(`SELECT 1 FROM signing_keys WHERE key_id = ?`).get(identity.signer.key_id)) return false;
@@ -293,6 +298,8 @@ export const BUSY_TIMEOUT_MS = 10_000;
 
 /** SCHEMA_SQL without its connection pragmas (they run outside the setup transaction). */
 const SCHEMA_DDL = SCHEMA_SQL.replace(/^\s*PRAGMA [^;]+;\s*$/gm, '');
+
+export { shimMissingTables } from './shim.js';
 
 function enableWal(db: Db): void {
   if (String(db.pragma('journal_mode', { simple: true })).toLowerCase() === 'wal') return;
@@ -348,6 +355,13 @@ function initialize(db: Db, identity: ServerIdentity): void {
   const now = new Date().toISOString();
   // Runs inside open()'s immediate setup transaction.
   db.prepare(`INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)`).run(String(SCHEMA_VERSION));
+  // 0.9.0: which release's schema this store has (a read-only open of an older store shims only
+  // the tables that release did not have; a table missing below this marker is damage).
+  const gen = metaValue(db, SCHEMA_GENERATION_KEY);
+  const order = SCHEMA_GENERATIONS as readonly string[];
+  if (gen === null || (order.indexOf(gen) !== -1 && order.indexOf(gen) < order.indexOf(CURRENT_SCHEMA_GENERATION))) {
+    db.prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)`).run(SCHEMA_GENERATION_KEY, CURRENT_SCHEMA_GENERATION);
+  }
   db.prepare(`INSERT OR IGNORE INTO chain_head (id, seq, hash) VALUES (1, 0, ?)`).run(GENESIS_HASH);
   db.prepare(
     `INSERT OR IGNORE INTO signing_keys (key_id, public_key_pem, algorithm, created_at)
