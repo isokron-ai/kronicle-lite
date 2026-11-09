@@ -70,17 +70,26 @@ Hostile input fails cleanly:
 - Any manifest shape, any nesting depth (more than 64 levels is refused before
   parsing) and any file name yields `ok: false` with a reason, never a crash.
 - **Order: nothing a manifest lists is read before its signature verifies.**
-  `manifest.json` is read and checked first (at most 64 MiB). When its
-  signature does not verify (or not under `--key`), every later step reports
-  `not checked` and fails: the digests, sizes and names it lists could be an
-  attacker's. Then `events.jsonl` is read once, as a stream, in 1 MiB
-  chunks: each chunk is hashed and each line parsed as it completes. A line
-  longer than 16 MiB, more lines than the signed range holds, or more bytes
-  than the read budget stop the read at once. Steps 3 to 5 use the lines
-  only when the whole file hashes to the signed `events_sha256`. Measured
-  (Linux, Node 22): a self-signed bundle with a sparse 500 MiB
-  `events.jsonl` that matches its digest fails in about 40 ms, and memory
-  stays flat.
+  `manifest.json` is read and checked first (at most 64 MiB): its
+  `range.leaf_count` must equal `to_seq - from_seq + 1`, the number of
+  events and stubs it lists, and `root.leaf_count`. When its signature does
+  not verify (or not under `--key`), every later step reports `not checked`
+  and fails: the digests, sizes and names it lists could be an attacker's.
+  Then `events.jsonl` is read once, as a stream, in 1 MiB chunks: each chunk
+  is hashed, and each line is checked as it completes (steps 3 and 4: event
+  hash, schema, index, chain link) and dropped, so what is kept is bounded by
+  the signed index (a Merkle leaf per line; refs and evidence ids per audit
+  event). A line longer than 1 MiB, more lines than the index lists, a line
+  that is not a JSON object, or more bytes than the read budget stop the read
+  at once. The findings of steps 3 to 5 count only when the whole file
+  hashes to the signed `events_sha256`. Measured on a self-signed bundle
+  with no `--key`, a correct digest and 64 MiB of `{}` or `x` lines (macOS
+  arm64, Node 25): with `leaf_count` 1e12 (refused from the manifest) or a
+  consistent one (stopped at the first surplus or bad line), exit 1 in about
+  0.1 s at about 70 MB RSS. Before, the verifier ran out of heap after 52 s
+  and 103 s at 4.4 GB (exit 134). A self-signed sparse 500 MiB
+  `events.jsonl` that matches its digest fails in about 40 ms (Linux,
+  Node 22).
 - **Files.** `manifest.json`, `events.jsonl` and every blob must be regular
   files with one link, not symlinks, hard links (which may be files outside
   `DIR`; `--allow-hardlinks` accepts them), devices, FIFOs or directories, and

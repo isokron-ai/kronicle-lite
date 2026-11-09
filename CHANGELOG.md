@@ -123,8 +123,9 @@ uses semantic versioning once past 0.x.
       bounded by the signed index. Lines longer than 1 MiB, more lines than
       the index lists, and the first line that is not a JSON object stop the
       read. Before, with `leaf_count` 1e12, a correct digest and 64 MiB of
-      `{}` lines, the verifier ran out of memory (exit 134, 4.5 GB RSS, 39 s).
-      The measured numbers are in EVIDENCE-BUNDLE.md.
+      `{}` lines, the verifier ran out of memory (exit 134, 4.4 GB RSS, 52 s
+      on macOS arm64; `x` lines: 103 s); now exit 1 in about 0.1 s at about
+      70 MB RSS (EVIDENCE-BUNDLE.md).
     - **Meaningful time bounds are absolute or relative.** The flight
       recorder's lock wait (`BOOKKEEPING_WAIT_MS`) must be at most a fifth of
       the busy timeout, and the locked run may exceed an unlocked baseline
