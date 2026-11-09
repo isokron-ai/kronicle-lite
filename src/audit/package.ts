@@ -288,19 +288,7 @@ export async function buildAuditPackage(
   if (keyList === null) throw new AuditError('invalid_audit_event', 'the anchor key list is not {keys: [{key_id, public_key_pem, …}]}');
   writeNew(join(out, 'anchor-keys.json'), JSON.stringify({ v: 1, keys: keyList.map((k) => Object.fromEntries(Object.entries(k).filter(([, v]) => v !== null))) }, null, 1) + '\n');
   mkdirSync(join(out, 'tsa-roots'), { mode: 0o755 });
-  // The pinned TSA CAs, one file per TSA (several certificates each), then any custom roots.
-  const rootFiles: { file: string; pems: string[] }[] = [];
-  for (const r of SHIPPED_TSA_ROOTS) {
-    const f = rootFiles.find((x) => x.file === `${r.name}.pem`);
-    if (f) f.pems.push(r.pem);
-    else rootFiles.push({ file: `${r.name}.pem`, pems: [r.pem] });
-  }
-  let custom = 0;
-  for (const r of opts.tsa_roots ?? []) {
-    const pem = typeof r === 'string' ? r : r.pem;
-    if (rootFiles.some((x) => x.pems.some((y) => y.trim() === pem.trim()))) continue;
-    rootFiles.push({ file: `custom-${++custom}.pem`, pems: [pem] });
-  }
+  const rootFiles = packTsaRootFiles(opts.tsa_roots ?? []);
   for (const r of rootFiles) writeNew(join(out, 'tsa-roots', r.file), r.pems.join(''));
   // The root each token chains to, for VERIFY.md's openssl commands.
   const rootFor = new Map<string, string>();
@@ -355,23 +343,31 @@ export async function buildAuditPackage(
   writeNew(join(out, 'claims.json'), JSON.stringify(claims, null, 1) + '\n');
 
   const last = anchors[anchors.length - 1];
+  // The bundle root counts as anchored only when the last anchor commits it (the test verify-audit uses for its final root).
+  const finalAnchored = last !== undefined && last.to_seq === m.range.to_seq && last.root === m.root.root;
+  const rootLabel = finalAnchored ? 'Final anchored root' : 'Final root';
+  const tagline = claims.claims.includes('independent_timestamps') ? 'Tamper-evident, independently timestamped audit evidence.' : 'Tamper-evident audit evidence.';
   const keyLine = `${signer.key_id} (compare its SPKI SHA-256 with the fingerprint in your report or SOW)`;
   const finalTimes = last ? (last.timestamps.length ? last.timestamps.map((t) => `${t.gen_time} (${t.tsa})`).join(', ') : `${last.received_at} (anchor service)`) : '-';
   writeNew(
     join(out, 'COMPLETION.txt'),
     [
       `${PACK_NAME}: ${opts.audit_id}`,
-      'Tamper-evident, independently timestamped audit evidence.',
+      tagline,
       '',
       `Audit ID              ${opts.audit_id}`,
       `Manifest SHA-256      ${exp.manifest_sha256}`,
       `Signing key           ${keyLine}`,
-      `Final anchored root   ${m.root.root}`,
+      `${rootLabel.padEnd(22)}${m.root.root}`,
       `  covering            seq ${m.range.from_seq}..${m.range.to_seq} (${m.events.length} audit event(s), ${m.blobs.length} artifact(s))`,
-      `  anchor              ${last ? `${last.file.replace(/\.receipt\.json$/, '')}, ${last.anchor_id}, received ${last.received_at}` : '-'}`,
-      `  timestamps          ${finalTimes}`,
-      `Milestones`,
-      ...anchors.map((a) => `  ${a.file.replace(/\.receipt\.json$/, '').padEnd(26)} seq ${a.from_seq}..${a.to_seq}  ${a.timestamps.length ? a.timestamps.map((t) => `${t.tsa} ${t.gen_time}`).join(', ') : `anchor service ${a.received_at}`}`),
+      // Never call a root anchored that no anchor commits: an earlier last anchor gets its own line.
+      ...(last && !finalAnchored ? [`${'Last anchored root'.padEnd(22)}${last.root} (seq ${last.from_seq}..${last.to_seq})`] : []),
+      ...(last
+        ? [`  anchor              ${last.file.replace(/\.receipt\.json$/, '')}, ${last.anchor_id}, received ${last.received_at}`, `  timestamps          ${finalTimes}`]
+        : []),
+      ...(anchors.length > 0
+        ? ['Milestones', ...anchors.map((a) => `  ${a.file.replace(/\.receipt\.json$/, '').padEnd(26)} seq ${a.from_seq}..${a.to_seq}  ${a.timestamps.length ? a.timestamps.map((t) => `${t.tsa} ${t.gen_time}`).join(', ') : `anchor service ${a.received_at}`}`)]
+        : ['Anchors               none (this pack has no anchor receipts)']),
       `Claims                ${claims.claims.join(', ')}`,
       '',
       `Verify:  npx -y kronicle-lite@${VERSION} verify-audit <this directory> --key-fingerprint <auditor key fingerprint from your report or SOW>${genesisArg}`,
@@ -380,7 +376,7 @@ export async function buildAuditPackage(
       '',
     ].join('\n'),
   );
-  writeNew(join(out, 'VERIFY.md'), verifyMd({ audit_id: opts.audit_id, keyLine, manifestSha: exp.manifest_sha256, root: m.root.root, anchors, rootFor, claims: claims.claims, genesisArg }));
+  writeNew(join(out, 'VERIFY.md'), verifyMd({ audit_id: opts.audit_id, tagline, keyLine, manifestSha: exp.manifest_sha256, rootLabel, root: m.root.root, lastAnchored: last && !finalAnchored ? last : null, anchors, rootFor, claims: claims.claims, genesisArg }));
 
   // SHA256SUMS over every file, and its raw Ed25519 signature by the auditor key (openssl pkeyutl checks it).
   const { files } = listPackFiles(out);
@@ -408,20 +404,118 @@ export async function buildAuditPackage(
   };
 }
 
+/**
+ * The pack's tsa-roots/ files: one per shipped TSA (its CAs that `openssl ts -verify -partial_chain`
+ * accepts, see ShippedTsaCa.in_pack), then each custom root that is not a shipped one.
+ */
+export function packTsaRootFiles(custom: readonly TsaRoot[] = []): { file: string; pems: string[] }[] {
+  const files: { file: string; pems: string[] }[] = [];
+  for (const r of SHIPPED_TSA_ROOTS) {
+    if (r.in_pack === false) continue;
+    const f = files.find((x) => x.file === `${r.name}.pem`);
+    if (f) f.pems.push(r.pem);
+    else files.push({ file: `${r.name}.pem`, pems: [r.pem] });
+  }
+  let n = 0;
+  for (const r of custom) {
+    const pem = typeof r === 'string' ? r : r.pem;
+    if (SHIPPED_TSA_ROOTS.some((x) => x.pem.trim() === pem.trim()) || files.some((x) => x.pems.some((y) => y.trim() === pem.trim()))) continue;
+    files.push({ file: `custom-${++n}.pem`, pems: [pem] });
+  }
+  return files;
+}
+
 const epoch = (iso: string) => Math.floor(Date.parse(iso) / 1000);
 
-function verifyMd(v: { audit_id: string; keyLine: string; manifestSha: string; root: string; anchors: PackageAnchor[]; rootFor: Map<string, string>; claims: readonly Claim[]; genesisArg: string }): string {
+function verifyMd(v: { audit_id: string; tagline: string; keyLine: string; manifestSha: string; rootLabel: string; root: string; lastAnchored: PackageAnchor | null; anchors: PackageAnchor[]; rootFor: Map<string, string>; claims: readonly Claim[]; genesisArg: string }): string {
   const a0 = v.anchors[0];
+  const stamped = v.anchors.filter((a) => a.timestamps.length > 0);
+  let n = 0;
+  const h3 = (title: string) => `### ${++n}. ${title}`;
+  // Sections are numbered in the order they print.
+  const filesSection = [
+    h3('Files: SHA256SUMS and its signature'),
+    '',
+    '```sh',
+    '# the auditor key signed SHA256SUMS (raw Ed25519 signature)',
+    'openssl pkeyutl -verify -pubin -inkey auditor-key.pem -rawin -in SHA256SUMS -sigfile SHA256SUMS.sig',
+    '# every file matches its line (either command)',
+    'shasum -a 256 -c SHA256SUMS',
+    'sha256sum -c SHA256SUMS',
+    '# one file by hand',
+    'openssl dgst -sha256 bundle/manifest.json',
+    '```',
+    '',
+    '`bundle/manifest.json` also lists the SHA-256 of `events.jsonl` (`events_sha256`) and of every',
+    'artifact in `bundle/blobs/` (each file is named by its own SHA-256).',
+    '',
+  ];
+  const tokenSection = stamped.length
+    ? [
+        h3('Independent time: each RFC 3161 token'),
+        '',
+        'Each token stamps the SHA-256 of its receipt file and embeds the timestamp authority\'s certificate',
+        'chain. `tsa-roots/` holds the pinned timestamping CAs (not the general public roots):',
+        '`sectigo.pem` is Sectigo Public Time Stamping Root R46 as issued by USERTrust RSA Certification',
+        'Authority (the form Sectigo\'s tokens embed), `digicert.pem` the DigiCert Trusted G4 TimeStamping',
+        'CAs. `-partial_chain` lets openssl stop at a pinned CA that is not self-signed. Check the',
+        'fingerprints against the authorities\' sites (`openssl crl2pkcs7 -nocrl -certfile tsa-roots/digicert.pem | openssl pkcs7 -print_certs -noout`,',
+        'then `openssl x509 -noout -fingerprint -sha256` on each).',
+        '',
+        '```sh',
+        ...stamped.flatMap((a) => [
+          `D=$(shasum -a 256 anchors/${a.file} | cut -c1-64)`,
+          ...a.timestamps.map((t) => `openssl ts -verify -digest $D -in anchors/${t.file} -CAfile tsa-roots/${v.rootFor.get(t.file)} -partial_chain`),
+          ...a.timestamps.slice(0, 1).map((t) => `openssl ts -reply -in anchors/${t.file} -text | grep 'Time stamp'`),
+        ]),
+        '```',
+        '',
+      ]
+    : [];
+  const receiptSection = a0
+    ? [
+        h3('Anchor receipts: Ed25519 signatures'),
+        '',
+        'The anchor service signed each receipt over its canonical JSON without `signature`; the',
+        'checkpoint inside it is signed by the auditor key. With `jq -cjS` (sorted keys, compact, no',
+        'trailing newline) the bytes equal the canonical form for these ASCII, integer-only objects.',
+        '',
+        '```sh',
+        `R=anchors/${a0.file}`,
+        '# anchor service countersignature (key from anchor-keys.json; compare it with isokron.ai/verify)',
+        `jq -r --arg k "$(jq -r .service_key_id $R)" '.keys[] | select(.key_id == $k) | .public_key_pem' anchor-keys.json > service-key.pem`,
+        `jq -cjS 'del(.signature)' $R > receipt-body.bin`,
+        `jq -r .signature $R | openssl base64 -d -A > receipt.sig`,
+        'openssl pkeyutl -verify -pubin -inkey service-key.pem -rawin -in receipt-body.bin -sigfile receipt.sig',
+        '# auditor checkpoint signature',
+        `jq -cjS '.checkpoint | {v, from_seq, to_seq, leaf_count, root}' $R > checkpoint-body.bin`,
+        `jq -r .checkpoint.signature $R | openssl base64 -d -A > checkpoint.sig`,
+        'openssl pkeyutl -verify -pubin -inkey auditor-key.pem -rawin -in checkpoint-body.bin -sigfile checkpoint.sig',
+        '```',
+        '',
+        'Recomputing each anchored root from `bundle/events.jsonl` follows kronicle-lite docs/FORMAT.md §2',
+        '(leaf = sha256 of the canonical `{seq, this_hash}`, node = sha256(left ‖ right), an odd node is',
+        'promoted); `verify-audit` does it for you.',
+        '',
+      ]
+    : [];
+  // Never an empty section: a pack without anchors, or without tokens, says so in one line.
+  const absent = !a0
+    ? ['This pack has no anchor receipts, so it carries no anchor signatures or RFC 3161 timestamp tokens to check.', '']
+    : !stamped.length
+      ? ['This pack has no RFC 3161 timestamp tokens.', '']
+      : [];
   return [
     `# ${PACK_NAME}: ${v.audit_id}`,
     '',
-    'Tamper-evident, independently timestamped audit evidence. Every check below runs offline on',
+    `${v.tagline} Every check below runs offline on`,
     'this directory. The one-command route uses kronicle-lite (open source); the raw route uses only',
     '`shasum` / `openssl` / `jq`.',
     '',
     `- Manifest SHA-256: \`${v.manifestSha}\``,
     `- Signing key: \`${v.keyLine}\``,
-    `- Final anchored root: \`${v.root}\``,
+    `- ${v.rootLabel}: \`${v.root}\``,
+    ...(v.lastAnchored ? [`- Last anchored root: \`${v.lastAnchored.root}\` (seq ${v.lastAnchored.from_seq}..${v.lastAnchored.to_seq})`] : []),
     `- Claims: ${v.claims.join(', ')}`,
     '',
     'This file does not carry the auditor key fingerprint: take it from your report or statement of',
@@ -442,80 +536,28 @@ function verifyMd(v: { audit_id: string; keyLine: string; manifestSha: string; r
     '',
     'Needs OpenSSL 3 (macOS: `brew install openssl@3`; LibreSSL lacks raw Ed25519 verification) and `jq`.',
     '',
-    '### 1. Files: SHA256SUMS and its signature',
-    '',
-    '```sh',
-    '# the auditor key signed SHA256SUMS (raw Ed25519 signature)',
-    'openssl pkeyutl -verify -pubin -inkey auditor-key.pem -rawin -in SHA256SUMS -sigfile SHA256SUMS.sig',
-    '# every file matches its line (either command)',
-    'shasum -a 256 -c SHA256SUMS',
-    'sha256sum -c SHA256SUMS',
-    '# one file by hand',
-    'openssl dgst -sha256 bundle/manifest.json',
-    '```',
-    '',
-    '`bundle/manifest.json` also lists the SHA-256 of `events.jsonl` (`events_sha256`) and of every',
-    'artifact in `bundle/blobs/` (each file is named by its own SHA-256).',
-    '',
-    '### 2. Independent time: each RFC 3161 token',
-    '',
-    'Each token stamps the SHA-256 of its receipt file and embeds the timestamp authority\'s certificate',
-    'chain. `tsa-roots/` holds the pinned timestamping CAs (not the general public roots):',
-    '`sectigo.pem` is Sectigo Public Time Stamping Root R46 (self-signed and USERTrust cross-signed forms',
-    'of one key), `digicert.pem` the DigiCert Trusted G4 TimeStamping CAs. `-partial_chain` lets openssl',
-    'stop at a pinned CA that is not self-signed. Check the fingerprints against the authorities\' sites',
-    '(`openssl crl2pkcs7 -nocrl -certfile tsa-roots/digicert.pem | openssl pkcs7 -print_certs -noout`,',
-    'then `openssl x509 -noout -fingerprint -sha256` on each).',
-    '',
-    '```sh',
-    ...v.anchors.flatMap((a) => [
-      `D=$(shasum -a 256 anchors/${a.file} | cut -c1-64)`,
-      ...a.timestamps.map((t) => `openssl ts -verify -digest $D -in anchors/${t.file} -CAfile tsa-roots/${v.rootFor.get(t.file)} -partial_chain`),
-      ...a.timestamps.slice(0, 1).map((t) => `openssl ts -reply -in anchors/${t.file} -text | grep 'Time stamp'`),
-    ]),
-    '```',
-    '',
-    '### 3. Anchor receipts: Ed25519 signatures',
-    '',
-    'The anchor service signed each receipt over its canonical JSON without `signature`; the',
-    'checkpoint inside it is signed by the auditor key. With `jq -cjS` (sorted keys, compact, no',
-    'trailing newline) the bytes equal the canonical form for these ASCII, integer-only objects.',
-    '',
-    '```sh',
-    ...(a0
+    ...filesSection,
+    ...absent,
+    ...tokenSection,
+    ...receiptSection,
+    ...(stamped.length
       ? [
-          `R=anchors/${a0.file}`,
-          '# anchor service countersignature (key from anchor-keys.json; compare it with isokron.ai/verify)',
-          `jq -r --arg k "$(jq -r .service_key_id $R)" '.keys[] | select(.key_id == $k) | .public_key_pem' anchor-keys.json > service-key.pem`,
-          `jq -cjS 'del(.signature)' $R > receipt-body.bin`,
-          `jq -r .signature $R | openssl base64 -d -A > receipt.sig`,
-          'openssl pkeyutl -verify -pubin -inkey service-key.pem -rawin -in receipt-body.bin -sigfile receipt.sig',
-          '# auditor checkpoint signature',
-          `jq -cjS '.checkpoint | {v, from_seq, to_seq, leaf_count, root}' $R > checkpoint-body.bin`,
-          `jq -r .checkpoint.signature $R | openssl base64 -d -A > checkpoint.sig`,
-          'openssl pkeyutl -verify -pubin -inkey auditor-key.pem -rawin -in checkpoint-body.bin -sigfile checkpoint.sig',
+          '## Re-verifying in later years',
+          '',
+          'Timestamp authority certificates expire, and `openssl ts -verify` checks them at the current time',
+          'by default. After expiry, verify each token at its own genTime against the same pinned roots:',
+          '',
+          '```sh',
+          ...stamped.flatMap((a) =>
+            a.timestamps.map((t) => `openssl ts -verify -digest $(shasum -a 256 anchors/${a.file} | cut -c1-64) -in anchors/${t.file} -CAfile tsa-roots/${v.rootFor.get(t.file)} -partial_chain -attime ${epoch(t.gen_time)}   # ${t.gen_time}`),
+          ),
+          '```',
+          '',
+          `or \`kronicle-lite verify-audit . --key-fingerprint <fingerprint>${v.genesisArg} --tsa-at-gentime\`. Keep this directory`,
+          'whole: the tokens carry the TSA chains and `tsa-roots/` the roots they verify against.',
+          '',
         ]
-      : ['# (this pack holds no anchors)']),
-    '```',
-    '',
-    'Recomputing each anchored root from `bundle/events.jsonl` follows kronicle-lite docs/FORMAT.md §2',
-    '(leaf = sha256 of the canonical `{seq, this_hash}`, node = sha256(left ‖ right), an odd node is',
-    'promoted); `verify-audit` does it for you.',
-    '',
-    '## Re-verifying in later years',
-    '',
-    'Timestamp authority certificates expire, and `openssl ts -verify` checks them at the current time',
-    'by default. After expiry, verify each token at its own genTime against the same pinned roots:',
-    '',
-    '```sh',
-    ...v.anchors.flatMap((a) =>
-      a.timestamps.map((t) => `openssl ts -verify -digest $(shasum -a 256 anchors/${a.file} | cut -c1-64) -in anchors/${t.file} -CAfile tsa-roots/${v.rootFor.get(t.file)} -partial_chain -attime ${epoch(t.gen_time)}   # ${t.gen_time}`),
-    ),
-    '```',
-    '',
-    `or \`kronicle-lite verify-audit . --key-fingerprint <fingerprint>${v.genesisArg} --tsa-at-gentime\`. Keep this directory`,
-    'whole: the tokens carry the TSA chains and `tsa-roots/` the roots they verify against.',
-    '',
+      : []),
   ].join('\n');
 }
 

@@ -4,6 +4,40 @@ All notable changes to kronicle-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
+## [Unreleased]
+
+### Fixed
+
+- **`audit package`: `tsa-roots/sectigo.pem` verifies with openssl.** In
+  0.10.0 the file held the self-signed Sectigo Public Time Stamping Root R46
+  first and the USERTrust-issued R46 second; with it, the pack's own
+  `VERIFY.md` command `openssl ts -verify … -CAfile tsa-roots/sectigo.pem
+  -partial_chain` failed every Sectigo token with `ess cert id not found`
+  (OpenSSL 3). The file now holds only the USERTrust-issued R46, the form
+  Sectigo's tokens embed and crt.sectigo.com serves. `verify-audit` still
+  pins both forms (unchanged). For a 0.10.0 pack, verify Sectigo tokens with
+  `verify-audit`, or with a `sectigo.pem` that holds only the USERTrust-issued
+  R46. A test runs `openssl ts -verify -partial_chain` (now and `-attime`)
+  against real Sectigo and DigiCert tokens with the CA files a pack ships.
+- **`audit package`: the root label in `COMPLETION.txt` and `VERIFY.md`.**
+  The bundle root is labelled "Final anchored root" only when the last anchor
+  commits it (its range ends at the bundle's last event and its root equals
+  the bundle root, the test `verify-audit` uses for its final root).
+  Otherwise it is labelled "Final root", and when the pack has anchors the
+  last anchor's root follows on its own line as "Last anchored root" with its
+  seq range.
+- **`audit package`: packs without anchors or tokens.** `VERIFY.md` no longer
+  prints empty command blocks: a pack without anchor receipts omits the
+  timestamp, receipt and re-verification sections and says so in one line; a
+  pack with anchors but no RFC 3161 tokens omits the timestamp sections and
+  says so in one line. Section numbers follow what is printed.
+  `COMPLETION.txt` lists `Anchors none` instead of empty anchor and milestone
+  lines, and both files describe the pack as independently timestamped only
+  when it declares `independent_timestamps`.
+- **README:** the anchor service paragraph links the public service pages
+  (`https://anchor.isokron.ai/keys`, `/.well-known/tsa-ca.json`) instead of
+  the service's source repository.
+
 ## [0.10.0] — 2026-11-09
 
 ### Added — IsoKron Evidence Packs (verifiable audits) (#37)

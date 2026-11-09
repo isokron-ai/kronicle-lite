@@ -222,7 +222,7 @@ stamp carries a later time.
 | `anchors/index.json` | summary of the anchors (informational; `verify-audit` does not read it) |
 | `auditor-key.pem` | the auditor (store) public key; trusted only when its SHA-256(SPKI) equals the `--key-fingerprint` the client takes from the report or SOW |
 | `anchor-keys.json` | the anchor service's published key list, as is (with its successor and status statements); trusted only as one chain from the genesis pin |
-| `tsa-roots/*.pem` | the pinned timestamping CAs: `sectigo.pem` = Sectigo Public Time Stamping Root R46 (self-signed and USERTrust cross-signed forms of one key), `digicert.pem` = DigiCert Trusted G4 TimeStamping RSA4096 SHA256 2025 CA1 and the 2022 G4 RSA4096 SHA256 TimeStamping CA; `custom-N.pem` for other TSAs |
+| `tsa-roots/*.pem` | the pinned timestamping CAs: `sectigo.pem` = Sectigo Public Time Stamping Root R46 as issued by USERTrust RSA Certification Authority (the form Sectigo's tokens embed), `digicert.pem` = DigiCert Trusted G4 TimeStamping RSA4096 SHA256 2025 CA1 and the 2022 G4 RSA4096 SHA256 TimeStamping CA; `custom-N.pem` for other TSAs |
 | `claims.json` | what the pack claims (below) and, with `run_sequence`, the run count, each `run_seq` and every capture interruption |
 | `COMPLETION.txt` | one page: manifest SHA-256, signing key fingerprint, final anchored root, timestamp times, claims |
 | `VERIFY.md` | the one-command check and the raw commands (`shasum`, `openssl`, `jq`) with this pack's file names |
@@ -373,8 +373,11 @@ no timestamp; `measured_at` and payload values are recorded by the auditor.
   by its retired Assured ID root). A certificate from another branch of
   USERTrust or DigiCert G4 cannot sign a timestamp that verifies. A TSA moving
   to a new issuing CA needs a kronicle-lite release (or `--tsa-roots`). The
-  pack's `tsa-roots/` holds the same certificates for the openssl route and is
-  never trusted by `verify-audit`. Path building asks the pinned certificates
+  pack's `tsa-roots/` holds these certificates for the openssl route and is
+  never trusted by `verify-audit`; its `sectigo.pem` holds only the
+  USERTrust-issued R46, because `openssl ts -verify` fails a Sectigo token
+  (`ess cert id not found`) when the self-signed form comes first in
+  `-CAfile`. Path building asks the pinned certificates
   first, so embedded cross-certificates are never needed.
 - **No openssl needed.** RFC 3161 tokens are verified in-process with
   `node:crypto` (a small DER reader in `src/audit/der.ts` and the CMS checks above). It runs the

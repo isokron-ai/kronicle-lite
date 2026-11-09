@@ -13,11 +13,20 @@
  * R46 that chains to USERTrust RSA (SHA-256 E7:93:C9:B0:...:C3:D4:CB:D2), and both DigiCert CAs
  * verify under DigiCert Trusted Root G4 (SHA-256 55:2F:7B:DC:...:0A:C8:99:88). test/verify-audit.test.ts
  * re-checks every fingerprint. A TSA that moves to a new issuing CA needs a release (or --tsa-roots).
+ *
+ * The pack's tsa-roots/ files are for the openssl route: sectigo.pem holds only the USERTrust-issued
+ * R46 (the form Sectigo's tokens embed and crt.sectigo.com serves); see `in_pack`.
  */
 
 export interface ShippedTsaCa {
   /** Pack file the certificate goes into (tsa-roots/<name>.pem). */
   name: string;
+  /**
+   * false: pinned for verify-audit but not written to the pack. openssl ts -verify builds its chain
+   * to the first matching CA in -CAfile and then requires every chain certificate in the token's ESS
+   * signing-certificate list, so a second form of an embedded CA makes it fail ("ess cert id not found").
+   */
+  in_pack?: false;
   subject: string;
   /** SHA-256 fingerprint of the certificate (hex, lowercase). */
   sha256: string;
@@ -28,6 +37,8 @@ export const SHIPPED_TSA_ROOTS: readonly ShippedTsaCa[] = [
   {
     name: 'sectigo',
     subject: 'Sectigo Public Time Stamping Root R46 (self-signed)',
+    // Sectigo tokens embed the USERTrust-issued form below; with this one in -CAfile, openssl fails them.
+    in_pack: false,
     sha256: '4941b001b8a97e961b7817c9d9e960ec4b056bfc915a8c1aabf6ef6b3ac046a5',
     pem: `-----BEGIN CERTIFICATE-----
 MIIFejCCA2KgAwIBAgIQeD0FbPqDLn5p+FYidp8CuTANBgkqhkiG9w0BAQwFADBX
