@@ -65,6 +65,8 @@ export const SHIPPED_SERVICE_KEYS: Readonly<Record<string, readonly { key_id: st
   ],
 };
 
+// The genesis pin verify-audit uses is keychain.ts PRODUCTION_GENESIS ({sha256, valid_from}); a test keeps it equal to this entry.
+
 /**
  * Service keys shipped with the package, by anchor origin. A non-empty list
  * for an origin is authoritative: first-use pinning is off for it and only

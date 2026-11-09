@@ -126,13 +126,19 @@ export function readSmallInt(t: Tlv): number {
 export function readTime(t: Tlv): Date {
   const s = t.value.toString('latin1');
   let m: RegExpMatchArray | null;
+  // Every calendar field must be in range: Date.UTC would silently roll 2026-02-31 over to March.
+  const exact = (y: number, mo: number, d: number, h: number, mi: number, se: number, ms: number): Date => {
+    const dt = new Date(Date.UTC(y, mo - 1, d, h, mi, se, ms));
+    if (mo < 1 || mo > 12 || d < 1 || h > 23 || mi > 59 || se > 59 || dt.getUTCFullYear() !== y || dt.getUTCMonth() !== mo - 1 || dt.getUTCDate() !== d) throw new DerError(`not a valid calendar time: ${JSON.stringify(s.slice(0, 32))}`);
+    return dt;
+  };
   if (t.tag === TAG.GENERALIZED_TIME && (m = s.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\.\d{1,9})?Z$/))) {
     const ms = m[7] ? Math.floor(Number(`0${m[7]}`) * 1000) : 0;
-    return new Date(Date.UTC(+m[1]!, +m[2]! - 1, +m[3]!, +m[4]!, +m[5]!, +m[6]!, ms));
+    return exact(+m[1]!, +m[2]!, +m[3]!, +m[4]!, +m[5]!, +m[6]!, ms);
   }
   if (t.tag === TAG.UTC_TIME && (m = s.match(/^(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z$/))) {
     const yy = +m[1]!;
-    return new Date(Date.UTC(yy < 50 ? 2000 + yy : 1900 + yy, +m[2]! - 1, +m[3]!, +m[4]!, +m[5]!, +m[6]!));
+    return exact(yy < 50 ? 2000 + yy : 1900 + yy, +m[2]!, +m[3]!, +m[4]!, +m[5]!, +m[6]!, 0);
   }
   throw new DerError(`not a DER time: ${JSON.stringify(s.slice(0, 32))}`);
 }

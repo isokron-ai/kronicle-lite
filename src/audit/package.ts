@@ -18,7 +18,7 @@ import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readd
 import { dirname, join, resolve } from 'node:path';
 
 import { parseAnchorReceipt } from '../anchor/receipt.js';
-import { trustedServiceKeys } from '../anchor/trust.js';
+import { keyListOf } from '../anchor/keychain.js';
 import { canonicalize } from '../crypto/canonical.js';
 import { sha256Hex } from '../crypto/hash.js';
 import { chainIdFromPublicKeyPem } from '../crypto/keys.js';
@@ -30,7 +30,7 @@ import { kindOfEventType } from './schemas.js';
 import { SHIPPED_TSA_ROOTS } from './tsa-roots.js';
 import { VERSION } from '../version.js';
 import { readBundleFile } from './verify-bundle.js';
-import { CLAIMS, CLAIMS_FORMAT, listPackFiles, PACK_NAME, sha256sums, verifyAudit, type Claim, type ClaimsFile, type VerifyAuditResult } from './verify-audit.js';
+import { CLAIMS, CLAIMS_FORMAT, listPackFiles, PACK_NAME, sha256sums, verifyAudit, type Claim, type ClaimsFile, type TsaRoot, type VerifyAuditOptions, type VerifyAuditResult } from './verify-audit.js';
 
 export const DEFAULT_TSAS: readonly { name: string; url: string }[] = [
   { name: 'sectigo', url: 'http://timestamp.sectigo.com' },
@@ -70,13 +70,13 @@ export function parseTsaList(spec: string): { name: string; url: string }[] {
     });
 }
 
-/** PEM certificates from every *.pem / *.crt file in DIR (several per file allowed). */
-export function readPemDir(dir: string): string[] {
-  const out: string[] = [];
+/** PEM certificates from every *.pem / *.crt file in DIR (several per file allowed); each file is one TSA. */
+export function readPemDir(dir: string): { name: string; pem: string }[] {
+  const out: { name: string; pem: string }[] = [];
   for (const f of readdirSync(dir).sort()) {
     if (!/\.(pem|crt)$/i.test(f)) continue;
     const text = readBundleFile(join(dir, f), 1024 * 1024, { followLinks: true }).toString('utf8');
-    for (const m of text.matchAll(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g)) out.push(m[0] + '\n');
+    for (const m of text.matchAll(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g)) out.push({ name: f.replace(/\.(pem|crt)$/i, ''), pem: m[0] + '\n' });
   }
   if (out.length === 0) throw new Error(`${dir} holds no PEM certificates (*.pem, *.crt)`);
   return out;
@@ -185,10 +185,21 @@ function milestoneLabel(store: KronicleLite, seq: number): string {
   return slug(kind);
 }
 
-export function buildAuditPackage(
+export async function buildAuditPackage(
   store: KronicleLite,
-  opts: { audit_id: string; out: string; timestamps_dir?: string; tsa_roots?: string[]; now?: Date },
-): PackageResult {
+  opts: {
+    audit_id: string;
+    out: string;
+    timestamps_dir?: string;
+    tsa_roots?: TsaRoot[];
+    /** The anchor service's published key list ({keys: [...]}); fetched from <anchor_url>/.well-known/anchor-keys.json when absent. */
+    anchor_keys?: unknown;
+    /** Genesis pin for the key list, `<sha256>@<valid_from>` (default: the compiled production pin). */
+    genesis?: string;
+    fetch?: typeof fetch;
+    now?: Date;
+  },
+): Promise<PackageResult> {
   const out = resolve(opts.out);
   for (let p = out; ; p = dirname(p)) {
     if (lstatSync(p, { throwIfNoEntry: false })?.isSymbolicLink()) throw new AuditError('invalid_audit_event', `refusing to write through a symlink: ${p} (pass the real path)`);
@@ -257,15 +268,20 @@ export function buildAuditPackage(
     anchors.push(pa);
   }
 
-  // Keys and TSA roots.
+  // Keys and TSA roots. anchor-keys.json is the service's published key list as is (signed statements
+  // included): the client checks it as one chain from the genesis pin, exactly as the service does.
   writeNew(join(out, 'auditor-key.pem'), signer.public_key_pem);
-  const keys = new Map<string, Record<string, unknown>>();
-  for (const url of new Set(picked.map((a) => a.anchor_url))) {
-    for (const k of trustedServiceKeys(store, url).keys) {
-      keys.set(k.key_id, { key_id: k.key_id, alg: 'Ed25519', public_key_pem: k.public_key_pem, valid_from: k.valid_from, valid_to: k.valid_to, status: k.status });
-    }
+  let keyDoc = opts.anchor_keys;
+  if (keyDoc === undefined && picked.length > 0) {
+    const urls = [...new Set(picked.map((a) => a.anchor_url))];
+    if (urls.length !== 1) throw new AuditError('invalid_audit_event', `anchors come from ${urls.length} anchor services (${urls.join(', ')}); pass the key list with --anchor-keys`);
+    const res = await (opts.fetch ?? fetch)(`${urls[0]!.replace(/\/+$/, '')}/.well-known/anchor-keys.json`, { signal: AbortSignal.timeout(20_000) });
+    if (!res.ok) throw new AuditError('invalid_audit_event', `cannot fetch the anchor key list from ${urls[0]} (HTTP ${res.status}); pass it with --anchor-keys`);
+    keyDoc = (await res.json()) as unknown;
   }
-  writeNew(join(out, 'anchor-keys.json'), JSON.stringify({ v: 1, keys: [...keys.values()] }, null, 1) + '\n');
+  const keyList = keyDoc === undefined ? [] : keyListOf(keyDoc);
+  if (keyList === null) throw new AuditError('invalid_audit_event', 'the anchor key list is not {keys: [{key_id, public_key_pem, …}]}');
+  writeNew(join(out, 'anchor-keys.json'), JSON.stringify({ v: 1, keys: keyList.map((k) => Object.fromEntries(Object.entries(k).filter(([, v]) => v !== null))) }, null, 1) + '\n');
   mkdirSync(join(out, 'tsa-roots'), { mode: 0o755 });
   // The pinned TSA CAs, one file per TSA (several certificates each), then any custom roots.
   const rootFiles: { file: string; pems: string[] }[] = [];
@@ -275,8 +291,9 @@ export function buildAuditPackage(
     else rootFiles.push({ file: `${r.name}.pem`, pems: [r.pem] });
   }
   let custom = 0;
-  for (const pem of opts.tsa_roots ?? []) {
-    if (rootFiles.some((r) => r.pems.some((x) => x.trim() === pem.trim()))) continue;
+  for (const r of opts.tsa_roots ?? []) {
+    const pem = typeof r === 'string' ? r : r.pem;
+    if (rootFiles.some((x) => x.pems.some((y) => y.trim() === pem.trim()))) continue;
     rootFiles.push({ file: `custom-${++custom}.pem`, pems: [pem] });
   }
   for (const r of rootFiles) writeNew(join(out, 'tsa-roots', r.file), r.pems.join(''));
@@ -293,14 +310,15 @@ export function buildAuditPackage(
   writeNew(join(anchorsDir, 'index.json'), JSON.stringify(anchors, null, 1) + '\n');
 
   // Which claims the store's contents support: check all of them once, declare what holds.
-  const trusted = { keys: [...keys.values()] };
-  const trustOpts = {
+  const trustOpts: VerifyAuditOptions = {
     key_pem: signer.public_key_pem,
-    anchor_keys: trusted,
-    ...(opts.tsa_roots ? { tsa_roots: [...SHIPPED_TSA_ROOTS.map((r) => r.pem), ...opts.tsa_roots] } : {}),
+    ...(opts.genesis !== undefined ? { genesis: opts.genesis } : {}),
+    ...(opts.tsa_roots ? { tsa_roots: [...SHIPPED_TSA_ROOTS.map((r) => ({ name: r.name, pem: r.pem })), ...opts.tsa_roots] } : {}),
     ...(opts.now ? { now: opts.now } : {}),
   };
   const probe = verifyAudit(out, { ...trustOpts, claims_override: CLAIMS });
+  // A self-hosted anchor service's pin goes into the printed commands (the compiled pin needs none).
+  const genesisArg = opts.genesis !== undefined ? ` --genesis ${probe.trust.genesis_sha256}@${probe.trust.genesis_valid_from}` : '';
   const runs = probe.run_sequence;
   const decisions: { claim: Claim; declared: boolean; why: string }[] = [
     { claim: 'integrity', declared: true, why: 'always' },
@@ -348,12 +366,13 @@ export function buildAuditPackage(
       ...anchors.map((a) => `  ${a.file.replace(/\.receipt\.json$/, '').padEnd(26)} seq ${a.from_seq}..${a.to_seq}  ${a.timestamps.length ? a.timestamps.map((t) => `${t.tsa} ${t.gen_time}`).join(', ') : `anchor service ${a.received_at}`}`),
       `Claims                ${claims.claims.join(', ')}`,
       '',
-      `Verify:  npx -y kronicle-lite@${VERSION} verify-audit <this directory> --key auditor-key.pem`,
+      `Verify:  npx -y kronicle-lite@${VERSION} verify-audit <this directory> --key-fingerprint ${chainId}${genesisArg}`,
+      '         (take the fingerprint from the report or SOW, not from a copy of this file)',
       'Raw commands without kronicle-lite: VERIFY.md',
       '',
     ].join('\n'),
   );
-  writeNew(join(out, 'VERIFY.md'), verifyMd({ audit_id: opts.audit_id, keyLine, manifestSha: exp.manifest_sha256, root: m.root.root, anchors, rootFor, claims: claims.claims }));
+  writeNew(join(out, 'VERIFY.md'), verifyMd({ audit_id: opts.audit_id, keyLine, manifestSha: exp.manifest_sha256, root: m.root.root, anchors, rootFor, claims: claims.claims, genesisArg }));
 
   // SHA256SUMS over every file, and its raw Ed25519 signature by the auditor key (openssl pkeyutl checks it).
   const { files } = listPackFiles(out);
@@ -383,7 +402,7 @@ export function buildAuditPackage(
 
 const epoch = (iso: string) => Math.floor(Date.parse(iso) / 1000);
 
-function verifyMd(v: { audit_id: string; keyLine: string; manifestSha: string; root: string; anchors: PackageAnchor[]; rootFor: Map<string, string>; claims: readonly Claim[] }): string {
+function verifyMd(v: { audit_id: string; keyLine: string; manifestSha: string; root: string; anchors: PackageAnchor[]; rootFor: Map<string, string>; claims: readonly Claim[]; genesisArg: string }): string {
   const a0 = v.anchors[0];
   return [
     `# ${PACK_NAME}: ${v.audit_id}`,
@@ -403,11 +422,13 @@ function verifyMd(v: { audit_id: string; keyLine: string; manifestSha: string; r
     '## One command',
     '',
     '```sh',
-    `npx -y kronicle-lite@${VERSION} verify-audit . --key auditor-key.pem`,
+    `npx -y kronicle-lite@${VERSION} verify-audit . --key-fingerprint <the auditor key fingerprint from your report or SOW>${v.genesisArg}`,
     '```',
     '',
-    'It checks exactly the claims in `claims.json` and prints PASS or FAIL for each, then the values',
-    'to compare with the report. Exit 0 means every declared claim passed.',
+    'It pins the auditor key by the fingerprint you give it, verifies SHA256SUMS before it reads',
+    '`claims.json`, always checks integrity and chain, then the claims in `claims.json`, and prints',
+    'PASS or FAIL for each with its evidence, then the values to compare with the report. Exit 0 means',
+    'every checked claim passed.',
     '',
     '## Without kronicle-lite',
     '',
@@ -484,7 +505,7 @@ function verifyMd(v: { audit_id: string; keyLine: string; manifestSha: string; r
     ),
     '```',
     '',
-    'or `kronicle-lite verify-audit . --key auditor-key.pem --tsa-at-gentime`. Keep this directory',
+    `or \`kronicle-lite verify-audit . --key-fingerprint <fingerprint>${v.genesisArg} --tsa-at-gentime\`. Keep this directory`,
     'whole: the tokens carry the TSA chains and `tsa-roots/` the roots they verify against.',
     '',
   ].join('\n');

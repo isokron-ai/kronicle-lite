@@ -195,3 +195,14 @@ ejjpnOHdI/0dKNPH+ejxmF/7K9h+8kaddSweJywm228Vex4Ziza4k9Tm8heZWcpw
 `,
   },
 ];
+
+/**
+ * Certificates a shipped TSA's tokens embed without needing them for the path to a pinned CA. Any
+ * other unused embedded certificate makes a token fail (src/audit/rfc3161.ts), so an unsigned
+ * certificate cannot ride along unchecked.
+ *   DigiCert Trusted Root G4, cross-signed by the retired DigiCert Assured ID Root CA (DigiCert tokens
+ *   embed it; its key is the one that issued the pinned G4 TimeStamping CAs).
+ */
+export const SHIPPED_TSA_EXTRAS: readonly { subject: string; sha256: string }[] = [
+  { subject: 'DigiCert Trusted Root G4 (cross-signed by DigiCert Assured ID Root CA)', sha256: '33846b545a49c9be4903c60e01713c1bd4e4ef31ea65cd95d69e62794f30b941' },
+];

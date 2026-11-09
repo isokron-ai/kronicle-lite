@@ -46,6 +46,53 @@ uses semantic versioning once past 0.x.
   milestone kind in a `/1` bundle. The 0.9.0 convention (`finding` with
   `class: protocol_freeze`, `call_measured` with `measured_at`) is still read.
 
+### Security — independent review of the evidence-pack verifier (fail closed)
+
+- **The auditor key is pinned by fingerprint** (`--key-fingerprint`, from the
+  report or SOW); a `--key` file inside the pack is refused (exit 2) and an
+  unpinned key never exits 0. VERIFY.md and COMPLETION.txt no longer point at
+  the pack's own key file.
+- **SHA256SUMS before claims.json:** the signed file list is verified against
+  the pinned key before `claims.json` is read; a missing, invalid or
+  unauthenticated `claims.json` means every claim is checked. `integrity` and
+  `chain` are always checked; claims pull in what they depend on
+  (`independent_timestamps` → `receipts`; `harness_frozen_before_runs` →
+  `receipts`, `independent_timestamps`); `--require` of a claim that needs
+  tokens together with `--no-tsa` is a usage error.
+- **Anchor key list = the service's model** (`src/anchor/keychain.ts`, a port of
+  isokron-anchor `checkKeyChain`, cross-checked against lists made by its
+  `rotate-key.mjs`): one linear chain from the genesis pin, signed successor and
+  status statements byte for byte as the service's spec (its README test
+  vectors are a kronicle-lite test), no forks, newest key active or revoked.
+  A revocation is signed by the key itself or an earlier key and carries
+  `compromised_since`; keys after a revoked key are not trusted, and a revoked
+  key's receipt passes only with a verified RFC 3161 time before
+  `compromised_since` − 5 min (never on `received_at`). `--anchor-keys` is
+  checked the same way against `--genesis <sha256>@<valid_from>` /
+  `KRONICLE_ANCHOR_GENESIS` (`KRONICLE_ANCHOR_GENESIS_SHA256` is refused, as in
+  the anchor client). The genesis key's `valid_from` comes from the pin, never
+  from a pack. A rollback cache in the data dir fails a list shorter or weaker
+  (status, `valid_to`, `compromised_since`) than one seen before. `audit
+  package` ships the service's published list.
+- **Receipt times:** `received_at` must be no later than each TSA genTime + 5
+  min and no more than 24 h before it; a token more than 5 min after the
+  signing key's `valid_to` invalidates the receipt.
+- **Timestamps:** an unreadable receipt fails `independent_timestamps`; each
+  receipt needs valid tokens from two different pinned TSA CAs.
+- **Ordering:** every run must be committed by a later timestamped anchor; a
+  `/1` bundle's `measured_at` must lie between the freeze anchor's TSA time and
+  the run's committing anchor's TSA time; a `/2` bundle accepts the freeze
+  nonce only.
+- **RFC 3161 parsing and paths:** pathLenConstraint; a CA-flagged signer and a
+  signer without digitalSignature/nonRepudiation keyUsage are refused;
+  `grantedWithMods`, unexpected fields, SignedData / SignerInfo / TSTInfo
+  versions, algorithm parameters and digestAlgorithms are checked; every
+  certificate the ESS list names must be embedded unchanged; an embedded
+  certificate that is not on the path, pinned or a known chain certificate is
+  refused. No single-bit flip of a real Sectigo or DigiCert token verifies.
+  DER times with out-of-range calendar fields are refused; `run_seq` must be
+  integers ≥ 1.
+
 ### Changed
 
 - **The production anchor service key is pinned in the package** as a genesis

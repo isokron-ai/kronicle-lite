@@ -14,7 +14,7 @@ type Flags = Record<string, string | true>;
 const str = (v: string | true | undefined): string | undefined => (typeof v === 'string' ? v : undefined);
 
 const USAGE =
-  'usage: kronicle-lite audit put-blob FILE [--media-type T] | record --audit-id A [--in FILE|-] | query --audit-id A|--fingerprint F [--kind K] [--finding ID] [--findings] [--json] | export --audit-id A --out DIR | stamp [--anchor-id ID] --out DIR [--tsa name=url,…] [--json] | package --audit-id A --out DIR [--timestamps DIR] [--tsa-roots DIR] [--json]\n';
+  'usage: kronicle-lite audit put-blob FILE [--media-type T] | record --audit-id A [--in FILE|-] | query --audit-id A|--fingerprint F [--kind K] [--finding ID] [--findings] [--json] | export --audit-id A --out DIR | stamp [--anchor-id ID] --out DIR [--tsa name=url,…] [--json] | package --audit-id A --out DIR [--timestamps DIR] [--tsa-roots DIR] [--anchor-keys FILE] [--genesis SHA256@VALID_FROM] [--json]\n';
 
 export async function runAuditCli(positional: string[], flags: Flags, dataDir: string): Promise<number> {
   const [op, ...rest] = positional;
@@ -101,7 +101,17 @@ export async function runAuditCli(positional: string[], flags: Flags, dataDir: s
         const { buildAuditPackage, readPemDir, renderPackage } = await import('./package.js');
         const ts = str(flags['timestamps']);
         const roots = str(flags['tsa-roots']);
-        const r = buildAuditPackage(store, { audit_id, out, ...(ts ? { timestamps_dir: ts } : {}), ...(roots ? { tsa_roots: readPemDir(roots) } : {}) });
+        const keysFile = str(flags['anchor-keys']);
+        const { genesisFromCli } = await import('./verify-audit.js');
+        const genesis = genesisFromCli(str(flags['genesis']));
+        const r = await buildAuditPackage(store, {
+          audit_id,
+          out,
+          ...(ts ? { timestamps_dir: ts } : {}),
+          ...(roots ? { tsa_roots: readPemDir(roots) } : {}),
+          ...(keysFile ? { anchor_keys: JSON.parse(readFileSync(keysFile, 'utf8')) as unknown } : {}),
+          ...(genesis !== undefined ? { genesis } : {}),
+        });
         process.stdout.write(flags['json'] === true ? JSON.stringify(r, null, 2) + '\n' : renderPackage(r));
         return r.check.ok ? 0 : 1;
       }

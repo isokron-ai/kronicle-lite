@@ -36,6 +36,8 @@ export interface CertOpts {
   /** extKeyUsage critical (default true) and its OIDs (default [timeStamping] when timeStamping). */
   ekuCritical?: boolean;
   eku?: string[];
+  /** basicConstraints pathLenConstraint (CA certificates). */
+  pathLen?: number;
   /** keyUsage byte (bit 5 = 0x04 keyCertSign); omitted when undefined. */
   keyUsage?: number;
   /** Add a critical extension nobody knows. */
@@ -50,7 +52,7 @@ export function makeCert(o: CertOpts): TestCert {
   const subject = name(o.cn);
   const serial = Buffer.from((serialCounter++).toString(16).padStart(8, '0'), 'hex');
   const exts: Buffer[] = [];
-  if (o.ca) exts.push(ext('2.5.29.19', true, derSeq(derBool(true))));
+  if (o.ca) exts.push(ext('2.5.29.19', true, derSeq(derBool(true), ...(o.pathLen !== undefined ? [derInt(o.pathLen)] : []))));
   else exts.push(ext('2.5.29.19', true, derSeq()));
   const eku = o.eku ?? (o.timeStamping ? [OID.timeStamping] : []);
   if (eku.length) exts.push(ext('2.5.29.37', o.ekuCritical ?? true, derSeq(...eku.map(derOid))));
@@ -80,14 +82,19 @@ export interface TestTsa {
 }
 
 export function makeTsa(
-  o: { name?: string; signerNotAfter?: Date; signerNotBefore?: Date; signer?: Partial<CertOpts>; intermediate?: Partial<CertOpts> } = {},
+  o: { name?: string; signerNotAfter?: Date; signerNotBefore?: Date; signer?: Partial<CertOpts>; intermediate?: Partial<CertOpts>; intermediates?: Partial<CertOpts>[]; extraCerts?: TestCert[] } = {},
 ): TestTsa {
   const root = makeCert({ cn: `${o.name ?? 'Test'} TSA Root`, ca: true });
-  const mid = o.intermediate ? makeCert({ cn: `${o.name ?? 'Test'} TSA CA`, issuer: root, ca: true, keyUsage: 0x06, ...o.intermediate }) : null;
+  const mids: TestCert[] = [];
+  for (const [n, m] of (o.intermediates ?? (o.intermediate ? [o.intermediate] : [])).entries()) {
+    mids.push(makeCert({ cn: `${o.name ?? 'Test'} TSA CA${n ? ` ${n + 1}` : ''}`, issuer: mids[n - 1] ?? root, ca: true, keyUsage: 0x06, ...m }));
+  }
+  const mid = mids[mids.length - 1] ?? null;
   const signer = makeCert({
     cn: `${o.name ?? 'Test'} TSA Signer`,
     issuer: mid ?? root,
     timeStamping: true,
+    keyUsage: 0x80, // digitalSignature
     ...(o.signerNotBefore ? { notBefore: o.signerNotBefore } : {}),
     ...(o.signerNotAfter ? { notAfter: o.signerNotAfter } : {}),
     ...o.signer,
@@ -121,7 +128,7 @@ export function makeTsa(
         ecdsaAlg(),
         derOctets(sig),
       );
-      const signedData = derSeq(derInt(3), derSet(derSeq(derOid(OID.sha256))), derSeq(derOid(OID.tstInfo), der(ctx(0), derOctets(tstInfo))), der(ctx(0), signer.der, ...(mid ? [mid.der] : []), root.der), derSet(signerInfo));
+      const signedData = derSeq(derInt(3), derSet(derSeq(derOid(OID.sha256))), derSeq(derOid(OID.tstInfo), der(ctx(0), derOctets(tstInfo))), der(ctx(0), signer.der, ...[...mids].reverse().map((m) => m.der), root.der, ...(o.extraCerts ?? []).map((c) => c.der)), derSet(signerInfo));
       const token = derSeq(derOid(OID.signedData), der(ctx(0), signedData));
       return derSeq(derSeq(derInt(0)), token);
     },

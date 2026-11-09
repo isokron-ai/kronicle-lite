@@ -3,31 +3,35 @@
  *
  * End to end on a synthetic pack: a store records an audit with three milestones, anchors each
  * on the in-test anchor stub, stamps each receipt with two throwaway RFC 3161 TSAs
- * (test/helpers/tsa.ts), packages it, and the CLI verifies exactly the claims the pack declares.
- * Then the attacks: one byte flipped, history rewritten and re-signed with the auditor's own key,
- * bad / expired / foreign timestamp tokens, an untrusted service key, gaps in the run sequence,
- * runs under another harness. Real Sectigo and DigiCert tokens (from the prototype GitHub audit;
- * receipts and tokens only: hashes and certificates, no audit data) cover the production TSA
- * chains, including DigiCert's cross-signed root.
+ * (test/helpers/tsa.ts), packages it, and the CLI verifies it with the auditor key pinned by
+ * fingerprint and the stub's key as the genesis pin. Then every probe of the independent review
+ * (PR #37, kl-va-review P1–P7), each of which must now fail closed: downgraded or forged claims,
+ * a pack's own key, broken / rolled-back / back-dated anchor key chains, forward-dated or
+ * single-TSA timestamps, path-length and CA-signer certificates, DER mutations, measured_at
+ * outside the timestamped window, symlinks and unreadable receipts.
  */
 
 import { spawnSync } from 'node:child_process';
-import { createHash, generateKeyPairSync, sign as edSign, X509Certificate } from 'node:crypto';
-import { copyFileSync, cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash, generateKeyPairSync, sign as edSign, X509Certificate, type KeyObject } from 'node:crypto';
+import { copyFileSync, cpSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { pushCheckpoint } from '../src/anchor/anchor.js';
-import { serviceKeyIdFromPem, SHIPPED_SERVICE_KEY_PINS, SHIPPED_SERVICE_KEYS, successorSigningPayload } from '../src/anchor/trust.js';
+import { formatGenesisPin, PRODUCTION_GENESIS, retirementSigningPayload, successorSigningPayload } from '../src/anchor/keychain.js';
+import { anchorReceiptSigningPayload } from '../src/anchor/receipt.js';
+import { serviceKeyIdFromPem, SHIPPED_SERVICE_KEY_PINS, SHIPPED_SERVICE_KEYS } from '../src/anchor/trust.js';
 import { exportBundle, signManifest, type BundleManifest } from '../src/audit/bundle.js';
 import { buildAuditPackage, stampAnchor } from '../src/audit/package.js';
 import { inspectTimestamp, OID, timestampRequest, checkTimestampReply, verifyTimestamp } from '../src/audit/rfc3161.js';
 import { BUNDLE_FORMAT_V1, BUNDLE_FORMAT_V2 } from '../src/audit/schemas.js';
+import { readTime, TAG } from '../src/audit/der.js';
 import { SHIPPED_TSA_ROOTS } from '../src/audit/tsa-roots.js';
 import { listPackFiles, sha256sums, SUMS_FILES, verifyAudit, VerifyAuditJsonSchema, type VerifyAuditOptions } from '../src/audit/verify-audit.js';
 import { verifyBundle } from '../src/audit/verify-bundle.js';
 import { canonicalize } from '../src/crypto/canonical.js';
+import { chainIdFromPublicKeyPem } from '../src/crypto/keys.js';
 import { KronicleLite } from '../src/index.js';
 import { startAnchorStub, STUB_LICENSE, type AnchorBackend } from './helpers/anchor-stub.js';
 import { CLI, cleanEnv, tempDir } from './helpers/fs.js';
@@ -48,19 +52,13 @@ afterAll(async () => {
 type Variant = 'milestones' | 'v1' | 'v1-early' | 'no-freeze';
 
 interface RecordOpts {
-  /** run_seq of each run (milestones): default 1, 2, 3. */
   runSeqs?: number[];
   plannedRuns?: number;
-  /** Harness digest run i ran under (default H). */
   runHarness?: (i: number) => string;
-  /** Change run 2's status (a forgery). */
   tweak?: boolean;
 }
 
-/**
- * Record the audit: freeze → anchor → runs → anchor → report → anchor. `anchor` returns the
- * anchored receipt's sha256 (the freeze nonce for runs).
- */
+/** Record the audit: freeze → anchor → runs → anchor → report → anchor. `anchor` returns the anchored receipt's sha256. */
 async function recordAudit(store: KronicleLite, variant: Variant, anchor: (label: string) => Promise<string>, o: RecordOpts = {}): Promise<void> {
   const blob = (s: string, t = 'text/plain') => store.audit.putBlob(Buffer.from(s), t);
   const seqs = o.runSeqs ?? [1, 2, 3];
@@ -72,6 +70,7 @@ async function recordAudit(store: KronicleLite, variant: Variant, anchor: (label
     store.audit.record(AUDIT, [{ kind: 'catalog_snapshot', event_key: 'catalog', payload: { fingerprint: H, server: { name: 'acme' }, tool_count: 3, bytes: 10, snapshot: blob('{"tools":[]}', 'application/json') } }], 'auditor');
   }
   const nonce = await anchor('freeze');
+  if (variant !== 'milestones') await new Promise((r) => setTimeout(r, 1100)); // TSA times have whole seconds
   const runs = seqs.map((n, idx) => {
     const i = idx + 1;
     const status = o.tweak && i === 2 ? 'fail' : 'pass';
@@ -84,10 +83,12 @@ async function recordAudit(store: KronicleLite, variant: Variant, anchor: (label
         payload: { run_id: `run-${n}`, run_seq: n, fingerprint, status, nonce, result: out, ...(i === 3 ? { capture: 'interrupted', interruption: 'proxy restarted; resumed' } : {}) },
       };
     }
-    const measured_at = variant === 'v1-early' ? `2020-01-0${i}T00:00:00Z` : new Date(Date.now() + 2000 + i).toISOString();
+    // measured_at inside the window the timestamps prove: after the freeze stamp, before the next anchor's stamp.
+    const measured_at = variant === 'v1-early' ? `2020-01-0${i}T00:00:00Z` : new Date(Date.now() - 500 + i).toISOString();
     return { kind: 'call_measured' as const, event_key: `run:${n}`, payload: { fingerprint, tool: 'bench', status, is_error: false, latency_ms: 10, bytes_out: out.size, measured_at, response: out } };
   });
   store.audit.record(AUDIT, runs, 'proxy');
+  if (variant !== 'milestones') await new Promise((r) => setTimeout(r, 1100));
   await anchor('runs');
   if (variant === 'milestones') store.audit.record(AUDIT, [{ kind: 'report_issued', event_key: 'report', payload: { report_id: 'R1', report: blob('# Report'), run_count: seqs.length } }], 'auditor');
   else store.audit.record(AUDIT, [{ kind: 'finding', event_key: 'report', payload: { finding_id: 'REPORT', status: 'discovered', class: 'report', detail: blob('# Report') } }], 'auditor');
@@ -103,7 +104,11 @@ interface Fixture {
   tsDir: string;
   digests: string[];
   tsas: TestTsa[];
-  pack: ReturnType<typeof buildAuditPackage>;
+  pack: Awaited<ReturnType<typeof buildAuditPackage>>;
+  /** SHA-256(SPKI) of the auditor key; the anchor stub's genesis pin (<sha256>@<valid_from>) and its sha256. */
+  fp: string;
+  genesis: string;
+  genesisFp: string;
 }
 
 async function build(variant: Variant, o: { tsas?: TestTsa[]; genTime?: (i: number) => Date } & RecordOpts = {}): Promise<Fixture> {
@@ -133,31 +138,29 @@ async function build(variant: Variant, o: { tsas?: TestTsa[]; genTime?: (i: numb
   tsas.forEach((t, k) => writeFileSync(join(rootsDir, `tsa-${k}.pem`), t.root.pem));
   const keyFile = join(work, 'auditor.pem');
   writeFileSync(keyFile, store.identity.signer.public_key_pem);
-  const keysFile = join(work, 'anchor-keys.trusted.json');
-  writeFileSync(keysFile, JSON.stringify(await (await fetch(`${backend.url}/.well-known/anchor-keys.json`)).json()));
+  const keysFile = join(work, 'anchor-keys.published.json');
+  const doc = (await (await fetch(`${backend.url}/.well-known/anchor-keys.json`)).json()) as { keys: { public_key_pem: string; valid_from: string }[] };
+  writeFileSync(keysFile, JSON.stringify(doc));
+  const genesisFp = chainIdFromPublicKeyPem(doc.keys[0]!.public_key_pem);
+  const genesis = `${genesisFp}@${doc.keys[0]!.valid_from}`;
   const pkg = join(work, 'package');
-  const pack = buildAuditPackage(store, { audit_id: AUDIT, out: pkg, timestamps_dir: tsDir, tsa_roots: tsas.map((t) => t.root.pem) });
+  const pack = await buildAuditPackage(store, { audit_id: AUDIT, out: pkg, timestamps_dir: tsDir, tsa_roots: tsas.map((t) => t.root.pem), genesis });
   store.close();
-  return { dataDir, pkg, keyFile, keysFile, rootsDir, tsDir, digests, tsas, pack };
+  return { dataDir, pkg, keyFile, keysFile, rootsDir, tsDir, digests, tsas, pack, fp: chainIdFromPublicKeyPem(readFileSync(keyFile, 'utf8')), genesis, genesisFp };
 }
 
-const trustOpts = (f: Fixture): VerifyAuditOptions => ({
-  key_pem: readFileSync(f.keyFile, 'utf8'),
-  anchor_keys: JSON.parse(readFileSync(f.keysFile, 'utf8')) as unknown,
-  tsa_roots: f.tsas.map((t) => t.root.pem),
-});
+const trustOpts = (f: Fixture): VerifyAuditOptions => ({ key_fingerprint: f.fp, genesis: f.genesis, tsa_roots: f.tsas.map((t) => t.root.pem) });
 
 function cli(args: string[], env: Record<string, string> = {}) {
-  const r = spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8', env: cleanEnv(env) });
+  const r = spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8', env: cleanEnv({ KRONICLE_LITE_DATA_DIR: tempDir('kl-va-cli-'), ...env }) });
   return { code: r.status, out: r.stdout, err: r.stderr };
 }
-const trustArgs = (f: Fixture) => ['--key', f.keyFile, '--anchor-keys', f.keysFile, '--tsa-roots', f.rootsDir];
+const trustArgs = (f: Fixture) => ['--key-fingerprint', f.fp, '--genesis', f.genesis, '--tsa-roots', f.rootsDir];
 const copyPkg = (f: Fixture) => {
   const d = join(tempDir('kl-va-copy-'), 'package');
   cpSync(f.pkg, d, { recursive: true });
   return d;
 };
-/** Rewrite a file of a pack copy (a fresh inode: the copy's files are not hard links). */
 const rewrite = (p: string, data: string | Buffer) => {
   rmSync(p);
   writeFileSync(p, data);
@@ -166,7 +169,7 @@ const rewrite = (p: string, data: string | Buffer) => {
 function resign(d: string, dataDir: string): void {
   const store = new KronicleLite({ dataDir });
   try {
-    for (const f of SUMS_FILES) rmSync(join(d, f));
+    for (const f of SUMS_FILES) rmSync(join(d, f), { force: true });
     const sums = sha256sums(d, listPackFiles(d).files);
     writeFileSync(join(d, 'SHA256SUMS'), sums);
     writeFileSync(join(d, 'SHA256SUMS.sig'), Buffer.from(store.identity.signer.sign(Buffer.from(sums)), 'base64'));
@@ -174,8 +177,64 @@ function resign(d: string, dataDir: string): void {
     store.close();
   }
 }
+function setClaims(d: string, mut: (c: { claims: string[]; runs?: unknown }) => void) {
+  const p = join(d, 'claims.json');
+  const c = JSON.parse(readFileSync(p, 'utf8')) as { claims: string[]; runs?: unknown };
+  mut(c);
+  rewrite(p, JSON.stringify(c, null, 1) + '\n');
+}
 const failedChecks = (r: ReturnType<typeof verifyAudit>) => r.checks.filter((c) => c.status === 'fail').map((c) => `${c.subject ? `${c.subject} ` : ''}${c.check}`);
 const claimStatus = (r: ReturnType<typeof verifyAudit>) => Object.fromEntries(r.claims.map((c) => [c.claim, c.status]));
+
+// ── service keys under test control (the stub's private key is not exposed) ──
+interface SK {
+  priv: KeyObject;
+  pem: string;
+  id: string;
+  fp: string;
+}
+function newKey(): SK {
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const pem = publicKey.export({ type: 'spki', format: 'pem' }) as string;
+  return { priv: privateKey, pem, id: serviceKeyIdFromPem(pem), fp: chainIdFromPublicKeyPem(pem) };
+}
+const b64sig = (k: SK, msg: string) => edSign(null, Buffer.from(msg), k.priv).toString('base64');
+/** A rotation P → K as the service's scripts/rotate-key.mjs writes it. */
+function rotated(p: SK, pFrom: string, k: SK, kFrom: string, pStatus: 'retired' | 'revoked' = 'retired') {
+  return [
+    { key_id: k.id, public_key_pem: k.pem, valid_from: kFrom, status: 'active', successor_signature: b64sig(p, successorSigningPayload({ key_id: k.id, public_key_pem: k.pem, valid_from: kFrom })), signed_by: p.id },
+    { key_id: p.id, public_key_pem: p.pem, valid_from: pFrom, valid_to: kFrom, status: pStatus, retirement_signature: b64sig(k, retirementSigningPayload({ key_id: p.id, status: pStatus, valid_to: kFrom })), retirement_signed_by: k.id },
+  ];
+}
+/** Revoke `key` in `keys` as the service's scripts/rotate-key.mjs revoke() does: signed by `signer` (the key itself or an earlier one). */
+function revokeKey(keys: Record<string, unknown>[], key: SK, signer: SK, compromisedSince: string, validTo?: string) {
+  return keys.map((k) => {
+    if (k['key_id'] !== key.id) return k;
+    const valid_to = validTo ?? (k['valid_to'] as string);
+    const statement = { key_id: key.id, status: 'revoked', valid_to, compromised_since: compromisedSince };
+    return { ...k, status: 'revoked', valid_to, compromised_since: compromisedSince, retirement_signature: b64sig(signer, retirementSigningPayload(statement)), retirement_signed_by: signer.id };
+  });
+}
+const ANCH = ['01-harness-frozen', '02-run-completed', '03-report-issued'];
+/** Re-sign a pack copy's receipts with `k` at the given received_at, and re-stamp them (both TSAs). */
+function resignReceipts(d: string, f: Fixture, k: SK, receivedAt: (i: number) => string, genTime?: (i: number) => Date, tsas = f.tsas) {
+  ANCH.forEach((b, i) => {
+    const p = join(d, 'anchors', `${b}.receipt.json`);
+    const r = JSON.parse(readFileSync(p, 'utf8')) as Record<string, unknown>;
+    r['service_key_id'] = k.id;
+    r['received_at'] = receivedAt(i);
+    delete r['signature'];
+    r['signature'] = b64sig(k, anchorReceiptSigningPayload(r as never));
+    const bytes = canonicalize(r);
+    rewrite(p, bytes);
+    tsas.forEach((t, j) => rewrite(join(d, 'anchors', `${b}.${j === 0 ? 'alpha' : 'beta'}.tsr`), t.stamp(bytes, genTime ? { genTime: genTime(i) } : {})));
+  });
+}
+const setPackKeys = (d: string, keys: unknown[]) => rewrite(join(d, 'anchor-keys.json'), JSON.stringify({ v: 1, keys }));
+const noOrdering = (c: { claims: string[] }) => {
+  c.claims = c.claims.filter((x) => x !== 'harness_frozen_before_runs');
+};
+const iso = (ms: number) => new Date(ms).toISOString();
 
 describe('verify-audit: a synthetic evidence pack end to end', () => {
   let f: Fixture;
@@ -183,7 +242,7 @@ describe('verify-audit: a synthetic evidence pack end to end', () => {
     f = await build('milestones');
   });
 
-  it('audit package writes the pack layout, declares what the store supports, and verifies itself', () => {
+  it('audit package writes the pack layout, ships the published key list, declares what the store supports, and verifies itself', () => {
     expect(readdirSync(f.pkg).sort()).toEqual(['COMPLETION.txt', 'SHA256SUMS', 'SHA256SUMS.sig', 'VERIFY.md', 'anchor-keys.json', 'anchors', 'auditor-key.pem', 'bundle', 'claims.json', 'tsa-roots']);
     expect(readdirSync(join(f.pkg, 'anchors')).sort()).toEqual([
       '01-harness-frozen.alpha.tsr',
@@ -198,9 +257,11 @@ describe('verify-audit: a synthetic evidence pack end to end', () => {
       'index.json',
     ]);
     expect(readdirSync(join(f.pkg, 'tsa-roots')).sort()).toEqual(['custom-1.pem', 'custom-2.pem', 'digicert.pem', 'sectigo.pem']);
-    expect(sha(readFileSync(join(f.pkg, 'anchors', '01-harness-frozen.receipt.json')))).toBe(f.digests[0]); // the stamped digest
-    const claims = JSON.parse(readFileSync(join(f.pkg, 'claims.json'), 'utf8')) as Record<string, unknown>;
-    expect(claims).toEqual({
+    expect(sha(readFileSync(join(f.pkg, 'anchors', '01-harness-frozen.receipt.json')))).toBe(f.digests[0]);
+    expect((JSON.parse(readFileSync(join(f.pkg, 'anchor-keys.json'), 'utf8')) as { keys: { key_id: string }[] }).keys.map((k) => k.key_id)).toEqual(
+      (JSON.parse(readFileSync(f.keysFile, 'utf8')) as { keys: { key_id: string }[] }).keys.map((k) => k.key_id),
+    );
+    expect(JSON.parse(readFileSync(join(f.pkg, 'claims.json'), 'utf8'))).toEqual({
       format: 'isokron-evidence-pack-claims/1',
       audit_id: AUDIT,
       claims: ['integrity', 'chain', 'receipts', 'independent_timestamps', 'harness_frozen_before_runs', 'run_sequence'],
@@ -212,58 +273,51 @@ describe('verify-audit: a synthetic evidence pack end to end', () => {
     expect(completion).toContain('Tamper-evident, independently timestamped audit evidence.');
     expect(completion).toContain(`Manifest SHA-256      ${f.pack.manifest_sha256}`);
     expect(completion).toContain(`Final anchored root   ${f.pack.root}`);
-    expect(completion).toMatch(/Signing key +ed25519-[0-9a-f]{16} \(SHA-256 of the public key's SPKI: [0-9a-f]{64}\)/);
-    expect(completion).toMatch(/timestamps +\d{4}-.*\(alpha\), .*\(beta\)/);
+    expect(completion).toContain(`verify-audit <this directory> --key-fingerprint ${f.fp}`);
     const verify = readFileSync(join(f.pkg, 'VERIFY.md'), 'utf8');
     expect(verify).toContain('openssl pkeyutl -verify -pubin -inkey auditor-key.pem -rawin -in SHA256SUMS -sigfile SHA256SUMS.sig');
     expect(verify).toContain('openssl ts -verify -digest $D -in anchors/01-harness-frozen.alpha.tsr -CAfile tsa-roots/custom-1.pem -partial_chain');
     expect(verify).toMatch(/-attime \d{10}/);
-    for (const t of [readFileSync(join(f.pkg, 'VERIFY.md'), 'utf8'), completion]) expect(t).not.toMatch(/immutable|tamper-proof|certified|trustless/i);
+    // P1f: no document tells the client to trust the pack's own key file
+    for (const t of [verify, completion]) {
+      expect(t).not.toMatch(/--key auditor-key\.pem/);
+      expect(t).not.toMatch(/immutable|tamper-proof|certified|trustless/i);
+    }
   });
 
-  it('verifies: exit 0, one PASS per declared claim, check lines with evidence, values to compare', () => {
+  it('verifies: exit 0, one PASS per claim, the key pinned by fingerprint, values to compare', () => {
     const r = cli(['verify-audit', f.pkg, ...trustArgs(f)]);
     expect(r.err).toBe('');
     expect(r.code).toBe(0);
     expect(r.out.split('\n')[0]).toBe(`IsoKron Evidence Pack  ${f.pkg}`);
+    expect(r.out).toContain('(pinned by --key-fingerprint)');
     for (const c of ['integrity', 'chain', 'receipts', 'independent_timestamps', 'harness_frozen_before_runs', 'run_sequence']) expect(r.out).toMatch(new RegExp(`^ {2}PASS {10}${c} `, 'm'));
-    expect(r.out).toMatch(/PASS {2}harness frozen before runs +harness abababababababab… frozen, committed .*3\/3 run\(s\) name that harness and carry the freeze receipt digest/);
+    expect(r.out).toMatch(/PASS {2}anchor key list +intact: 1 key\(s\), each verified back to the pinned genesis key: anchor-ed25519-[0-9a-f]{16} \(genesis\)/);
+    expect(r.out).toMatch(/PASS {2}independent TSAs +valid tokens under 2 pinned TSA CAs \(tsa-0, tsa-1\)/);
+    expect(r.out).toMatch(/PASS {2}harness frozen before runs +harness abababababababab… frozen, committed .*3\/3 run\(s\) name that harness, carry the freeze receipt digest/);
     expect(r.out).toMatch(/PASS {2}run sequence +3 run\(s\), run_seq 1\.\.3 contiguous; matches planned_runs 3, report_run_count 3, claims\.json 3; 1 capture interruption\(s\): run 3 \(proxy restarted; resumed\)/);
     expect(r.out).toMatch(/PASS {2}SHA256SUMS +\d+ file\(s\) match; signed by ed25519-/);
-    expect(r.out).toMatch(/PASS {2}RFC 3161 alpha +\d{4}-\d\d-\d\dT.*signed by CN=Alpha TSA Signer, root CN=Alpha TSA Root/);
-    expect(r.out).toMatch(/PASS {2}root matches bundle +seq 1\.\.1 root [0-9a-f]{64}/);
+    expect(r.out).toMatch(/PASS {2}stamped within key validity/);
     expect(r.out).toContain(`manifest sha256  ${f.pack.manifest_sha256}`);
-    expect(r.out).toMatch(/final root +[0-9a-f]{64} \(seq 1\.\.5, 03-report-issued\)/);
     expect(r.out).toContain('RESULT: VERIFIED  integrity, chain, receipts, independent_timestamps, harness_frozen_before_runs, run_sequence');
     expect(r.out).not.toContain('FAIL');
-    expect(r.out).not.toMatch(/does not prove|NOT proven|not prove/i); // scope statements live in --help and the docs
-    expect(cli(['help']).out).toContain('Establishes integrity, ordering and independent');
+    expect(r.out).not.toMatch(/does not prove|NOT proven|not prove/i);
+    expect(cli(['help']).out).toContain('Establishes integrity, ordering');
   });
 
   it('--json follows the published schema', () => {
     const r = cli(['verify-audit', f.pkg, ...trustArgs(f), '--json']);
     expect(r.code).toBe(0);
     const j = VerifyAuditJsonSchema.parse(JSON.parse(r.out));
-    expect(j).toMatchObject({ ok: true, failed: 0, audit_id: AUDIT, bundle_format: BUNDLE_FORMAT_V2, manifest_sha256: f.pack.manifest_sha256, auditor: { source: 'pinned' }, trust: { service_keys: 'file', tsa_roots: 'dir', tsa_time: 'now' } });
-    expect(j.claims.map((c) => [c.claim, c.status])).toEqual([
-      ['integrity', 'pass'],
-      ['chain', 'pass'],
-      ['receipts', 'pass'],
-      ['independent_timestamps', 'pass'],
-      ['harness_frozen_before_runs', 'pass'],
-      ['run_sequence', 'pass'],
-    ]);
+    expect(j).toMatchObject({ ok: true, failed: 0, audit_id: AUDIT, bundle_format: BUNDLE_FORMAT_V2, manifest_sha256: f.pack.manifest_sha256, auditor: { source: 'fingerprint', spki_sha256: f.fp }, trust: { key_list: 'pack', genesis_sha256: f.genesisFp, genesis_valid_from: '2026-11-01T00:00:00.000Z', genesis_source: 'option', key_chain: { status: 'intact' }, tsa_roots: 'dir', tsa_time: 'now' } });
+    expect(j.claims.map((c) => [c.claim, c.status])).toEqual(['integrity', 'chain', 'receipts', 'independent_timestamps', 'harness_frozen_before_runs', 'run_sequence'].map((c) => [c, 'pass']));
     expect(j.ordering).toMatchObject({ status: 'pass', basis: 'freeze_nonce', harness_digest: H, runs: { count: 3, nonce_bound: 3 } });
-    expect(j.run_sequence).toMatchObject({ status: 'pass', count: 3, seqs: [1, 2, 3], interruptions: [{ run_seq: 3, event_key: 'run:3', note: 'proxy restarted; resumed' }] });
-    expect(j.anchors.every((a) => a.ok && a.timestamps.length === 2 && a.timestamps.every((t) => t.ok))).toBe(true);
-    expect(j.final).toMatchObject({ from_seq: 1, anchor: '03-report-issued' });
-    expect(j.timeline.map((t) => t.kind)).toEqual(['harness_frozen', 'run_completed', 'run_completed', 'run_completed', 'report_issued']);
+    expect(j.anchors.every((a) => a.ok && a.timestamps.length === 2 && a.timestamps.every((t) => t.ok) && new Set(a.timestamps.map((t) => t.ca)).size === 2)).toBe(true);
   });
 
   it('does not depend on openssl (PATH empty)', () => {
     const r = cli(['verify-audit', f.pkg, ...trustArgs(f)], { PATH: '' });
     expect(r.code).toBe(0);
-    expect(r.out).toContain('RESULT: VERIFIED');
   });
 
   const rawTools = (() => {
@@ -281,15 +335,13 @@ describe('verify-audit: a synthetic evidence pack end to end', () => {
     const script = blocks.split('\n').filter((l) => !/^sha256sum /.test(l) || spawnSync('sha256sum', ['--version']).status === 0);
     const r = spawnSync('bash', ['-euo', 'pipefail', '-c', script.join('\n')], { cwd: d, encoding: 'utf8' });
     const all = r.stdout + r.stderr;
-    // (some runners' openssl.cnf prints include-path noise on stderr; judge the verification lines only)
     expect(all).not.toMatch(/Verification: FAILED|Signature Verification Failure|: FAILED/);
     expect(r.status).toBe(0);
-    expect(all.match(/Verification: OK/g)?.length).toBeGreaterThanOrEqual(12); // 6 tokens, now and at genTime
-    expect(all.match(/Signature Verified Successfully/g)?.length).toBe(3); // SHA256SUMS, a receipt, its checkpoint
-    expect(all.match(/: OK$/gm)?.length).toBeGreaterThanOrEqual(25); // shasum -c lines
+    expect(all.match(/Verification: OK/g)?.length).toBeGreaterThanOrEqual(12);
+    expect(all.match(/Signature Verified Successfully/g)?.length).toBe(3);
   });
 
-  it('one byte flipped in an artifact: exit 1, integrity FAIL (SHA256SUMS and the bundle artifacts check)', () => {
+  it('one byte flipped in an artifact: exit 1, integrity FAIL', () => {
     const d = copyPkg(f);
     const blobs = join(d, 'bundle', 'blobs');
     const name = readdirSync(blobs)[0]!;
@@ -301,25 +353,12 @@ describe('verify-audit: a synthetic evidence pack end to end', () => {
     expect(r.out).toMatch(/FAIL {2}artifacts +blob [0-9a-f]{12}… does not hash to its name/);
     expect(r.out).toMatch(new RegExp(`FAIL {2}SHA256SUMS +bundle/blobs/${name} does not match its SHA256SUMS line`));
     expect(r.out).toMatch(/^ {2}FAIL {10}integrity /m);
-    expect(r.out).toMatch(/RESULT: FAILED {2}integrity \(2 failed check\(s\)\)/);
-  });
-
-  it('one byte flipped in a receipt (SHA256SUMS re-signed): the receipt and its tokens fail', () => {
-    const d = copyPkg(f);
-    const p = join(d, 'anchors', '02-run-completed.receipt.json');
-    rewrite(p, readFileSync(p, 'utf8').replace('"received_at":"2', '"received_at":"3'));
-    resign(d, f.dataDir);
-    const r = verifyAudit(d, trustOpts(f));
-    expect(r.ok).toBe(false);
-    expect(failedChecks(r)).toEqual(expect.arrayContaining(['02-run-completed service signature', '02-run-completed RFC 3161 alpha', '02-run-completed RFC 3161 beta']));
-    expect(claimStatus(r)).toMatchObject({ integrity: 'pass', receipts: 'fail', independent_timestamps: 'fail' });
   });
 
   it('history rewritten and re-signed with the auditor key: integrity passes, the anchors do not', async () => {
     const forgedDir = tempDir('kl-va-forged-');
     copyFileSync(join(f.dataDir, 'signing-key.pem'), join(forgedDir, 'signing-key.pem'));
     const forged = new KronicleLite({ dataDir: forgedDir });
-    expect(forged.identity.signer.public_key_pem).toBe(readFileSync(f.keyFile, 'utf8'));
     let i = 0;
     await recordAudit(forged, 'milestones', async () => f.digests[i++]!, { tweak: true });
     const d = copyPkg(f);
@@ -327,199 +366,502 @@ describe('verify-audit: a synthetic evidence pack end to end', () => {
     exportBundle({ chain: forged.chain, audit: forged.audit, signer: forged.identity.signer, audit_id: AUDIT, dir: join(d, 'bundle') });
     forged.close();
     resign(d, forgedDir);
-    expect(verifyBundle(join(d, 'bundle'), { public_key_pem: readFileSync(f.keyFile, 'utf8') }).ok).toBe(true); // a bundle alone cannot catch the key holder
-    const r = cli(['verify-audit', d, ...trustArgs(f), '--json']);
-    expect(r.code).toBe(1);
-    const j = VerifyAuditJsonSchema.parse(JSON.parse(r.out));
-    const bad = j.checks.filter((c) => c.status === 'fail');
-    // anchor 1 covers only the freeze (unchanged); anchors 2 and 3 cover run 2
-    expect(bad.map((c) => `${c.subject} ${c.check}`)).toEqual(expect.arrayContaining(['02-run-completed root matches bundle', '03-report-issued root matches bundle']));
-    expect(bad.find((c) => c.check === 'root matches bundle')!.evidence).toMatch(/bundle seq 1\.\.\d+ has root [0-9a-f]{16}…, the anchor holds [0-9a-f]{16}…/);
-    expect(j.claims.find((c) => c.claim === 'integrity')!.status).toBe('pass');
-    expect(j.claims.find((c) => c.claim === 'receipts')!.status).toBe('fail');
-  });
-
-  it('bad timestamp tokens: altered signature, a token for another receipt, an untrusted TSA, a missing token', () => {
-    {
-      const d = copyPkg(f);
-      const p = join(d, 'anchors', '01-harness-frozen.alpha.tsr');
-      const b = readFileSync(p);
-      b[b.length - 1] = b[b.length - 1]! ^ 0xff; // the last byte of the reply is the signature's
-      rewrite(p, b);
-      resign(d, f.dataDir);
-      const r = verifyAudit(d, trustOpts(f));
-      expect(failedChecks(r)).toEqual(['01-harness-frozen RFC 3161 alpha', 'harness frozen before runs']); // the freeze is then first committed with the runs
-      expect(r.checks.find((c) => c.check === 'RFC 3161 alpha' && c.status === 'fail')!.evidence).toMatch(/signature|DER|signed/i);
-      expect(claimStatus(r)).toMatchObject({ integrity: 'pass', receipts: 'pass', independent_timestamps: 'fail', harness_frozen_before_runs: 'fail' });
-    }
-    {
-      const d = copyPkg(f);
-      rewrite(join(d, 'anchors', '01-harness-frozen.beta.tsr'), readFileSync(join(d, 'anchors', '02-run-completed.beta.tsr')));
-      resign(d, f.dataDir);
-      const r = verifyAudit(d, trustOpts(f));
-      expect(r.checks.find((c) => c.subject === '01-harness-frozen' && c.check === 'RFC 3161 beta')).toMatchObject({ status: 'fail', evidence: 'messageImprint is not the hash of the stamped bytes' });
-      expect(r.ordering.status).toBe('fail'); // the freeze anchor no longer counts as timestamped
-    }
-    {
-      const { tsa_roots: _drop, ...o } = trustOpts(f);
-      const r = verifyAudit(f.pkg, o);
-      expect(r.ok).toBe(false);
-      expect(r.checks.filter((c) => c.group === 'timestamp').every((c) => c.status === 'fail' && /does not chain to a trusted TSA root/.test(c.evidence))).toBe(true);
-    }
-    {
-      const d = copyPkg(f);
-      for (const t of ['alpha', 'beta']) rmSync(join(d, 'anchors', `03-report-issued.${t}.tsr`));
-      resign(d, f.dataDir);
-      const r = verifyAudit(d, trustOpts(f));
-      expect(r.checks.find((c) => c.subject === '03-report-issued' && c.group === 'timestamp')).toMatchObject({ status: 'fail', evidence: 'no timestamp token for this receipt' });
-      expect(r.checks.find((c) => c.check === 'coverage')!.status).toBe('fail');
-    }
-  });
-
-  it('anchor service keys: shipped pins by default (no trust on first use); successors need a signature', () => {
-    const { anchor_keys: _k, ...noKeys } = trustOpts(f);
-    const r = verifyAudit(f.pkg, noKeys); // the pack's own anchor-keys.json lists the stub key: not a trust root
-    expect(r.ok).toBe(false);
-    expect(r.checks.filter((c) => c.check === 'service signature').every((c) => c.status === 'fail' && c.evidence.includes('is not trusted (trusted: anchor-ed25519-3dca1ecf66c2993e'))).toBe(true);
-    expect(r.checks.find((c) => c.check === 'anchor-keys.json')).toMatchObject({ status: 'fail', evidence: expect.stringMatching(/anchor-ed25519-[0-9a-f]{16} does not chain to a genesis key/) });
-
-    // Rotation: trust K0 only; the pack lists the stub key with a successor signature by K0.
-    const { privateKey, publicKey } = generateKeyPairSync('ed25519');
-    const k0pem = publicKey.export({ type: 'spki', format: 'pem' }) as string;
-    const k0 = serviceKeyIdFromPem(k0pem);
-    const s = (JSON.parse(readFileSync(f.keysFile, 'utf8')) as { keys: { key_id: string; public_key_pem: string; valid_from: string }[] }).keys[0]!;
-    const successor_signature = edSign(null, Buffer.from(successorSigningPayload({ key_id: s.key_id, public_key_pem: s.public_key_pem, valid_from: s.valid_from })), privateKey).toString('base64');
-    const d = copyPkg(f);
-    rewrite(join(d, 'anchor-keys.json'), JSON.stringify({ v: 1, keys: [{ key_id: k0, public_key_pem: k0pem, status: 'retired', valid_from: '2026-01-01T00:00:00.000Z', valid_to: s.valid_from }, { ...s, status: 'active', successor_signature, signed_by: k0 }] }));
-    resign(d, f.dataDir);
-    const trustK0 = { ...noKeys, anchor_keys: { keys: [{ key_id: k0, public_key_pem: k0pem }] } };
-    const ok = verifyAudit(d, trustK0);
-    expect(failedChecks(ok)).toEqual([]);
-    expect(ok.checks.find((c) => c.check === 'anchor-keys.json')!.evidence).toContain(`${s.key_id} ← ${k0} (genesis)`);
-    rewrite(join(d, 'anchor-keys.json'), JSON.stringify({ v: 1, keys: [{ ...s, successor_signature: successor_signature.replace(/^./, (c) => (c === 'A' ? 'B' : 'A')), signed_by: k0 }] }));
-    resign(d, f.dataDir);
-    const broken = verifyAudit(d, trustK0); // no valid successor signature: not admitted, and the break fails
-    expect(broken.ok).toBe(false);
-    expect(broken.checks.find((c) => c.check === 'anchor-keys.json')).toMatchObject({ status: 'fail', evidence: expect.stringContaining(`${s.key_id} does not chain to a genesis key`) });
-  });
-
-  it('the shipped genesis key must match its pinned fingerprint', () => {
-    const entry = SHIPPED_SERVICE_KEYS['https://anchor.isokron.ai']![0]! as { public_key_pem: string };
-    const real = entry.public_key_pem;
-    entry.public_key_pem = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }) as string;
-    try {
-      const { anchor_keys: _k, ...noKeys } = trustOpts(f);
-      const r = verifyAudit(f.pkg, noKeys);
-      expect(r.checks.find((c) => c.check === 'anchor keys')).toMatchObject({ status: 'fail', evidence: expect.stringMatching(/shipped genesis key anchor-ed25519-3dca1ecf66c2993e does not match its pinned fingerprint 3dca1ecf/) });
-      expect(r.trust.service_key_ids).toEqual([]);
-    } finally {
-      entry.public_key_pem = real;
-    }
-  });
-
-  it('--no-tsa: independent_timestamps not checked, no RFC 3161 lines, times from the anchor service', () => {
-    const r = cli(['verify-audit', f.pkg, '--key', f.keyFile, '--anchor-keys', f.keysFile, '--no-tsa']);
-    expect(r.code).toBe(0);
-    expect(r.out).not.toContain('RFC 3161 alpha');
-    expect(r.out).toMatch(/^ {2}not checked {3}independent_timestamps +skipped \(--no-tsa\)/m);
-    expect(r.out).toMatch(/no later than .* \(anchor service\)/);
-    expect(r.out).toContain('(independent_timestamps not checked)');
+    expect(verifyBundle(join(d, 'bundle'), { public_key_pem: readFileSync(f.keyFile, 'utf8') }).ok).toBe(true);
+    const r = verifyAudit(d, trustOpts(f));
+    expect(failedChecks(r)).toEqual(expect.arrayContaining(['02-run-completed root matches bundle', '03-report-issued root matches bundle']));
+    expect(claimStatus(r)).toMatchObject({ integrity: 'pass', receipts: 'fail' });
   });
 
   it('usage errors exit 2', () => {
     expect(cli(['verify-audit']).code).toBe(2);
-    expect(cli(['verify-audit', join(f.pkg, 'nope')]).code).toBe(2);
+    expect(cli(['verify-audit', join(f.pkg, 'nope'), ...trustArgs(f)]).code).toBe(2);
     expect(cli(['verify-audit', f.pkg, '--bogus']).code).toBe(2);
     expect(cli(['verify-audit', f.pkg, '--no-tsa', '--tsa-roots', f.rootsDir]).code).toBe(2);
-    expect(cli(['verify-audit', f.pkg, '--key', join(f.pkg, 'missing.pem')]).code).toBe(2);
+    expect(cli(['verify-audit', f.pkg, '--key', join(tempDir('kl-va-nokey-'), 'missing.pem')]).code).toBe(2);
     expect(cli(['verify-audit', f.pkg, '--require', 'thoroughness']).code).toBe(2);
+    expect(cli(['verify-audit', f.pkg, '--key-fingerprint', 'abc']).code).toBe(2);
   });
 
-  it('a pack missing its anchors fails (exit 1); an unlisted file fails integrity', () => {
-    const d = copyPkg(f);
-    rmSync(join(d, 'anchors'), { recursive: true });
-    resign(d, f.dataDir);
-    const r = cli(['verify-audit', d, ...trustArgs(f)]);
-    expect(r.code).toBe(1);
-    expect(r.out).toContain('FAIL  anchors');
-    const e = copyPkg(f);
-    writeFileSync(join(e, 'extra.txt'), 'x');
-    expect(verifyAudit(e, trustOpts(f)).checks.find((c) => c.check === 'SHA256SUMS')).toMatchObject({ status: 'fail', evidence: 'not in SHA256SUMS: extra.txt' });
-  });
-
-  it('audit package refuses a non-empty --out', () => {
+  it('audit package refuses a non-empty --out', async () => {
     const store = new KronicleLite({ dataDir: f.dataDir });
     try {
-      expect(() => buildAuditPackage(store, { audit_id: AUDIT, out: f.pkg })).toThrow(/not empty/);
+      await expect(buildAuditPackage(store, { audit_id: AUDIT, out: f.pkg })).rejects.toThrow(/not empty/);
     } finally {
       store.close();
     }
   });
 });
 
-describe('verify-audit: claims, ordering, run sequence and the v1 convention', () => {
-  it('v1 kinds (finding class protocol_freeze, call_measured): format /1, ordering by recorded measured_at, no run_sequence claim', async () => {
+describe('review probes P1: claims and the auditor key', () => {
+  let f: Fixture;
+  beforeAll(async () => {
+    f = await build('milestones');
+  });
+
+  it('P1a: tampered artifact + extra file + edited COMPLETION.txt + integrity dropped from claims.json: exit 1', () => {
+    const d = copyPkg(f);
+    const blobs = join(d, 'bundle', 'blobs');
+    const name = readdirSync(blobs)[0]!;
+    const b = readFileSync(join(blobs, name));
+    b[0] = b[0]! ^ 0x01;
+    rewrite(join(blobs, name), b);
+    setClaims(d, (c) => {
+      c.claims = c.claims.filter((x) => x !== 'integrity');
+    });
+    writeFileSync(join(d, 'extra-unlisted.sh'), 'echo planted\n');
+    rewrite(join(d, 'COMPLETION.txt'), 'edited by a third party\n');
+    const r = cli(['verify-audit', d, ...trustArgs(f), '--json']);
+    expect(r.code).toBe(1);
+    const j = VerifyAuditJsonSchema.parse(JSON.parse(r.out));
+    expect(j.ok).toBe(false);
+    expect(j.claims.find((c) => c.claim === 'integrity')!.status).toBe('fail'); // always checked
+    expect(j.checks.find((c) => c.check === 'claims.json')).toMatchObject({ status: 'fail', evidence: 'not authenticated (SHA256SUMS does not verify): every claim is checked' });
+    expect(j.checks.find((c) => c.check === 'artifacts')!.status).toBe('fail');
+  });
+
+  it('P1b: claims.json reduced to [chain] (unsigned edit): exit 1; re-signed by the auditor: integrity still checked and passes', () => {
+    const d = copyPkg(f);
+    setClaims(d, (c) => {
+      c.claims = ['chain'];
+      delete c.runs;
+    });
+    expect(cli(['verify-audit', d, ...trustArgs(f)]).code).toBe(1);
+    resign(d, f.dataDir);
+    const r = verifyAudit(d, trustOpts(f));
+    expect(claimStatus(r)).toEqual({ integrity: 'pass', chain: 'pass', receipts: 'not_declared', independent_timestamps: 'not_declared', harness_frozen_before_runs: 'not_declared', run_sequence: 'not_declared' });
+  });
+
+  it('P1c / P1d: claims.json deleted, or [] unsigned: every claim is checked', () => {
+    const d = copyPkg(f);
+    rmSync(join(d, 'claims.json'));
+    resign(d, f.dataDir);
+    const r = verifyAudit(d, trustOpts(f));
+    expect(r.checks.find((c) => c.check === 'claims.json')).toMatchObject({ status: 'fail', evidence: 'claims.json is missing: every claim is checked' });
+    expect(r.claims.every((c) => c.status !== 'not_declared')).toBe(true);
+    expect(r.ok).toBe(false);
+    const e = copyPkg(f);
+    setClaims(e, (c) => {
+      c.claims = [];
+      delete c.runs;
+    });
+    const r2 = verifyAudit(e, trustOpts(f));
+    expect(r2.ok).toBe(false);
+    expect(r2.claims.every((c) => c.status !== 'not_declared')).toBe(true);
+  });
+
+  it('P1e: --require independent_timestamps --no-tsa is a usage error', () => {
+    expect(cli(['verify-audit', f.pkg, '--key-fingerprint', f.fp, '--genesis', f.genesis, '--no-tsa', '--require', 'independent_timestamps']).code).toBe(2);
+    expect(cli(['verify-audit', f.pkg, '--key-fingerprint', f.fp, '--genesis', f.genesis, '--no-tsa', '--require', 'harness_frozen_before_runs']).code).toBe(2);
+    const r = cli(['verify-audit', f.pkg, '--key-fingerprint', f.fp, '--genesis', f.genesis, '--no-tsa']);
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/^ {2}not checked {3}independent_timestamps +skipped \(--no-tsa\)/m);
+    expect(r.out).toMatch(/^ {2}not checked {3}harness_frozen_before_runs/m);
+  });
+
+  it('P1g: a pack re-made under a fresh key fails however it is pinned; --key inside the pack is refused', async () => {
+    const d = copyPkg(f);
+    const forgedDir = tempDir('kl-va-forge2-');
+    const forged = new KronicleLite({ dataDir: forgedDir });
+    forged.audit.record(AUDIT, [{ kind: 'harness_frozen', event_key: 'freeze', payload: { harness_id: 'h', fingerprint: H, manifest: forged.audit.putBlob(Buffer.from('x'), 'text/plain'), planned_runs: 1 } }], 'auditor');
+    forged.audit.record(AUDIT, [{ kind: 'run_completed', event_key: 'run:1', payload: { run_id: 'run-1', run_seq: 1, fingerprint: H, status: 'pass' } }], 'proxy');
+    rmSync(join(d, 'bundle'), { recursive: true });
+    exportBundle({ chain: forged.chain, audit: forged.audit, signer: forged.identity.signer, audit_id: AUDIT, dir: join(d, 'bundle') });
+    rewrite(join(d, 'auditor-key.pem'), forged.identity.signer.public_key_pem);
+    forged.close();
+    setClaims(d, (c) => {
+      c.claims = ['integrity', 'chain', 'run_sequence'];
+      c.runs = { count: 1, seqs: [1], interruptions: [] };
+    });
+    resign(d, forgedDir);
+    // the old VERIFY.md command: the pack's own key file
+    const inside = cli(['verify-audit', d, '--key', join(d, 'auditor-key.pem'), '--genesis', f.genesis, '--tsa-roots', f.rootsDir]);
+    expect(inside.code).toBe(2);
+    expect(inside.err).toMatch(/is inside the pack/);
+    // the real auditor's fingerprint
+    const pinned = cli(['verify-audit', d, ...trustArgs(f)]);
+    expect(pinned.code).toBe(1);
+    expect(pinned.out).toMatch(/FAIL {2}auditor key +the pack's auditor key has SHA-256\(SPKI\) [0-9a-f]{64}, not the pinned/);
+    // nothing pinned
+    const none = cli(['verify-audit', d, '--genesis', f.genesis, '--tsa-roots', f.rootsDir]);
+    expect(none.code).toBe(1);
+    expect(none.out).toMatch(/FAIL {2}auditor key +not pinned: pass --key-fingerprint/);
+    // an unpinned key never exits 0, even on the genuine pack
+    expect(cli(['verify-audit', f.pkg, '--genesis', f.genesis, '--tsa-roots', f.rootsDir]).code).toBe(1);
+  });
+});
+
+describe('review probes P3/P4a: the anchor key chain and the receipt times', () => {
+  let f: Fixture;
+  beforeAll(async () => {
+    f = await build('milestones');
+  });
+  const now = Date.now();
+  /** Receipts re-signed by `signer`, the pack's key list replaced, claims without the ordering, SHA256SUMS re-signed. */
+  const run = (keys: unknown[], signer: SK, genesis: SK, receivedAt: (i: number) => string, genTime?: (i: number) => Date, extra: Partial<VerifyAuditOptions> = {}) => {
+    const d = copyPkg(f);
+    resignReceipts(d, f, signer, receivedAt, genTime);
+    setPackKeys(d, keys);
+    setClaims(d, noOrdering);
+    resign(d, f.dataDir);
+    return verifyAudit(d, { ...trustOpts(f), genesis: `${genesis.fp}@${GENESIS_FROM}`, ...extra });
+  };
+  /** The genesis pin's valid_from in these lists (the pin's, never the list's, counts). */
+  const GENESIS_FROM = '2026-01-01T00:00:00.000Z';
+  const R = newKey();
+  const S = newKey();
+  const X = newKey();
+  const Y = newKey();
+  const ent = (k: SK, extra: Record<string, unknown> = {}) => ({ key_id: k.id, public_key_pem: k.pem, ...extra });
+  const recent = (i: number) => iso(now - 60e3 + i * 1e3);
+  const keyListFailure = (r: ReturnType<typeof verifyAudit>) => r.checks.find((c) => c.check === 'anchor key list');
+
+  it('a well-formed rotation R → S verifies (the service rotate-key.mjs shape)', () => {
+    const r = run(rotated(R, '2026-01-01T00:00:00.000Z', S, iso(now - 86400e3)), S, R, recent);
+    expect(failedChecks(r)).toEqual([]);
+    expect(r.trust.key_chain.entries.map((e) => e.state)).toEqual(['verified', 'genesis']);
+  });
+
+  it('P3a: a retired R signs a successor S without the successor-signed status statement: BROKEN', () => {
+    const vf = iso(now - 86400e3);
+    const keys = [ent(R, { status: 'retired', valid_from: '2026-01-01T00:00:00.000Z', valid_to: '2026-06-01T00:00:00.000Z' }), ent(S, { status: 'active', valid_from: vf, successor_signature: b64sig(R, successorSigningPayload({ key_id: S.id, public_key_pem: S.pem, valid_from: vf })), signed_by: R.id })];
+    const r = run(keys, S, R, recent);
+    expect(keyListFailure(r)).toMatchObject({ status: 'fail', evidence: expect.stringMatching(/status "retired" is not signed by its successor/) });
+    expect(claimStatus(r).receipts).toBe('fail');
+  });
+
+  it('P3b: a successor back-dated before its predecessor: BROKEN', () => {
+    const keys = rotated(R, '2026-11-01T00:00:00.000Z', S, '2026-11-02T00:00:00.000Z').map((k) => (k.key_id === S.id ? { ...k, valid_from: '2020-01-01T00:00:00.000Z' } : k));
+    const r = run(keys, S, R, (i) => `2021-01-01T00:00:0${i}.000Z`);
+    expect(keyListFailure(r)!.status).toBe('fail');
+    expect(r.ok).toBe(false);
+  });
+
+  it('P3c: a predecessor still active after its successor: BROKEN', () => {
+    const keys = rotated(R, '2026-01-01T00:00:00.000Z', S, iso(now - 86400e3)).map((k) => (k.key_id === R.id ? { ...k, status: 'active' } : k));
+    const r = run(keys, R, R, recent);
+    expect(keyListFailure(r)).toMatchObject({ status: 'fail', evidence: expect.stringMatching(/has successor .* but is active; it must be retired or revoked/) });
+  });
+
+  it('P3d: a retired key signs receipts dated inside its old window, stamped after it ended: FAIL', () => {
+    const end = iso(now - 3600e3);
+    const r = run(rotated(R, '2026-01-01T00:00:00.000Z', S, end), R, R, (i) => iso(now - 4 * 3600e3 + i * 60e3));
+    expect(failedChecks(r)).toEqual(expect.arrayContaining(['01-harness-frozen stamped within key validity']));
+    expect(r.checks.find((c) => c.check === 'stamped within key validity' && c.status === 'fail')!.evidence).toMatch(/is after anchor-ed25519-[0-9a-f]{16} ended at/);
+  });
+
+  it('P3e–P3i: revoked signer, rogue key, cycle, an unchained key in --anchor-keys, a successor of an unlisted key: BROKEN', () => {
+    const vf = iso(now - 86400e3);
+    const sig = (p: SK, k: SK, from: string) => b64sig(p, successorSigningPayload({ key_id: k.id, public_key_pem: k.pem, valid_from: from }));
+    // a revocation signed by the successor (the old shape) and without compromised_since: BROKEN
+    expect(keyListFailure(run(rotated(R, '2026-01-01T00:00:00.000Z', S, vf, 'revoked'), S, R, recent))!.evidence).toMatch(/revoked without a parseable compromised_since/);
+    // a proper revocation of R: S, whose successor statement R signed, is not trusted
+    const after = run(revokeKey(rotated(R, '2026-01-01T00:00:00.000Z', S, vf), R, R, iso(now - 2 * 86400e3)), S, R, recent);
+    expect(keyListFailure(after)!.status).toBe('pass');
+    expect(after.trust.key_chain).toMatchObject({ status: 'revoked_descendants', entries: [{ key_id: S.id, state: 'broken', revoked_ancestor: R.id }, { key_id: R.id, state: 'revoked' }] });
+    expect(after.checks.find((c) => c.check === 'service signature' && c.status === 'fail')!.evidence).toMatch(/is not trusted/);
+    expect(claimStatus(after).receipts).toBe('fail');
+    expect(keyListFailure(run([ent(X, { status: 'active', valid_from: '2026-01-01T00:00:00.000Z' })], X, R, recent))!.evidence).toMatch(/genesis fingerprint [0-9a-f]{64} does not match the pinned/);
+    const v0 = '2026-01-01T00:00:00.000Z';
+    expect(keyListFailure(run([ent(X, { valid_from: v0, successor_signature: sig(Y, X, v0), signed_by: Y.id }), ent(Y, { valid_from: v0, successor_signature: sig(X, Y, v0), signed_by: X.id })], X, R, recent))!.status).toBe('fail');
+    const file = { keys: [ent(R, { status: 'active', valid_from: v0 }), ent(X, { status: 'active', valid_from: v0 })] };
+    expect(keyListFailure(run([], X, R, recent, undefined, { anchor_keys: file }))!.evidence).toMatch(/2 keys have no successor_signature; exactly one genesis key is allowed/);
+    const unlisted = { keys: [ent(X, { status: 'active', valid_from: v0, successor_signature: 'A'.repeat(86) + '==', signed_by: 'anchor-ed25519-0000000000000000' })] };
+    expect(keyListFailure(run([], X, X, recent, undefined, { anchor_keys: unlisted }))!.status).toBe('fail');
+  });
+
+  it('P4a: received_at forward-dated past the TSA time: FAIL; and stamped more than 24 h after received_at: FAIL', () => {
+    const r = run([ent(R, { status: 'active', valid_from: '2026-01-01T00:00:00.000Z' })], R, R, (i) => `2030-01-01T00:00:0${i}.000Z`);
+    expect(r.checks.find((c) => c.check === 'RFC 3161 alpha' && c.status === 'fail')!.evidence).toMatch(/receipt is forward-dated: received_at 2030-01-01T00:00:00.000Z is later than the TSA time/);
+    const late = run([ent(R, { status: 'active', valid_from: '2026-01-01T00:00:00.000Z' })], R, R, (i) => iso(now - 3 * 86400e3 + i * 1e3));
+    expect(late.checks.find((c) => c.check === 'RFC 3161 alpha' && c.status === 'fail')!.evidence).toMatch(/more than 24 h after received_at/);
+  });
+
+  it('F5: --anchor-keys is chain-checked against --genesis / KRONICLE_ANCHOR_GENESIS (<sha256>@<valid_from>); the compiled pin rejects a foreign genesis', () => {
+    const d = copyPkg(f);
+    // the stub list with the compiled production genesis: BROKEN, with the self-hosting hint
+    const r = verifyAudit(d, { key_fingerprint: f.fp, tsa_roots: f.tsas.map((t) => t.root.pem) });
+    expect(r.checks.find((c) => c.check === 'anchor key list')).toMatchObject({ status: 'fail', evidence: expect.stringMatching(/pass --genesis <sha256>@<valid_from>/) });
+    const env = cli(['verify-audit', f.pkg, '--key-fingerprint', f.fp, '--tsa-roots', f.rootsDir], { KRONICLE_ANCHOR_GENESIS: f.genesis });
+    expect(env.code).toBe(0);
+    // the anchor client's rules: a bare hash is not a pin, and the old variable is refused, not ignored
+    expect(cli(['verify-audit', f.pkg, '--key-fingerprint', f.fp, '--genesis', f.genesisFp, '--tsa-roots', f.rootsDir]).code).toBe(2);
+    const old = cli(['verify-audit', f.pkg, ...trustArgs(f)], { KRONICLE_ANCHOR_GENESIS_SHA256: f.genesisFp });
+    expect(old.code).toBe(2);
+    expect(old.err).toMatch(/KRONICLE_ANCHOR_GENESIS_SHA256 is no longer read: set KRONICLE_ANCHOR_GENESIS=<sha256>@<valid_from>/);
+    // the pin's valid_from, not the list's, bounds the genesis key: a receipt before it fails
+    const late = verifyAudit(d, { ...trustOpts(f), genesis: `${f.genesisFp}@2099-01-01T00:00:00.000Z` });
+    expect(late.checks.find((c) => c.check === 'service signature' && c.status === 'fail')!.evidence).toMatch(/precedes anchor-ed25519-[0-9a-f]{16} valid_from 2099-01-01T00:00:00.000Z/);
+    const file = cli(['verify-audit', f.pkg, ...trustArgs(f), '--anchor-keys', f.keysFile]);
+    expect(file.code).toBe(0);
+  });
+
+  it('rollback: a shorter key list than one seen before fails (cache in the data dir)', () => {
+    const seen = tempDir('kl-va-seen-');
+    const vf = iso(now - 86400e3);
+    const newer = run(rotated(R, '2026-01-01T00:00:00.000Z', S, vf), S, R, recent, undefined, { seen_dir: seen });
+    expect(failedChecks(newer)).toEqual([]);
+    expect(newer.checks.find((c) => c.check === 'key list rollback')!.evidence).toBe('first list seen for this genesis; recorded');
+    const older = run([ent(R, { status: 'active', valid_from: '2026-01-01T00:00:00.000Z' })], R, R, (i) => iso(now - 2 * 86400e3 + i * 1e3), (i) => new Date(now - 2 * 86400e3 + 60e3 + i * 1e3), { seen_dir: seen });
+    expect(older.checks.find((c) => c.check === 'key list rollback')).toMatchObject({ status: 'fail', evidence: expect.stringMatching(/older or weaker list than the one seen .*: anchor-ed25519-[0-9a-f]{16} is in the key list seen earlier but missing now/) });
+    expect(older.ok).toBe(false);
+  });
+});
+
+describe('a revoked anchor service key: only a verified TSA time before compromised_since − 5 min keeps its receipts', () => {
+  let f: Fixture;
+  beforeAll(async () => {
+    f = await build('milestones');
+  });
+  const now = Date.now();
+  const GENESIS_FROM = '2026-01-01T00:00:00.000Z';
+  const R = newKey();
+  const run = (cs: string, receivedAt: (i: number) => string, genTime?: (i: number) => Date, extra: Partial<VerifyAuditOptions> = {}) => {
+    const keys = revokeKey([{ key_id: R.id, public_key_pem: R.pem, valid_from: GENESIS_FROM, status: 'active' }], R, R, cs, iso(now + 2 * 3600e3));
+    const d = copyPkg(f);
+    resignReceipts(d, f, R, receivedAt, genTime);
+    setPackKeys(d, keys);
+    setClaims(d, noOrdering);
+    resign(d, f.dataDir);
+    return verifyAudit(d, { ...trustOpts(f), genesis: `${R.fp}@${GENESIS_FROM}`, ...extra });
+  };
+  const recent = (i: number) => iso(now - 60e3 + i * 1e3);
+  const stampCheck = (r: ReturnType<typeof verifyAudit>) => r.checks.filter((c) => c.check === 'stamped before compromise');
+
+  it('stamped well before compromised_since: the receipts pass (the head may be revoked; the chain is intact)', () => {
+    const r = run(iso(now + 3600e3), recent);
+    expect(failedChecks(r)).toEqual([]);
+    expect(r.trust.key_chain).toMatchObject({ status: 'intact', entries: [{ key_id: R.id, state: 'revoked', compromised_since: iso(now + 3600e3) }] });
+    expect(stampCheck(r)).toHaveLength(3);
+    expect(stampCheck(r)[0]!.evidence).toMatch(/earliest verified TSA time .* < .* − 5 min/);
+    expect(r.ok).toBe(true);
+  });
+
+  it('stamped inside the 5 min before compromised_since: FAIL', () => {
+    const r = run(iso(now + 2 * 60e3), recent);
+    expect(stampCheck(r).every((c) => c.status === 'fail')).toBe(true);
+    expect(stampCheck(r)[0]!.evidence).toMatch(/is not before .* − 5 min/);
+    expect(claimStatus(r).receipts).toBe('fail');
+    expect(r.ok).toBe(false);
+  });
+
+  it('received_at back-dated before compromised_since, stamped after it: FAIL (received_at never counts)', () => {
+    const cs = iso(now - 3600e3);
+    const r = run(cs, (i) => iso(now - 3 * 3600e3 + i * 1e3));
+    expect(r.anchors.every((a) => Date.parse(a.received_at!) < Date.parse(cs) - 5 * 60e3)).toBe(true);
+    expect(stampCheck(r).every((c) => c.status === 'fail')).toBe(true);
+    expect(stampCheck(r)[0]!.evidence).toMatch(/received_at is the signer's own claim and does not count/);
+    expect(r.ok).toBe(false);
+  });
+
+  it('with RFC 3161 tokens not checked (--no-tsa): FAIL, whatever received_at says', () => {
+    const r = run(iso(now + 3600e3), recent, undefined, { no_tsa: true });
+    expect(stampCheck(r).every((c) => c.status === 'fail')).toBe(true);
+    expect(stampCheck(r)[0]!.evidence).toMatch(/RFC 3161 tokens are not checked here \(--no-tsa\)/);
+    expect(claimStatus(r).receipts).toBe('fail');
+    expect(r.ok).toBe(false);
+  });
+
+  it('a key after the revoked one fails; a key before it keeps its receipts', () => {
+    const S = newKey();
+    const vf = iso(now - 86400e3);
+    // R → S, then S revoked by R (an earlier key), compromised long after the receipts below were stamped
+    const keys = revokeKey(rotated(R, GENESIS_FROM, S, vf), S, R, iso(now + 3600e3), iso(now + 2 * 3600e3));
+    const d = copyPkg(f);
+    resignReceipts(d, f, S, recent);
+    setPackKeys(d, keys);
+    setClaims(d, noOrdering);
+    resign(d, f.dataDir);
+    const r = verifyAudit(d, { ...trustOpts(f), genesis: `${R.fp}@${GENESIS_FROM}` });
+    expect(r.trust.key_chain.status).toBe('intact');
+    expect(r.ok).toBe(true);
+    // and the reverse: R revoked, S after it: S's receipts fail
+    const e = copyPkg(f);
+    resignReceipts(e, f, S, recent);
+    setPackKeys(e, revokeKey(rotated(R, GENESIS_FROM, S, vf), R, R, iso(now + 3600e3)));
+    setClaims(e, noOrdering);
+    resign(e, f.dataDir);
+    const r2 = verifyAudit(e, { ...trustOpts(f), genesis: `${R.fp}@${GENESIS_FROM}` });
+    expect(r2.trust.key_chain.status).toBe('revoked_descendants');
+    expect(claimStatus(r2).receipts).toBe('fail');
+  });
+
+  it('rollback: a list that drops the revocation, or moves compromised_since later, is refused against the data-dir cache', () => {
+    const seen = tempDir('kl-va-seen-');
+    const cs = iso(now + 3600e3);
+    const first = run(cs, recent, undefined, { seen_dir: seen });
+    expect(first.checks.find((c) => c.check === 'key list rollback')!.status).toBe('pass');
+    const later = run(iso(now + 7200e3), recent, undefined, { seen_dir: seen });
+    expect(later.checks.find((c) => c.check === 'key list rollback')).toMatchObject({ status: 'fail', evidence: expect.stringMatching(/compromised_since was .* in the list seen earlier and is .* now/) });
+    expect(later.ok).toBe(false);
+    const d = copyPkg(f);
+    resignReceipts(d, f, R, recent);
+    setPackKeys(d, [{ key_id: R.id, public_key_pem: R.pem, valid_from: GENESIS_FROM, status: 'active' }]);
+    setClaims(d, noOrdering);
+    resign(d, f.dataDir);
+    const unrevoked = verifyAudit(d, { ...trustOpts(f), genesis: `${R.fp}@${GENESIS_FROM}`, seen_dir: seen });
+    expect(unrevoked.checks.find((c) => c.check === 'key list rollback')).toMatchObject({ status: 'fail', evidence: expect.stringMatching(/was revoked in the list seen earlier and is active now/) });
+  });
+});
+
+describe('review probes P4b–P4f: timestamps', () => {
+  let f: Fixture;
+  beforeAll(async () => {
+    f = await build('milestones');
+  });
+
+  it('P4b / P4c: one TSA only, or the same TSA under two labels: FAIL (two different pinned TSA CAs required)', () => {
+    const d = copyPkg(f);
+    for (const b of ANCH) rmSync(join(d, 'anchors', `${b}.beta.tsr`));
+    resign(d, f.dataDir);
+    const r = verifyAudit(d, trustOpts(f));
+    expect(r.checks.find((c) => c.check === 'independent TSAs')).toMatchObject({ status: 'fail', evidence: expect.stringMatching(/^valid tokens under 1 pinned TSA CA\(s\) \(ca-[0-9a-f]{12}\); at least two different TSA CAs are required$/) });
+    const e = copyPkg(f);
+    for (const b of ANCH) rewrite(join(e, 'anchors', `${b}.beta.tsr`), f.tsas[0]!.stamp(readFileSync(join(e, 'anchors', `${b}.receipt.json`))));
+    resign(e, f.dataDir);
+    expect(claimStatus(verifyAudit(e, trustOpts(f))).independent_timestamps).toBe('fail');
+  });
+
+  it('P7: an unreadable receipt fails independent_timestamps instead of skipping its tokens', () => {
+    const d = copyPkg(f);
+    rewrite(join(d, 'anchors', '02-run-completed.receipt.json'), 'not json');
+    for (const t of ['alpha', 'beta']) rewrite(join(d, 'anchors', `02-run-completed.${t}.tsr`), Buffer.from('garbage token'));
+    setClaims(d, (c) => {
+      c.claims = ['integrity', 'chain', 'independent_timestamps', 'run_sequence'];
+    });
+    resign(d, f.dataDir);
+    const r = verifyAudit(d, trustOpts(f));
+    expect(r.checks.find((c) => c.subject === '02-run-completed' && c.check === 'RFC 3161')).toMatchObject({ status: 'fail', evidence: 'receipt unreadable (not valid JSON); 2 token(s) over it cannot be checked' });
+    expect(claimStatus(r)).toMatchObject({ receipts: 'fail', independent_timestamps: 'fail' });
+  });
+});
+
+describe('review probes P5: ordering', () => {
+  const blob = (s: KronicleLite, x: string) => s.audit.putBlob(Buffer.from(x), 'text/plain');
+  async function buildCustom(rec: (store: KronicleLite, anchor: () => Promise<string>) => Promise<void>) {
+    const dataDir = tempDir('kl-va-store-');
+    const tsDir = tempDir('kl-va-ts-');
+    const tsas = [makeTsa({ name: 'Alpha' }), makeTsa({ name: 'Beta' })];
+    const store = new KronicleLite({ dataDir });
+    await rec(store, async () => {
+      store.chain.checkpoint(1, store.chain.head().seq);
+      const r = await pushCheckpoint(store, { anchorUrl: backend.url, licenseKey: STUB_LICENSE });
+      const row = store.chain.listAnchors().find((a) => a.anchor_id === r.anchor_id)!;
+      tsas.forEach((t, k) => writeFileSync(join(tsDir, `${r.anchor_id}.${k === 0 ? 'alpha' : 'beta'}.tsr`), t.stamp(row.receipt_json)));
+      return sha(row.receipt_json);
+    });
+    const doc = (await (await fetch(`${backend.url}/.well-known/anchor-keys.json`)).json()) as { keys: { public_key_pem: string; valid_from: string }[] };
+    const genesis = `${chainIdFromPublicKeyPem(doc.keys[0]!.public_key_pem)}@${doc.keys[0]!.valid_from}`;
+    const pkg = join(tempDir('kl-va-work-'), 'package');
+    const pack = await buildAuditPackage(store, { audit_id: AUDIT, out: pkg, timestamps_dir: tsDir, tsa_roots: tsas.map((t) => t.root.pem), genesis });
+    const fp = chainIdFromPublicKeyPem(store.identity.signer.public_key_pem);
+    store.close();
+    return { pkg, pack, dataDir, opts: { key_fingerprint: fp, genesis, tsa_roots: tsas.map((t) => t.root.pem) } as VerifyAuditOptions };
+  }
+  const freezeV1 = (s: KronicleLite) => s.audit.record(AUDIT, [{ kind: 'finding', event_key: 'protocol', payload: { finding_id: 'PROTOCOL', status: 'discovered', class: 'protocol_freeze', fingerprint: H, detail: blob(s, 'h') } }], 'auditor');
+  const runsV1 = (s: KronicleLite, at: (i: number) => string) =>
+    s.audit.record(AUDIT, [1, 2].map((i) => ({ kind: 'call_measured' as const, event_key: `run:${i}`, payload: { fingerprint: H, tool: 'b', status: 'pass', is_error: false, latency_ms: 1, bytes_out: 1, measured_at: at(i), response: blob(s, `r${i}`) } })), 'proxy');
+  const declareOrdering = (pkg: string, dataDir: string) => {
+    setClaims(pkg, (c) => {
+      if (!c.claims.includes('harness_frozen_before_runs')) c.claims.push('harness_frozen_before_runs');
+    });
+    resign(pkg, dataDir);
+  };
+
+  it('P5a: measured_at in 2099 is outside the timestamped window: not declared by the packager; declared, it fails', async () => {
+    const b = await buildCustom(async (s, anchor) => {
+      freezeV1(s);
+      await anchor();
+      runsV1(s, (i) => `2099-01-0${i}T00:00:00Z`);
+      await anchor();
+    });
+    expect(b.pack.claims.find((c) => c.claim === 'harness_frozen_before_runs')).toMatchObject({ declared: false, why: expect.stringMatching(/measured_at 2099-01-01T00:00:00Z is after its committing anchor/) });
+    declareOrdering(b.pkg, b.dataDir);
+    const r = verifyAudit(b.pkg, b.opts);
+    expect(r.checks.find((c) => c.group === 'ordering')).toMatchObject({ status: 'fail', evidence: expect.stringMatching(/fall outside the timestamped window/) });
+  });
+
+  it('P5b: runs no anchor commits fail the ordering, even with receipts dropped from claims.json', async () => {
+    const b = await buildCustom(async (s, anchor) => {
+      freezeV1(s);
+      await anchor();
+      runsV1(s, (i) => new Date(Date.now() + 60_000 * i).toISOString());
+    });
+    expect(b.pack.claims.find((c) => c.claim === 'harness_frozen_before_runs')!.declared).toBe(false);
+    setClaims(b.pkg, (c) => {
+      c.claims = ['integrity', 'chain', 'independent_timestamps', 'harness_frozen_before_runs'];
+    });
+    resign(b.pkg, b.dataDir);
+    const r = verifyAudit(b.pkg, b.opts);
+    expect(claimStatus(r)).toMatchObject({ receipts: 'fail', harness_frozen_before_runs: 'fail' }); // receipts is a dependency: checked anyway
+    expect(r.checks.find((c) => c.group === 'ordering')!.evidence).toMatch(/run seq 2, 3 are not committed by a timestamped anchor later than the freeze anchor/);
+  });
+
+  it('a /2 bundle shows the ordering by the freeze nonce only', async () => {
+    const b = await buildCustom(async (s, anchor) => {
+      s.audit.record(AUDIT, [{ kind: 'harness_frozen', event_key: 'freeze', payload: { harness_id: 'h', fingerprint: H, manifest: blob(s, 'h') } }], 'auditor');
+      await anchor();
+      await new Promise((r) => setTimeout(r, 1100));
+      s.audit.record(AUDIT, [{ kind: 'run_completed', event_key: 'run:1', payload: { run_id: 'r1', run_seq: 1, fingerprint: H, status: 'pass', measured_at: new Date().toISOString() } }], 'proxy');
+      await new Promise((r) => setTimeout(r, 1100));
+      await anchor();
+    });
+    expect(b.pack.claims.find((c) => c.claim === 'harness_frozen_before_runs')).toMatchObject({ declared: false, why: expect.stringMatching(/shows the ordering by the freeze nonce only/) });
+  });
+});
+
+describe('review probes P6: pack filesystem', () => {
+  let f: Fixture;
+  beforeAll(async () => {
+    f = await build('milestones');
+  });
+  it('symlinked bundle/ or receipt, a traversal line in SHA256SUMS, a listed file deleted: FAIL', () => {
+    const a = copyPkg(f);
+    const outside = tempDir('kl-va-outside-');
+    renameSync(join(a, 'bundle'), join(outside, 'bundle'));
+    symlinkSync(join(outside, 'bundle'), join(a, 'bundle'));
+    const ra = verifyAudit(a, trustOpts(f));
+    expect(ra.checks.find((c) => c.check === 'bundle/')).toMatchObject({ status: 'fail', evidence: 'bundle/ is a symbolic link' });
+    setClaims(a, (c) => {
+      c.claims = c.claims.filter((x) => x !== 'integrity');
+    });
+    expect(claimStatus(verifyAudit(a, trustOpts(f))).integrity).toBe('fail');
+    const b = copyPkg(f);
+    const rp = join(b, 'anchors', '01-harness-frozen.receipt.json');
+    renameSync(rp, join(outside, 'r.json'));
+    symlinkSync(join(outside, 'r.json'), rp);
+    expect(verifyAudit(b, trustOpts(f)).ok).toBe(false);
+    const c = copyPkg(f);
+    rmSync(join(c, 'SHA256SUMS'));
+    rmSync(join(c, 'SHA256SUMS.sig'));
+    const sums = sha256sums(c, listPackFiles(c).files) + `${'0'.repeat(64)}  ../outside.txt\n`;
+    writeFileSync(join(c, 'SHA256SUMS'), sums);
+    const st = new KronicleLite({ dataDir: f.dataDir });
+    writeFileSync(join(c, 'SHA256SUMS.sig'), Buffer.from(st.identity.signer.sign(Buffer.from(sums)), 'base64'));
+    st.close();
+    expect(verifyAudit(c, trustOpts(f)).checks.find((x) => x.check === 'SHA256SUMS')!.evidence).toMatch(/is not "<sha256> {2}<relative path>" for a pack file/);
+    const e = copyPkg(f);
+    rmSync(join(e, 'VERIFY.md'));
+    expect(verifyAudit(e, trustOpts(f)).checks.find((x) => x.check === 'SHA256SUMS')!.evidence).toBe('VERIFY.md is listed but absent');
+  });
+});
+
+describe('verify-audit: run sequence, ordering details and the v1 convention', () => {
+  it('v1 kinds: format /1, ordering by recorded measured_at inside the timestamped window, no run_sequence claim', async () => {
     const f = await build('v1');
     const r = verifyAudit(f.pkg, trustOpts(f));
     expect(failedChecks(r)).toEqual([]);
     expect(r.bundle_format).toBe(BUNDLE_FORMAT_V1);
-    expect(r.ordering).toMatchObject({ status: 'pass', basis: 'recorded_measured_at', runs: { count: 3, nonce_bound: 0 } });
+    expect(r.ordering).toMatchObject({ status: 'pass', basis: 'recorded_measured_at' });
     expect(claimStatus(r)).toMatchObject({ harness_frozen_before_runs: 'pass', run_sequence: 'not_declared' });
   });
 
-  it('runs recorded before the freeze anchor (a retroactive record): the pack does not declare the ordering; declaring it fails with the times', async () => {
+  it('runs recorded before the freeze anchor: not declared; required, it fails', async () => {
     const f = await build('v1-early');
-    expect(f.pack.claims.find((c) => c.claim === 'harness_frozen_before_runs')).toMatchObject({ declared: false, why: expect.stringMatching(/3 of 3 run\(s\) record measured_at before it/) });
-    const r = cli(['verify-audit', f.pkg, ...trustArgs(f)]);
-    expect(r.code).toBe(0);
-    expect(r.out).toMatch(/^ {2}not declared {2}harness_frozen_before_runs/m);
-    expect(r.out).not.toContain('harness frozen before runs');
-    // a client requiring the claim
+    expect(f.pack.claims.find((c) => c.claim === 'harness_frozen_before_runs')).toMatchObject({ declared: false, why: expect.stringMatching(/measured_at 2020-01-01T00:00:00Z is before the freeze/) });
+    expect(cli(['verify-audit', f.pkg, ...trustArgs(f)]).code).toBe(0);
     const req = cli(['verify-audit', f.pkg, ...trustArgs(f), '--require', 'harness_frozen_before_runs']);
     expect(req.code).toBe(1);
     expect(req.out).toMatch(/^ {2}FAIL {10}harness_frozen_before_runs +required \(--require\) but not declared by the pack/m);
-    // a pack that declares it anyway
-    const d = copyPkg(f);
-    const claims = JSON.parse(readFileSync(join(d, 'claims.json'), 'utf8')) as { claims: string[] };
-    claims.claims.push('harness_frozen_before_runs');
-    rewrite(join(d, 'claims.json'), JSON.stringify(claims));
-    resign(d, f.dataDir);
-    const lie = cli(['verify-audit', d, ...trustArgs(f)]);
-    expect(lie.code).toBe(1);
-    expect(lie.out).toMatch(/FAIL {2}harness frozen before runs +harness abababababababab… frozen, committed \S+ \(01-harness-frozen, RFC 3161\); 3 of 3 run\(s\) record measured_at before it \(2020-01-01T00:00:00Z to 2020-01-03T00:00:00Z\)/);
-    expect(lie.out).toMatch(/RESULT: FAILED {2}harness_frozen_before_runs \(1 failed check\(s\)\)/);
-  });
-
-  it('no freeze marker: harness_frozen_before_runs not declared; JSON ordering status not_declared', async () => {
-    const f = await build('no-freeze');
-    const r = cli(['verify-audit', f.pkg, ...trustArgs(f), '--json']);
-    expect(r.code).toBe(0);
-    const j = VerifyAuditJsonSchema.parse(JSON.parse(r.out));
-    expect(j.ordering).toEqual({ status: 'not_declared', basis: null, harness_digest: null, freeze: null, runs: null, problem: null });
-    expect(j.claims.find((c) => c.claim === 'harness_frozen_before_runs')).toEqual({ claim: 'harness_frozen_before_runs', status: 'not_declared', declared: false, required: false, evidence: '' });
-    expect(j.checks.some((c) => c.group === 'ordering')).toBe(false);
-  });
-
-  it('a freeze committed together with runs is not declared as an ordering', async () => {
-    const store = new KronicleLite({ dataDir: tempDir('kl-va-late-') });
-    const tsa = makeTsa();
-    const tsDir = tempDir('kl-va-late-ts-');
-    let first = true;
-    await recordAudit(store, 'v1', async () => {
-      if (first) {
-        first = false;
-        return 'c'.repeat(64); // no anchor after the freeze
-      }
-      store.chain.checkpoint(1, store.chain.head().seq);
-      const p = await pushCheckpoint(store, { anchorUrl: backend.url, licenseKey: STUB_LICENSE });
-      const row = store.chain.listAnchors().find((a) => a.anchor_id === p.anchor_id)!;
-      writeFileSync(join(tsDir, `${p.anchor_id}.alpha.tsr`), tsa.stamp(row.receipt_json));
-      return sha(row.receipt_json);
-    });
-    const res = buildAuditPackage(store, { audit_id: AUDIT, out: join(tempDir('kl-va-late-pkg-'), 'p'), timestamps_dir: tsDir, tsa_roots: [tsa.root.pem] });
-    store.close();
-    expect(res.claims.find((c) => c.claim === 'harness_frozen_before_runs')).toMatchObject({ declared: false, why: expect.stringMatching(/is first committed by 01-call-measured together with 3 run\(s\)/) });
-    expect(res.check.ok).toBe(true);
   });
 
   it('a run under another harness digest fails the ordering', async () => {
@@ -529,33 +871,24 @@ describe('verify-audit: claims, ordering, run sequence and the v1 convention', (
 
   it('run sequence: a gap, a count that differs from planned_runs, interruptions that disagree with claims.json', async () => {
     const gap = await build('milestones', { runSeqs: [1, 2, 4] });
-    const g = verifyAudit(gap.pkg, trustOpts(gap));
-    expect(g.checks.find((c) => c.check === 'run sequence')).toMatchObject({ status: 'fail', evidence: 'run_seq is not contiguous: 3 missing of 1..4' });
-    expect(claimStatus(g)).toMatchObject({ run_sequence: 'fail', harness_frozen_before_runs: 'pass' });
-    expect(gap.pack.check.ok).toBe(false); // the packager sees it too
-
+    expect(verifyAudit(gap.pkg, trustOpts(gap)).checks.find((c) => c.check === 'run sequence')).toMatchObject({ status: 'fail', evidence: 'run_seq is not contiguous: 3 missing of 1..4' });
     const short = await build('milestones', { plannedRuns: 5 });
     expect(verifyAudit(short.pkg, trustOpts(short)).checks.find((c) => c.check === 'run sequence')!.evidence).toBe('3 run(s) recorded; declared 5 (planned_runs)');
-
     const good = await build('milestones');
     const d = copyPkg(good);
-    const claims = JSON.parse(readFileSync(join(d, 'claims.json'), 'utf8')) as { runs: { interruptions: unknown[] } };
-    claims.runs.interruptions = [];
-    rewrite(join(d, 'claims.json'), JSON.stringify(claims));
+    setClaims(d, (c) => {
+      (c.runs as { interruptions: unknown[] }).interruptions = [];
+    });
     resign(d, good.dataDir);
-    const r = verifyAudit(d, trustOpts(good));
-    expect(r.run_sequence).toMatchObject({ status: 'fail', problem: 'claims.json lists interruptions for run(s) none; the bundle records them for 3' });
+    expect(verifyAudit(d, trustOpts(good)).run_sequence).toMatchObject({ status: 'fail', problem: 'claims.json lists interruptions for run(s) none; the bundle records them for 3' });
   });
 
-  it('an expired TSA certificate fails at the current time and passes with --tsa-at-gentime', async () => {
-    const old = [makeTsa({ name: 'Old', signerNotBefore: new Date('2020-01-01T00:00:00Z'), signerNotAfter: new Date('2021-01-01T00:00:00Z') })];
-    const f = await build('milestones', { tsas: old, genTime: (i) => new Date(Date.UTC(2020, 5, 1, 0, 0, i)) });
+  it('an expired TSA certificate fails at the current time', async () => {
+    const old = [1, 2].map((n) => makeTsa({ name: `Old${n}`, signerNotBefore: new Date('2020-01-01T00:00:00Z'), signerNotAfter: new Date('2021-01-01T00:00:00Z') }));
+    const f = await build('no-freeze', { tsas: old, genTime: (i) => new Date(Date.UTC(2020, 5, 1, 0, 0, i)) });
     const now = cli(['verify-audit', f.pkg, ...trustArgs(f)]);
     expect(now.code).toBe(1);
-    expect(now.out).toMatch(/FAIL {2}RFC 3161 alpha +certificate CN=Old TSA Signer is not valid at/);
-    const at = cli(['verify-audit', f.pkg, ...trustArgs(f), '--tsa-at-gentime']);
-    expect(at.code).toBe(0);
-    expect(at.out).toContain('validity checked at genTime');
+    expect(now.out).toMatch(/FAIL {2}RFC 3161 alpha +certificate CN=Old1 TSA Signer is not valid at/);
   });
 });
 
@@ -648,10 +981,10 @@ describe('RFC 3161: real Sectigo and DigiCert tokens against the shipped roots',
       expect(verifyTimestamp(readFileSync(join(dir, t)), { message: receipt, roots: pins(own), now: at }).ok).toBe(true);
       expect(verifyTimestamp(readFileSync(join(dir, t)), { message: receipt, roots: pins(other), now: at }).problem).toMatch(/does not chain to a trusted TSA root/);
     }
-    // the self-signed R46 alone is enough for Sectigo: its key is the cross-signed R46's
+    // with only the self-signed R46 pinned, the embedded cross-signed R46 is an unpinned, unused certificate: refused
     const t = tokens.find((x) => x.includes('sectigo'))!;
     const r46 = SHIPPED_TSA_ROOTS.find((r) => r.subject.includes('R46 (self-signed)'))!.pem;
-    expect(verifyTimestamp(readFileSync(join(dir, t)), { message: readFileSync(join(dir, `${t.split('.')[0]}.receipt.json`)), roots: [r46], now: at }).ok).toBe(true);
+    expect(verifyTimestamp(readFileSync(join(dir, t)), { message: readFileSync(join(dir, `${t.split('.')[0]}.receipt.json`)), roots: [r46], now: at }).problem).toMatch(/embedded certificate .*Sectigo Public Time Stamping Root R46 is neither on the path nor a pinned/);
   });
 
   it('fails for other bytes, and once the chain has expired (unless checked at genTime)', () => {
@@ -702,6 +1035,82 @@ describe('RFC 3161: certificate profile', () => {
   });
 });
 
+describe('review probes P4d–P4g: certificate paths and DER', () => {
+  const at = { now: new Date('2030-01-01T00:00:00Z') };
+  const check = (tsa: TestTsa) => verifyTimestamp(tsa.stamp('m'), { message: 'm', roots: [tsa.root.pem], ...at });
+
+  it('P4d: pathLenConstraint is enforced', () => {
+    const v = check(makeTsa({ intermediates: [{ pathLen: 0 }, {}] }));
+    expect(v.problem).toBe('certificate CN=Test TSA CA allows 0 intermediate(s) below it (pathLenConstraint); the path has 1');
+    expect(check(makeTsa({ intermediates: [{ pathLen: 1 }, {}] })).ok).toBe(true);
+  });
+
+  it('P4e: a signer with cA=TRUE, or without a digitalSignature / nonRepudiation keyUsage, is refused', () => {
+    expect(check(makeTsa({ signer: { ca: true, keyUsage: 0x86 } })).problem).toBe('signing certificate CN=Test TSA Signer is a CA certificate (cA=TRUE)');
+    expect(check(makeTsa({ signer: { keyUsage: 0x04 } })).problem).toMatch(/keyUsage must allow digitalSignature or nonRepudiation/);
+    expect(check(makeTsa({ signer: { keyUsage: undefined } as never })).problem).toMatch(/keyUsage must allow/);
+  });
+
+  it('an embedded certificate that is neither on the path nor pinned is refused', () => {
+    const stray = makeTsa({ name: 'Stray' }).root;
+    expect(check(makeTsa({ extraCerts: [stray] })).problem).toBe('embedded certificate CN=Stray TSA Root is neither on the path nor a pinned or known TSA chain certificate');
+  });
+
+  it('readTime refuses out-of-range calendar fields', () => {
+    for (const t of ['20260231000000Z', '20261301000000Z', '20261109250000Z', '20261109236000Z', '20261109235960Z']) {
+      expect(() => readTime({ tag: TAG.GENERALIZED_TIME, constructed: false, bytes: Buffer.alloc(0), value: Buffer.from(t, 'latin1') })).toThrow(/not a valid calendar time/);
+    }
+    expect(readTime({ tag: TAG.GENERALIZED_TIME, constructed: false, bytes: Buffer.alloc(0), value: Buffer.from('20280229235959Z', 'latin1') }).toISOString()).toBe('2028-02-29T23:59:59.000Z');
+  });
+
+  const dir = join(__dirname, 'fixtures', 'verify-audit', 'real-tsa');
+  const roots = SHIPPED_TSA_ROOTS.map((r) => r.pem);
+  it('P4g: no single-bit flip of a real Sectigo or DigiCert token verifies', () => {
+    for (const t of ['01-harness-frozen.sectigo.tsr', '01-harness-frozen.digicert.tsr']) {
+      const base = readFileSync(join(dir, t));
+      const message = readFileSync(join(dir, `${t.split('.')[0]}.receipt.json`));
+      const at2 = new Date(Date.parse(inspectTimestamp(base).gen_time));
+      expect(verifyTimestamp(base, { message, roots, at: at2 }).ok).toBe(true);
+      const accepted: number[] = [];
+      for (let p = 0; p < base.length; p++) {
+        const b = Buffer.from(base);
+        b[p] = b[p]! ^ 0x01;
+        if (verifyTimestamp(b, { message, roots, at: at2 }).ok) accepted.push(p);
+      }
+      expect(accepted, t).toEqual([]);
+    }
+  });
+
+  it('P4g: random mutations, truncations, bogus lengths and trailing bytes never verify and never throw', () => {
+    let seed = 12345;
+    const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+    for (const t of readdirSync(dir).filter((x) => x.endsWith('.tsr'))) {
+      const base = readFileSync(join(dir, t));
+      const message = readFileSync(join(dir, `${t.split('.')[0]}.receipt.json`));
+      const at2 = new Date(Date.parse(inspectTimestamp(base).gen_time));
+      for (let k = 0; k < 400; k++) {
+        const b = Buffer.from(base);
+        let input: Buffer = b;
+        const mode = k % 4;
+        if (mode === 0) for (let m = 0; m < 1 + Math.floor(rnd() * 3); m++) b[Math.floor(rnd() * b.length)] = Math.floor(rnd() * 256);
+        if (mode === 1) input = b.subarray(0, Math.floor(rnd() * b.length));
+        if (mode === 2) {
+          const p = Math.floor(rnd() * (b.length - 4));
+          b[p] = 0x84;
+          b[p + 1] = 0xff;
+          b[p + 2] = 0xff;
+          b[p + 3] = 0xff;
+        }
+        if (mode === 3) input = Buffer.concat([b, Buffer.alloc(1 + Math.floor(rnd() * 64), 0x30)]);
+        if (input.equals(base)) continue;
+        const v = verifyTimestamp(input, { message, roots, at: at2 });
+        expect(v.ok, `${t} mutation ${k}`).toBe(false);
+      }
+    }
+    expect(verifyTimestamp(Buffer.concat([Buffer.from([0x30, 0x84, 0x7f, 0xff, 0xff, 0xff]), Buffer.alloc(300 * 1024)]), { message: 'x', roots: [] }).problem).toMatch(/limit is/);
+  });
+});
+
 describe('shipped trust', () => {
   it('the genesis anchor key pin derives its key id and fingerprint; the TSA CAs match their fingerprints', () => {
     const prod = SHIPPED_SERVICE_KEYS['https://anchor.isokron.ai']!;
@@ -710,6 +1119,9 @@ describe('shipped trust', () => {
       createHash('sha256').update(new X509Certificate(SHIPPED_TSA_ROOTS[1]!.pem).publicKey.export({ type: 'spki', format: 'der' })).digest('hex'),
     ); // both R46 forms are one key
     expect(prod[0]!.spki_sha256).toBe('3dca1ecf66c2993e534ff08fe350dc9368ca52042e38b20a9d58cd7c2b7b3367');
+    // verify-audit's compiled genesis pin is that key with its valid_from (isokron-anchor src/core/genesis.ts)
+    expect(formatGenesisPin(PRODUCTION_GENESIS)).toBe(`${prod[0]!.spki_sha256}@${prod[0]!.valid_from}`);
+    expect(chainIdFromPublicKeyPem(prod[0]!.public_key_pem)).toBe(PRODUCTION_GENESIS.sha256);
     expect(serviceKeyIdFromPem(prod[0]!.public_key_pem)).toBe('anchor-ed25519-3dca1ecf66c2993e');
     expect(SHIPPED_SERVICE_KEY_PINS['https://anchor.isokron.ai']).toEqual([prod[0]!.public_key_pem]);
     for (const r of SHIPPED_TSA_ROOTS) {

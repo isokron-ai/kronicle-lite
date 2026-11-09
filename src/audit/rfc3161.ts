@@ -57,6 +57,7 @@ import {
   ctx,
   type Tlv,
 } from './der.js';
+import { SHIPPED_TSA_EXTRAS } from './tsa-roots.js';
 
 export const OID = {
   signedData: '1.2.840.113549.1.7.2',
@@ -129,6 +130,8 @@ export interface VerifyTimestampOptions {
   at?: 'now' | 'gentime' | Date;
   /** Clock for 'now' (tests). */
   now?: Date;
+  /** SHA-256 fingerprints of certificates a token may embed without using them (SHIPPED_TSA_EXTRAS). */
+  known_extras?: readonly string[];
 }
 
 /** The certificate's subject DN, one line ("C=GB, O=Sectigo Limited, CN=…"). */
@@ -153,7 +156,9 @@ function tokenOf(top: Tlv): Tlv {
   if (k[0]?.tag === TAG.OID) return top;
   const status = children(expect(k[0], TAG.SEQUENCE, 'PKIStatusInfo'));
   const s = readSmallInt(expect(status[0], TAG.INTEGER, 'PKIStatus'));
-  if (s !== 0 && s !== 1) throw new DerError(`the TSA did not grant the request (PKIStatus ${s})`);
+  // Only "granted": nothing in our request is modifiable, so grantedWithMods (1) is refused too.
+  if (s !== 0) throw new DerError(`the TSA did not grant the request as made (PKIStatus ${s})`);
+  if (k.length !== 2) throw new DerError('timestamp reply has unexpected fields');
   return expect(k[1], TAG.SEQUENCE, 'timeStampToken');
 }
 
@@ -198,8 +203,12 @@ function parseToken(token: Tlv): ParsedToken {
   if (readOid(expect(ci[0], TAG.OID, 'contentType')) !== OID.signedData) throw new DerError('the token is not CMS SignedData');
   const sd = children(expect(children(expect(ci[1], ctx(0), 'SignedData wrapper'))[0], TAG.SEQUENCE, 'SignedData'));
   let i = 0;
-  expect(sd[i++], TAG.INTEGER, 'SignedData version');
-  expect(sd[i++], TAG.SET, 'digestAlgorithms');
+  if (readSmallInt(expect(sd[i++], TAG.INTEGER, 'SignedData version')) !== 3) throw new DerError('SignedData version is not 3 (RFC 5652 with id-ct-TSTInfo content)');
+  const digestAlgorithms = children(expect(sd[i++], TAG.SET, 'digestAlgorithms')).map((a) => {
+    const d = algOid(a, 'digestAlgorithms');
+    if (d.params && (d.params.tag !== TAG.NULL || d.params.value.length)) throw new DerError('a digestAlgorithms entry carries parameters');
+    return d.oid;
+  });
   const eci = children(expect(sd[i++], TAG.SEQUENCE, 'encapContentInfo'));
   if (readOid(expect(eci[0], TAG.OID, 'eContentType')) !== OID.tstInfo) throw new DerError('the signed content is not a TSTInfo');
   const eContent = expect(children(expect(eci[1], ctx(0), 'eContent wrapper'))[0], TAG.OCTET_STRING, 'eContent');
@@ -207,7 +216,7 @@ function parseToken(token: Tlv): ParsedToken {
   const certs: ParsedToken['certs'] = [];
   if (sd[i]?.tag === ctx(0)) {
     for (const c of children(sd[i++]!)) {
-      if (c.tag !== TAG.SEQUENCE) continue; // other CertificateChoices (attribute certificates) are not used
+      if (c.tag !== TAG.SEQUENCE) throw new DerError('the token embeds a certificate choice other than an X.509 certificate');
       const derBytes = Buffer.from(c.bytes);
       certs.push({ cert: new X509Certificate(derBytes), der: derBytes, ...certIds(derBytes) });
     }
@@ -215,9 +224,12 @@ function parseToken(token: Tlv): ParsedToken {
   if (sd[i]?.tag === ctx(1)) i++; // crls
   const signerInfos = children(expect(sd[i], TAG.SET, 'signerInfos'));
   if (signerInfos.length !== 1) throw new DerError(`the token has ${signerInfos.length} signers; RFC 3161 requires exactly one`);
+  if (sd.length !== i + 1) throw new DerError('SignedData has unexpected fields');
   const si = children(expect(signerInfos[0], TAG.SEQUENCE, 'SignerInfo'));
-  let j = 1; // version
+  const siVersion = readSmallInt(expect(si[0], TAG.INTEGER, 'SignerInfo version'));
+  let j = 1;
   const sidT = si[j++]!;
+  if (siVersion !== (sidT.tag === TAG.SEQUENCE ? 1 : 3)) throw new DerError(`SignerInfo version ${siVersion} does not match its sid form (RFC 5652 §5.3)`);
   let sid: ParsedToken['signer']['sid'];
   if (sidT.tag === TAG.SEQUENCE) {
     const s = children(sidT);
@@ -225,14 +237,23 @@ function parseToken(token: Tlv): ParsedToken {
   } else if (sidT.tag === 0x80) {
     sid = { ski: Buffer.from(sidT.value) };
   } else throw new DerError('SignerInfo.sid is neither issuerAndSerialNumber nor subjectKeyIdentifier');
-  const digestAlg = hashName(algOid(si[j++], 'SignerInfo.digestAlgorithm').oid, 'SignerInfo.digestAlgorithm');
+  const dAlg = algOid(si[j++], 'SignerInfo.digestAlgorithm');
+  if (dAlg.params && dAlg.params.tag !== TAG.NULL) throw new DerError('SignerInfo.digestAlgorithm carries parameters');
+  if (dAlg.params && dAlg.params.value.length) throw new DerError('SignerInfo.digestAlgorithm NULL parameter is not empty');
+  const digestAlg = hashName(dAlg.oid, 'SignerInfo.digestAlgorithm');
+  if (!digestAlgorithms.includes(dAlg.oid)) throw new DerError('SignedData.digestAlgorithms does not list the signer\'s digest algorithm');
   const signedAttrs = expect(si[j++], ctx(0), 'signedAttrs');
   const sigAlg = algOid(si[j++], 'SignerInfo.signatureAlgorithm');
+  if (sigAlg.oid !== OID.rsaPss && sigAlg.params && !(sigAlg.params.tag === TAG.NULL && sigAlg.params.value.length === 0 && (sigAlg.oid === OID.rsaEncryption || sigAlg.oid === OID.sha256WithRSA || sigAlg.oid === OID.sha384WithRSA || sigAlg.oid === OID.sha512WithRSA))) {
+    throw new DerError('SignerInfo.signatureAlgorithm carries unexpected parameters');
+  }
   const signature = Buffer.from(expect(si[j++], TAG.OCTET_STRING, 'signature').value);
+  if (si.length > j + 1 || (si.length === j + 1 && si[j]!.tag !== ctx(1))) throw new DerError('SignerInfo has unexpected fields');
 
   // TSTInfo
   const t = children(expect(parseDer(tstInfoDer), TAG.SEQUENCE, 'TSTInfo'));
-  let k = 1; // version
+  if (readSmallInt(expect(t[0], TAG.INTEGER, 'TSTInfo version')) !== 1) throw new DerError('TSTInfo version is not 1');
+  let k = 1;
   const policy = readOid(expect(t[k++], TAG.OID, 'TSTInfo.policy'));
   const mi = children(expect(t[k++], TAG.SEQUENCE, 'messageImprint'));
   const imprintAlg = hashName(algOid(mi[0], 'messageImprint.hashAlgorithm').oid, 'messageImprint');
@@ -302,6 +323,29 @@ function verifySignedAttrs(p: ParsedToken, key: KeyObject): void {
   if (!ok) throw new DerError('the TSA signature does not verify');
 }
 
+/** Every certificate the ESS signing-certificate attribute names (the first is the signer's), with its hash algorithm. */
+function essCertHashes(p: ParsedToken): { alg: 'sha1' | 'sha256' | 'sha384' | 'sha512'; hash: Buffer }[] {
+  const attrs = new Map<string, Tlv>();
+  for (const a of children(p.signer.signedAttrs)) {
+    const f = children(a);
+    const v = children(f[1]!)[0];
+    if (v) attrs.set(readOid(f[0]!), v);
+  }
+  const v2 = attrs.get(OID.signingCertificateV2);
+  if (v2) {
+    return children(expect(children(expect(v2, TAG.SEQUENCE, 'SigningCertificateV2'))[0], TAG.SEQUENCE, 'certs')).map((c) => {
+      const id = children(expect(c, TAG.SEQUENCE, 'ESSCertIDv2'));
+      if (id[0]?.tag === TAG.SEQUENCE) return { alg: hashName(algOid(id[0], 'ESSCertIDv2.hashAlgorithm').oid, 'ESSCertIDv2'), hash: Buffer.from(expect(id[1], TAG.OCTET_STRING, 'certHash').value) };
+      return { alg: 'sha256' as const, hash: Buffer.from(expect(id[0], TAG.OCTET_STRING, 'certHash').value) };
+    });
+  }
+  const v1 = attrs.get(OID.signingCertificate);
+  if (v1) {
+    return children(expect(children(expect(v1, TAG.SEQUENCE, 'SigningCertificate'))[0], TAG.SEQUENCE, 'certs')).map((c) => ({ alg: 'sha1' as const, hash: Buffer.from(expect(children(expect(c, TAG.SEQUENCE, 'ESSCertID'))[0], TAG.OCTET_STRING, 'certHash').value) }));
+  }
+  throw new DerError('signed attributes carry no ESS signing-certificate (RFC 3161 §2.4.1)');
+}
+
 function essCertHash(p: ParsedToken): { alg: 'sha1' | 'sha256' | 'sha384' | 'sha512'; hash: Buffer } {
   const attrs = new Map<string, Tlv>();
   for (const a of children(p.signer.signedAttrs)) {
@@ -366,6 +410,21 @@ const ekuOf = (p: CertProfile): { critical: boolean; oids: string[] } | null => 
   const e = p.extensions.find((x) => x.oid === '2.5.29.37');
   return e ? { critical: e.critical, oids: children(parseDer(e.value)).map(readOid) } : null;
 };
+/** The first keyUsage byte (bit 0 = 0x80 digitalSignature … bit 5 = 0x04 keyCertSign), or null when absent. */
+const keyUsageByte = (p: CertProfile): number | null => {
+  const e = p.extensions.find((x) => x.oid === '2.5.29.15');
+  if (!e) return null;
+  const bits = expect(parseDer(e.value), TAG.BIT_STRING, 'keyUsage').value;
+  return bits.length >= 2 ? bits[1]! : 0;
+};
+/** basicConstraints pathLenConstraint, or null when absent. */
+function pathLenOf(c: X509Certificate): number | null {
+  const e = certProfile(c).extensions.find((x) => x.oid === '2.5.29.19');
+  if (!e) return null;
+  const f = children(parseDer(e.value));
+  const n = f.find((x) => x.tag === TAG.INTEGER);
+  return n ? readSmallInt(n) : null;
+}
 /** keyCertSign (bit 5) set in keyUsage; false when keyUsage is absent. */
 const keyCertSign = (p: CertProfile): boolean => {
   const e = p.extensions.find((x) => x.oid === '2.5.29.15');
@@ -385,6 +444,9 @@ function checkProfile(c: X509Certificate, role: 'signer' | 'intermediate' | 'anc
   if (role === 'signer') {
     // RFC 3161 §2.3: exactly one extended key usage, timeStamping, marked critical.
     if (!eku || !eku.critical || eku.oids.length !== 1 || eku.oids[0] !== OID.timeStamping) throw new DerError(`signing certificate ${name}: extended key usage must be critical and timeStamping only`);
+    if (c.ca) throw new DerError(`signing certificate ${name} is a CA certificate (cA=TRUE)`);
+    const ku = keyUsageByte(p);
+    if (ku === null || (ku & 0xc0) === 0 || (ku & 0x06) !== 0) throw new DerError(`signing certificate ${name}: keyUsage must allow digitalSignature or nonRepudiation and not certificate or CRL signing`);
   } else if (role === 'intermediate') {
     if (!c.ca) throw new DerError(`intermediate ${name} is not a CA certificate`);
     if (eku && !eku.oids.includes(OID.timeStamping)) throw new DerError(`intermediate ${name}: extended key usage does not include timeStamping`);
@@ -418,6 +480,10 @@ export function verifyTimestamp(der: Buffer, opts: VerifyTimestampOptions): Time
     verifySignedAttrs(p, signer.cert.publicKey);
     const ess = essCertHash(p);
     if (!createHash(ess.alg).update(signer.der).digest().equals(ess.hash)) throw new DerError('the ESS signing-certificate does not name the signing certificate');
+    // Every certificate the signed ESS list names must be embedded unchanged (as OpenSSL requires).
+    for (const e of essCertHashes(p).slice(1)) {
+      if (!p.certs.some((c) => createHash(e.alg).update(c.der).digest().equals(e.hash))) throw new DerError('a certificate named in the ESS signing-certificate attribute is not embedded unchanged');
+    }
     checkProfile(signer.cert, 'signer');
     if (!validAt(signer.cert, p.genTime)) throw new DerError(`genTime ${p.info.gen_time} is outside the signing certificate's validity (${signer.cert.validFrom} to ${signer.cert.validTo})`);
 
@@ -452,6 +518,19 @@ export function verifyTimestamp(der: Buffer, opts: VerifyTimestampOptions): Time
     }
     for (const c of path.slice(1)) checkProfile(c, 'intermediate');
     checkProfile(anchor, 'anchor');
+    // pathLenConstraint: a CA at path index i (0 = signer) has i - 1 intermediates below it.
+    for (const [idx, c] of [...path, anchor].entries()) {
+      if (idx === 0) continue;
+      const pl = pathLenOf(c);
+      if (pl !== null && idx - 1 > pl) throw new DerError(`certificate ${subjectOf(c)} allows ${pl} intermediate(s) below it (pathLenConstraint); the path has ${idx - 1}`);
+    }
+    // Certificates embedded but not used for this path must be pinned or known chain certificates: an
+    // unsigned, unchecked certificate cannot ride along in a token that verifies.
+    const known = new Set([...roots.map((r) => r.fingerprint256), ...(opts.known_extras ?? SHIPPED_TSA_EXTRAS.map((x) => x.sha256))].map((f) => f.replace(/:/g, '').toLowerCase()));
+    for (const c of p.certs) {
+      if (path.some((x) => x.raw.equals(c.cert.raw)) || c.cert.raw.equals(anchor.raw)) continue;
+      if (!known.has(fingerprint256(c.cert))) throw new DerError(`embedded certificate ${subjectOf(c.cert)} is neither on the path nor a pinned or known TSA chain certificate`);
+    }
     out.ok = true;
   } catch (err) {
     out.problem = err instanceof Error ? err.message : String(err);

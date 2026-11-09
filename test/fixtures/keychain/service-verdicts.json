@@ -1,0 +1,816 @@
+{
+ "generated_by": "isokron-anchor feat/audit-anchoring f289c6b: scripts/rotate-key.mjs rotation()/revoke() judged by src/core/servicekeys.ts checkKeyChain",
+ "genesis": {
+  "sha256": "927cd80b86e0ffe9441ba4f41339f20cdfcf55da5063a5a0f13d35cb4b4a83c7",
+  "valid_from": "2026-11-01T00:00:00.000Z"
+ },
+ "cases": {
+  "genesis_only": {
+   "keys": [
+    {
+     "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAB8uUt9f+cqpbAs7CZffP63Irm/hzPupo1NNuc49/VPU=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-11-01T00:00:00.000Z",
+     "status": "active"
+    }
+   ],
+   "service": {
+    "ok": true,
+    "usable": true,
+    "detail": "intact: 1 key(s), each verified back to the pinned genesis key",
+    "entries": [
+     {
+      "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+      "state": "genesis",
+      "detail": "genesis key; SHA-256(SPKI) matches the pinned fingerprint; valid_from 2026-11-01T00:00:00.000Z (pinned); current key",
+      "revoked_ancestor": null
+     }
+    ]
+   }
+  },
+  "one_rotation": {
+   "keys": [
+    {
+     "key_id": "anchor-ed25519-88c14e49d81c7316",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEABvHhG621kEv2uJ1KN0gWDwk5JGHb19cwlkHuHEgJiyQ=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-12-01T00:00:00.000Z",
+     "status": "active",
+     "successor_signature": "dXH5D1T5WiGkLEKml87XzusXBSfm78seInIfKU2w/fYzC2rP4xGYFBsxWs8qnrZvdZQpUxYuw1jKbtsZoXN9DQ==",
+     "signed_by": "anchor-ed25519-927cd80b86e0ffe9"
+    },
+    {
+     "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAB8uUt9f+cqpbAs7CZffP63Irm/hzPupo1NNuc49/VPU=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-11-01T00:00:00.000Z",
+     "valid_to": "2026-12-01T00:00:00.000Z",
+     "status": "retired",
+     "retirement_signature": "DHT+3Hc4D5WBib31INouSHUiRj+CfB+PhQk2yLzdB1a3txZMlJrS9EFwOUiBMvODHLOfpuXPMpX0pAzXnwVuCA==",
+     "retirement_signed_by": "anchor-ed25519-88c14e49d81c7316"
+    }
+   ],
+   "service": {
+    "ok": true,
+    "usable": true,
+    "detail": "intact: 2 key(s), each verified back to the pinned genesis key",
+    "entries": [
+     {
+      "key_id": "anchor-ed25519-88c14e49d81c7316",
+      "state": "verified",
+      "detail": "transition signed by anchor-ed25519-927cd80b86e0ffe9, which ended at 2026-12-01T00:00:00.000Z; chain verified to the genesis; current key",
+      "revoked_ancestor": null
+     },
+     {
+      "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+      "state": "genesis",
+      "detail": "genesis key; SHA-256(SPKI) matches the pinned fingerprint; valid_from 2026-11-01T00:00:00.000Z (pinned); retired from 2026-12-01T00:00:00.000Z, statement signed by successor anchor-ed25519-88c14e49d81c7316",
+      "revoked_ancestor": null
+     }
+    ]
+   }
+  },
+  "two_rotations": {
+   "keys": [
+    {
+     "key_id": "anchor-ed25519-c2b175f299033f0c",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAEQVd8qcsCutxGmFZmauH4WTnHa+mZ3MkghvJ+LwAiK8=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2027-01-01T00:00:00.000Z",
+     "status": "active",
+     "successor_signature": "xObrOfjAHaA/TNT1c91AQsDWKMpuEo9cnBUAdHAjYLqYSf/n+yQpmdYveG7/Zp9q67TsLzGBBvDrmrGLARFoCw==",
+     "signed_by": "anchor-ed25519-88c14e49d81c7316"
+    },
+    {
+     "key_id": "anchor-ed25519-88c14e49d81c7316",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEABvHhG621kEv2uJ1KN0gWDwk5JGHb19cwlkHuHEgJiyQ=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-12-01T00:00:00.000Z",
+     "status": "retired",
+     "successor_signature": "dXH5D1T5WiGkLEKml87XzusXBSfm78seInIfKU2w/fYzC2rP4xGYFBsxWs8qnrZvdZQpUxYuw1jKbtsZoXN9DQ==",
+     "signed_by": "anchor-ed25519-927cd80b86e0ffe9",
+     "valid_to": "2027-01-01T00:00:00.000Z",
+     "retirement_signature": "l2Y42dPw07NZ+gY+8AfsrmWbUTTpdYuxNahJWv+OdHASvUoGB2la7gyJGqD98GjIpQZS+dCeFMzv/5+G8JbfBA==",
+     "retirement_signed_by": "anchor-ed25519-c2b175f299033f0c"
+    },
+    {
+     "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAB8uUt9f+cqpbAs7CZffP63Irm/hzPupo1NNuc49/VPU=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-11-01T00:00:00.000Z",
+     "valid_to": "2026-12-01T00:00:00.000Z",
+     "status": "retired",
+     "retirement_signature": "DHT+3Hc4D5WBib31INouSHUiRj+CfB+PhQk2yLzdB1a3txZMlJrS9EFwOUiBMvODHLOfpuXPMpX0pAzXnwVuCA==",
+     "retirement_signed_by": "anchor-ed25519-88c14e49d81c7316"
+    }
+   ],
+   "service": {
+    "ok": true,
+    "usable": true,
+    "detail": "intact: 3 key(s), each verified back to the pinned genesis key",
+    "entries": [
+     {
+      "key_id": "anchor-ed25519-c2b175f299033f0c",
+      "state": "verified",
+      "detail": "transition signed by anchor-ed25519-88c14e49d81c7316, which ended at 2027-01-01T00:00:00.000Z; chain verified to the genesis; current key",
+      "revoked_ancestor": null
+     },
+     {
+      "key_id": "anchor-ed25519-88c14e49d81c7316",
+      "state": "verified",
+      "detail": "transition signed by anchor-ed25519-927cd80b86e0ffe9, which ended at 2026-12-01T00:00:00.000Z; chain verified to the genesis; retired from 2027-01-01T00:00:00.000Z, statement signed by successor anchor-ed25519-c2b175f299033f0c",
+      "revoked_ancestor": null
+     },
+     {
+      "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+      "state": "genesis",
+      "detail": "genesis key; SHA-256(SPKI) matches the pinned fingerprint; valid_from 2026-11-01T00:00:00.000Z (pinned); retired from 2026-12-01T00:00:00.000Z, statement signed by successor anchor-ed25519-88c14e49d81c7316",
+      "revoked_ancestor": null
+     }
+    ]
+   }
+  },
+  "revoked_middle": {
+   "keys": [
+    {
+     "key_id": "anchor-ed25519-c2b175f299033f0c",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAEQVd8qcsCutxGmFZmauH4WTnHa+mZ3MkghvJ+LwAiK8=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2027-01-01T00:00:00.000Z",
+     "status": "active",
+     "successor_signature": "xObrOfjAHaA/TNT1c91AQsDWKMpuEo9cnBUAdHAjYLqYSf/n+yQpmdYveG7/Zp9q67TsLzGBBvDrmrGLARFoCw==",
+     "signed_by": "anchor-ed25519-88c14e49d81c7316"
+    },
+    {
+     "key_id": "anchor-ed25519-88c14e49d81c7316",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEABvHhG621kEv2uJ1KN0gWDwk5JGHb19cwlkHuHEgJiyQ=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-12-01T00:00:00.000Z",
+     "status": "revoked",
+     "successor_signature": "dXH5D1T5WiGkLEKml87XzusXBSfm78seInIfKU2w/fYzC2rP4xGYFBsxWs8qnrZvdZQpUxYuw1jKbtsZoXN9DQ==",
+     "signed_by": "anchor-ed25519-927cd80b86e0ffe9",
+     "valid_to": "2027-01-01T00:00:00.000Z",
+     "retirement_signature": "YGfpxBsLgAt1yVJGl/qKrQWyaRMlRcE0VA26tKzD5CZaDohYuH2wC2x0CvuASrfq7crRs2f5y2IQiMe8Z7CsDQ==",
+     "retirement_signed_by": "anchor-ed25519-88c14e49d81c7316",
+     "compromised_since": "2026-12-20T00:00:00.000Z"
+    },
+    {
+     "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAB8uUt9f+cqpbAs7CZffP63Irm/hzPupo1NNuc49/VPU=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-11-01T00:00:00.000Z",
+     "valid_to": "2026-12-01T00:00:00.000Z",
+     "status": "retired",
+     "retirement_signature": "DHT+3Hc4D5WBib31INouSHUiRj+CfB+PhQk2yLzdB1a3txZMlJrS9EFwOUiBMvODHLOfpuXPMpX0pAzXnwVuCA==",
+     "retirement_signed_by": "anchor-ed25519-88c14e49d81c7316"
+    }
+   ],
+   "service": {
+    "ok": false,
+    "usable": true,
+    "detail": "2 key(s) verified back to the pinned genesis key, 1 revoked; 1 later key(s) not trusted because an earlier key was revoked",
+    "entries": [
+     {
+      "key_id": "anchor-ed25519-c2b175f299033f0c",
+      "state": "broken",
+      "detail": "signed by anchor-ed25519-88c14e49d81c7316, which is revoked; a key after a revoked key is not trusted",
+      "revoked_ancestor": "anchor-ed25519-88c14e49d81c7316"
+     },
+     {
+      "key_id": "anchor-ed25519-88c14e49d81c7316",
+      "state": "revoked",
+      "detail": "transition signed by anchor-ed25519-927cd80b86e0ffe9, which ended at 2026-12-01T00:00:00.000Z; chain verified to the genesis; REVOKED: compromised since 2026-12-20T00:00:00.000Z, valid_to 2027-01-01T00:00:00.000Z, statement signed by the key itself",
+      "revoked_ancestor": null
+     },
+     {
+      "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+      "state": "genesis",
+      "detail": "genesis key; SHA-256(SPKI) matches the pinned fingerprint; valid_from 2026-11-01T00:00:00.000Z (pinned); retired from 2026-12-01T00:00:00.000Z, statement signed by successor anchor-ed25519-88c14e49d81c7316",
+      "revoked_ancestor": null
+     }
+    ]
+   }
+  },
+  "revoked_middle_by_earlier_key": {
+   "keys": [
+    {
+     "key_id": "anchor-ed25519-c2b175f299033f0c",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAEQVd8qcsCutxGmFZmauH4WTnHa+mZ3MkghvJ+LwAiK8=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2027-01-01T00:00:00.000Z",
+     "status": "active",
+     "successor_signature": "xObrOfjAHaA/TNT1c91AQsDWKMpuEo9cnBUAdHAjYLqYSf/n+yQpmdYveG7/Zp9q67TsLzGBBvDrmrGLARFoCw==",
+     "signed_by": "anchor-ed25519-88c14e49d81c7316"
+    },
+    {
+     "key_id": "anchor-ed25519-88c14e49d81c7316",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEABvHhG621kEv2uJ1KN0gWDwk5JGHb19cwlkHuHEgJiyQ=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-12-01T00:00:00.000Z",
+     "status": "revoked",
+     "successor_signature": "dXH5D1T5WiGkLEKml87XzusXBSfm78seInIfKU2w/fYzC2rP4xGYFBsxWs8qnrZvdZQpUxYuw1jKbtsZoXN9DQ==",
+     "signed_by": "anchor-ed25519-927cd80b86e0ffe9",
+     "valid_to": "2027-01-01T00:00:00.000Z",
+     "retirement_signature": "dHcOtgxNToeqFTh3r2aPg13u06Pl2xPzx6xJZdF1NytqM8A2K+vVn2E4ka/OVIl5IZDWJrYSh9FQ0t8XzuksBg==",
+     "retirement_signed_by": "anchor-ed25519-927cd80b86e0ffe9",
+     "compromised_since": "2026-12-20T00:00:00.000Z"
+    },
+    {
+     "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAB8uUt9f+cqpbAs7CZffP63Irm/hzPupo1NNuc49/VPU=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-11-01T00:00:00.000Z",
+     "valid_to": "2026-12-01T00:00:00.000Z",
+     "status": "retired",
+     "retirement_signature": "DHT+3Hc4D5WBib31INouSHUiRj+CfB+PhQk2yLzdB1a3txZMlJrS9EFwOUiBMvODHLOfpuXPMpX0pAzXnwVuCA==",
+     "retirement_signed_by": "anchor-ed25519-88c14e49d81c7316"
+    }
+   ],
+   "service": {
+    "ok": false,
+    "usable": true,
+    "detail": "2 key(s) verified back to the pinned genesis key, 1 revoked; 1 later key(s) not trusted because an earlier key was revoked",
+    "entries": [
+     {
+      "key_id": "anchor-ed25519-c2b175f299033f0c",
+      "state": "broken",
+      "detail": "signed by anchor-ed25519-88c14e49d81c7316, which is revoked; a key after a revoked key is not trusted",
+      "revoked_ancestor": "anchor-ed25519-88c14e49d81c7316"
+     },
+     {
+      "key_id": "anchor-ed25519-88c14e49d81c7316",
+      "state": "revoked",
+      "detail": "transition signed by anchor-ed25519-927cd80b86e0ffe9, which ended at 2026-12-01T00:00:00.000Z; chain verified to the genesis; REVOKED: compromised since 2026-12-20T00:00:00.000Z, valid_to 2027-01-01T00:00:00.000Z, statement signed by anchor-ed25519-927cd80b86e0ffe9",
+      "revoked_ancestor": null
+     },
+     {
+      "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+      "state": "genesis",
+      "detail": "genesis key; SHA-256(SPKI) matches the pinned fingerprint; valid_from 2026-11-01T00:00:00.000Z (pinned); retired from 2026-12-01T00:00:00.000Z, statement signed by successor anchor-ed25519-88c14e49d81c7316",
+      "revoked_ancestor": null
+     }
+    ]
+   }
+  },
+  "revoked_head": {
+   "keys": [
+    {
+     "key_id": "anchor-ed25519-88c14e49d81c7316",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEABvHhG621kEv2uJ1KN0gWDwk5JGHb19cwlkHuHEgJiyQ=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-12-01T00:00:00.000Z",
+     "status": "revoked",
+     "successor_signature": "dXH5D1T5WiGkLEKml87XzusXBSfm78seInIfKU2w/fYzC2rP4xGYFBsxWs8qnrZvdZQpUxYuw1jKbtsZoXN9DQ==",
+     "signed_by": "anchor-ed25519-927cd80b86e0ffe9",
+     "valid_to": "2026-12-21T00:00:00.000Z",
+     "compromised_since": "2026-12-20T00:00:00.000Z",
+     "retirement_signature": "tMcaJjCEGIk5QNcDxjmXYntHPjBgk4u1fnBQIAEYjoRokIgyDlNW8QLJAGdaqLqkEYl+m9Gzui8+XAL/HfVfDg==",
+     "retirement_signed_by": "anchor-ed25519-88c14e49d81c7316"
+    },
+    {
+     "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAB8uUt9f+cqpbAs7CZffP63Irm/hzPupo1NNuc49/VPU=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-11-01T00:00:00.000Z",
+     "valid_to": "2026-12-01T00:00:00.000Z",
+     "status": "retired",
+     "retirement_signature": "DHT+3Hc4D5WBib31INouSHUiRj+CfB+PhQk2yLzdB1a3txZMlJrS9EFwOUiBMvODHLOfpuXPMpX0pAzXnwVuCA==",
+     "retirement_signed_by": "anchor-ed25519-88c14e49d81c7316"
+    }
+   ],
+   "service": {
+    "ok": true,
+    "usable": true,
+    "detail": "intact: 2 key(s), each verified back to the pinned genesis key; 1 revoked",
+    "entries": [
+     {
+      "key_id": "anchor-ed25519-88c14e49d81c7316",
+      "state": "revoked",
+      "detail": "transition signed by anchor-ed25519-927cd80b86e0ffe9, which ended at 2026-12-01T00:00:00.000Z; chain verified to the genesis; REVOKED: compromised since 2026-12-20T00:00:00.000Z, valid_to 2026-12-21T00:00:00.000Z, statement signed by the key itself",
+      "revoked_ancestor": null
+     },
+     {
+      "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+      "state": "genesis",
+      "detail": "genesis key; SHA-256(SPKI) matches the pinned fingerprint; valid_from 2026-11-01T00:00:00.000Z (pinned); retired from 2026-12-01T00:00:00.000Z, statement signed by successor anchor-ed25519-88c14e49d81c7316",
+      "revoked_ancestor": null
+     }
+    ]
+   }
+  },
+  "revoked_genesis": {
+   "keys": [
+    {
+     "key_id": "anchor-ed25519-88c14e49d81c7316",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEABvHhG621kEv2uJ1KN0gWDwk5JGHb19cwlkHuHEgJiyQ=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-12-01T00:00:00.000Z",
+     "status": "active",
+     "successor_signature": "dXH5D1T5WiGkLEKml87XzusXBSfm78seInIfKU2w/fYzC2rP4xGYFBsxWs8qnrZvdZQpUxYuw1jKbtsZoXN9DQ==",
+     "signed_by": "anchor-ed25519-927cd80b86e0ffe9"
+    },
+    {
+     "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAB8uUt9f+cqpbAs7CZffP63Irm/hzPupo1NNuc49/VPU=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-11-01T00:00:00.000Z",
+     "valid_to": "2026-12-01T00:00:00.000Z",
+     "status": "revoked",
+     "retirement_signature": "RBgtOAMssT+Q5cIlypMVqkERmyRnAdCYVjf16YxtqiO1yI3XWk4SAD9ctJyEkl3be70eiNm+IaEvFPqd7gRgDw==",
+     "retirement_signed_by": "anchor-ed25519-927cd80b86e0ffe9",
+     "compromised_since": "2026-11-15T00:00:00.000Z"
+    }
+   ],
+   "service": {
+    "ok": false,
+    "usable": true,
+    "detail": "1 key(s) verified back to the pinned genesis key, 1 revoked; 1 later key(s) not trusted because an earlier key was revoked",
+    "entries": [
+     {
+      "key_id": "anchor-ed25519-88c14e49d81c7316",
+      "state": "broken",
+      "detail": "signed by anchor-ed25519-927cd80b86e0ffe9, which is revoked; a key after a revoked key is not trusted",
+      "revoked_ancestor": "anchor-ed25519-927cd80b86e0ffe9"
+     },
+     {
+      "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+      "state": "revoked",
+      "detail": "genesis key; SHA-256(SPKI) matches the pinned fingerprint; valid_from 2026-11-01T00:00:00.000Z (pinned); REVOKED: compromised since 2026-11-15T00:00:00.000Z, valid_to 2026-12-01T00:00:00.000Z, statement signed by the key itself",
+      "revoked_ancestor": null
+     }
+    ]
+   }
+  },
+  "revoked_genesis_only": {
+   "keys": [
+    {
+     "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAB8uUt9f+cqpbAs7CZffP63Irm/hzPupo1NNuc49/VPU=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-11-01T00:00:00.000Z",
+     "valid_to": "2026-11-16T00:00:00.000Z",
+     "status": "revoked",
+     "successor_signature": null,
+     "signed_by": null,
+     "compromised_since": "2026-11-15T00:00:00.000Z",
+     "retirement_signature": "HSw+8RCYnlobEryjfw+E56eL8SlBn/mZ0QB8qiiPs3nOVB5QteX5fdePGjuTWHexchszwiHn0BXNevhlZ8wKCg==",
+     "retirement_signed_by": "anchor-ed25519-927cd80b86e0ffe9"
+    }
+   ],
+   "service": {
+    "ok": true,
+    "usable": true,
+    "detail": "intact: 1 key(s), each verified back to the pinned genesis key; 1 revoked",
+    "entries": [
+     {
+      "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+      "state": "revoked",
+      "detail": "genesis key; SHA-256(SPKI) matches the pinned fingerprint; valid_from 2026-11-01T00:00:00.000Z (pinned); REVOKED: compromised since 2026-11-15T00:00:00.000Z, valid_to 2026-11-16T00:00:00.000Z, statement signed by the key itself",
+      "revoked_ancestor": null
+     }
+    ]
+   }
+  },
+  "revoked_by_later_key": {
+   "keys": [
+    {
+     "key_id": "anchor-ed25519-c2b175f299033f0c",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAEQVd8qcsCutxGmFZmauH4WTnHa+mZ3MkghvJ+LwAiK8=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2027-01-01T00:00:00.000Z",
+     "status": "active",
+     "successor_signature": "xObrOfjAHaA/TNT1c91AQsDWKMpuEo9cnBUAdHAjYLqYSf/n+yQpmdYveG7/Zp9q67TsLzGBBvDrmrGLARFoCw==",
+     "signed_by": "anchor-ed25519-88c14e49d81c7316"
+    },
+    {
+     "key_id": "anchor-ed25519-88c14e49d81c7316",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEABvHhG621kEv2uJ1KN0gWDwk5JGHb19cwlkHuHEgJiyQ=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-12-01T00:00:00.000Z",
+     "status": "revoked",
+     "successor_signature": "dXH5D1T5WiGkLEKml87XzusXBSfm78seInIfKU2w/fYzC2rP4xGYFBsxWs8qnrZvdZQpUxYuw1jKbtsZoXN9DQ==",
+     "signed_by": "anchor-ed25519-927cd80b86e0ffe9",
+     "valid_to": "2027-01-01T00:00:00.000Z",
+     "retirement_signature": "kCr0+kqbyMwnz5GRvscm1VxiKdX1GdjxZiDGt7FJ+2EQ/+Ij8PO555moRI6WTI/F1HGAvzKnvypqH3QjAWZWDw==",
+     "retirement_signed_by": "anchor-ed25519-c2b175f299033f0c",
+     "compromised_since": "2026-12-20T00:00:00.000Z"
+    },
+    {
+     "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAB8uUt9f+cqpbAs7CZffP63Irm/hzPupo1NNuc49/VPU=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-11-01T00:00:00.000Z",
+     "valid_to": "2026-12-01T00:00:00.000Z",
+     "status": "retired",
+     "retirement_signature": "DHT+3Hc4D5WBib31INouSHUiRj+CfB+PhQk2yLzdB1a3txZMlJrS9EFwOUiBMvODHLOfpuXPMpX0pAzXnwVuCA==",
+     "retirement_signed_by": "anchor-ed25519-88c14e49d81c7316"
+    }
+   ],
+   "service": {
+    "ok": false,
+    "usable": false,
+    "detail": "BROKEN: 2 of 3 key(s) do not verify",
+    "entries": [
+     {
+      "key_id": "anchor-ed25519-c2b175f299033f0c",
+      "state": "broken",
+      "detail": "signed by anchor-ed25519-88c14e49d81c7316, which is revoked; a key after a revoked key is not trusted",
+      "revoked_ancestor": "anchor-ed25519-88c14e49d81c7316"
+     },
+     {
+      "key_id": "anchor-ed25519-88c14e49d81c7316",
+      "state": "broken",
+      "detail": "revocation must be signed by the key itself or an earlier key on its chain (signed by anchor-ed25519-c2b175f299033f0c)",
+      "revoked_ancestor": null
+     },
+     {
+      "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+      "state": "genesis",
+      "detail": "genesis key; SHA-256(SPKI) matches the pinned fingerprint; valid_from 2026-11-01T00:00:00.000Z (pinned); retired from 2026-12-01T00:00:00.000Z, statement signed by successor anchor-ed25519-88c14e49d81c7316",
+      "revoked_ancestor": null
+     }
+    ]
+   }
+  },
+  "revoked_without_compromised_since": {
+   "keys": [
+    {
+     "key_id": "anchor-ed25519-c2b175f299033f0c",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAEQVd8qcsCutxGmFZmauH4WTnHa+mZ3MkghvJ+LwAiK8=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2027-01-01T00:00:00.000Z",
+     "status": "active",
+     "successor_signature": "xObrOfjAHaA/TNT1c91AQsDWKMpuEo9cnBUAdHAjYLqYSf/n+yQpmdYveG7/Zp9q67TsLzGBBvDrmrGLARFoCw==",
+     "signed_by": "anchor-ed25519-88c14e49d81c7316"
+    },
+    {
+     "key_id": "anchor-ed25519-88c14e49d81c7316",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEABvHhG621kEv2uJ1KN0gWDwk5JGHb19cwlkHuHEgJiyQ=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-12-01T00:00:00.000Z",
+     "status": "revoked",
+     "successor_signature": "dXH5D1T5WiGkLEKml87XzusXBSfm78seInIfKU2w/fYzC2rP4xGYFBsxWs8qnrZvdZQpUxYuw1jKbtsZoXN9DQ==",
+     "signed_by": "anchor-ed25519-927cd80b86e0ffe9",
+     "valid_to": "2027-01-01T00:00:00.000Z",
+     "retirement_signature": "YGfpxBsLgAt1yVJGl/qKrQWyaRMlRcE0VA26tKzD5CZaDohYuH2wC2x0CvuASrfq7crRs2f5y2IQiMe8Z7CsDQ==",
+     "retirement_signed_by": "anchor-ed25519-88c14e49d81c7316"
+    },
+    {
+     "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAB8uUt9f+cqpbAs7CZffP63Irm/hzPupo1NNuc49/VPU=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-11-01T00:00:00.000Z",
+     "valid_to": "2026-12-01T00:00:00.000Z",
+     "status": "retired",
+     "retirement_signature": "DHT+3Hc4D5WBib31INouSHUiRj+CfB+PhQk2yLzdB1a3txZMlJrS9EFwOUiBMvODHLOfpuXPMpX0pAzXnwVuCA==",
+     "retirement_signed_by": "anchor-ed25519-88c14e49d81c7316"
+    }
+   ],
+   "service": {
+    "ok": false,
+    "usable": false,
+    "detail": "BROKEN: 2 of 3 key(s) do not verify",
+    "entries": [
+     {
+      "key_id": "anchor-ed25519-c2b175f299033f0c",
+      "state": "broken",
+      "detail": "signed by anchor-ed25519-88c14e49d81c7316, which is revoked; a key after a revoked key is not trusted",
+      "revoked_ancestor": "anchor-ed25519-88c14e49d81c7316"
+     },
+     {
+      "key_id": "anchor-ed25519-88c14e49d81c7316",
+      "state": "broken",
+      "detail": "revoked without a parseable compromised_since",
+      "revoked_ancestor": null
+     },
+     {
+      "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+      "state": "genesis",
+      "detail": "genesis key; SHA-256(SPKI) matches the pinned fingerprint; valid_from 2026-11-01T00:00:00.000Z (pinned); retired from 2026-12-01T00:00:00.000Z, statement signed by successor anchor-ed25519-88c14e49d81c7316",
+      "revoked_ancestor": null
+     }
+    ]
+   }
+  },
+  "revoked_compromised_since_moved": {
+   "keys": [
+    {
+     "key_id": "anchor-ed25519-c2b175f299033f0c",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAEQVd8qcsCutxGmFZmauH4WTnHa+mZ3MkghvJ+LwAiK8=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2027-01-01T00:00:00.000Z",
+     "status": "active",
+     "successor_signature": "xObrOfjAHaA/TNT1c91AQsDWKMpuEo9cnBUAdHAjYLqYSf/n+yQpmdYveG7/Zp9q67TsLzGBBvDrmrGLARFoCw==",
+     "signed_by": "anchor-ed25519-88c14e49d81c7316"
+    },
+    {
+     "key_id": "anchor-ed25519-88c14e49d81c7316",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEABvHhG621kEv2uJ1KN0gWDwk5JGHb19cwlkHuHEgJiyQ=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-12-01T00:00:00.000Z",
+     "status": "revoked",
+     "successor_signature": "dXH5D1T5WiGkLEKml87XzusXBSfm78seInIfKU2w/fYzC2rP4xGYFBsxWs8qnrZvdZQpUxYuw1jKbtsZoXN9DQ==",
+     "signed_by": "anchor-ed25519-927cd80b86e0ffe9",
+     "valid_to": "2027-01-01T00:00:00.000Z",
+     "retirement_signature": "YGfpxBsLgAt1yVJGl/qKrQWyaRMlRcE0VA26tKzD5CZaDohYuH2wC2x0CvuASrfq7crRs2f5y2IQiMe8Z7CsDQ==",
+     "retirement_signed_by": "anchor-ed25519-88c14e49d81c7316",
+     "compromised_since": "2026-12-31T00:00:00.000Z"
+    },
+    {
+     "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAB8uUt9f+cqpbAs7CZffP63Irm/hzPupo1NNuc49/VPU=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-11-01T00:00:00.000Z",
+     "valid_to": "2026-12-01T00:00:00.000Z",
+     "status": "retired",
+     "retirement_signature": "DHT+3Hc4D5WBib31INouSHUiRj+CfB+PhQk2yLzdB1a3txZMlJrS9EFwOUiBMvODHLOfpuXPMpX0pAzXnwVuCA==",
+     "retirement_signed_by": "anchor-ed25519-88c14e49d81c7316"
+    }
+   ],
+   "service": {
+    "ok": false,
+    "usable": false,
+    "detail": "BROKEN: 2 of 3 key(s) do not verify",
+    "entries": [
+     {
+      "key_id": "anchor-ed25519-c2b175f299033f0c",
+      "state": "broken",
+      "detail": "signed by anchor-ed25519-88c14e49d81c7316, which is revoked; a key after a revoked key is not trusted",
+      "revoked_ancestor": "anchor-ed25519-88c14e49d81c7316"
+     },
+     {
+      "key_id": "anchor-ed25519-88c14e49d81c7316",
+      "state": "broken",
+      "detail": "revocation statement signed by anchor-ed25519-88c14e49d81c7316 does not verify",
+      "revoked_ancestor": null
+     },
+     {
+      "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+      "state": "genesis",
+      "detail": "genesis key; SHA-256(SPKI) matches the pinned fingerprint; valid_from 2026-11-01T00:00:00.000Z (pinned); retired from 2026-12-01T00:00:00.000Z, statement signed by successor anchor-ed25519-88c14e49d81c7316",
+      "revoked_ancestor": null
+     }
+    ]
+   }
+  },
+  "retirement_unsigned": {
+   "keys": [
+    {
+     "key_id": "anchor-ed25519-88c14e49d81c7316",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEABvHhG621kEv2uJ1KN0gWDwk5JGHb19cwlkHuHEgJiyQ=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-12-01T00:00:00.000Z",
+     "status": "active",
+     "successor_signature": "dXH5D1T5WiGkLEKml87XzusXBSfm78seInIfKU2w/fYzC2rP4xGYFBsxWs8qnrZvdZQpUxYuw1jKbtsZoXN9DQ==",
+     "signed_by": "anchor-ed25519-927cd80b86e0ffe9"
+    },
+    {
+     "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAB8uUt9f+cqpbAs7CZffP63Irm/hzPupo1NNuc49/VPU=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-11-01T00:00:00.000Z",
+     "valid_to": "2026-12-01T00:00:00.000Z",
+     "status": "retired"
+    }
+   ],
+   "service": {
+    "ok": false,
+    "usable": false,
+    "detail": "BROKEN: 1 of 2 key(s) do not verify",
+    "entries": [
+     {
+      "key_id": "anchor-ed25519-88c14e49d81c7316",
+      "state": "verified",
+      "detail": "transition signed by anchor-ed25519-927cd80b86e0ffe9, which ended at 2026-12-01T00:00:00.000Z; chain verified to the genesis; current key",
+      "revoked_ancestor": null
+     },
+     {
+      "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+      "state": "broken",
+      "detail": "status \"retired\" is not signed by its successor anchor-ed25519-88c14e49d81c7316",
+      "revoked_ancestor": null
+     }
+    ]
+   }
+  },
+  "predecessor_still_active": {
+   "keys": [
+    {
+     "key_id": "anchor-ed25519-88c14e49d81c7316",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEABvHhG621kEv2uJ1KN0gWDwk5JGHb19cwlkHuHEgJiyQ=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-12-01T00:00:00.000Z",
+     "status": "active",
+     "successor_signature": "dXH5D1T5WiGkLEKml87XzusXBSfm78seInIfKU2w/fYzC2rP4xGYFBsxWs8qnrZvdZQpUxYuw1jKbtsZoXN9DQ==",
+     "signed_by": "anchor-ed25519-927cd80b86e0ffe9"
+    },
+    {
+     "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAB8uUt9f+cqpbAs7CZffP63Irm/hzPupo1NNuc49/VPU=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-11-01T00:00:00.000Z",
+     "valid_to": "2026-12-01T00:00:00.000Z",
+     "status": "active",
+     "retirement_signature": "DHT+3Hc4D5WBib31INouSHUiRj+CfB+PhQk2yLzdB1a3txZMlJrS9EFwOUiBMvODHLOfpuXPMpX0pAzXnwVuCA==",
+     "retirement_signed_by": "anchor-ed25519-88c14e49d81c7316"
+    }
+   ],
+   "service": {
+    "ok": false,
+    "usable": false,
+    "detail": "BROKEN: 1 of 2 key(s) do not verify",
+    "entries": [
+     {
+      "key_id": "anchor-ed25519-88c14e49d81c7316",
+      "state": "verified",
+      "detail": "transition signed by anchor-ed25519-927cd80b86e0ffe9, which ended at 2026-12-01T00:00:00.000Z; chain verified to the genesis; current key",
+      "revoked_ancestor": null
+     },
+     {
+      "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+      "state": "broken",
+      "detail": "has successor anchor-ed25519-88c14e49d81c7316 but is active; it must be retired or revoked",
+      "revoked_ancestor": null
+     }
+    ]
+   }
+  },
+  "predecessor_valid_to_moved_later": {
+   "keys": [
+    {
+     "key_id": "anchor-ed25519-88c14e49d81c7316",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEABvHhG621kEv2uJ1KN0gWDwk5JGHb19cwlkHuHEgJiyQ=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-12-01T00:00:00.000Z",
+     "status": "active",
+     "successor_signature": "dXH5D1T5WiGkLEKml87XzusXBSfm78seInIfKU2w/fYzC2rP4xGYFBsxWs8qnrZvdZQpUxYuw1jKbtsZoXN9DQ==",
+     "signed_by": "anchor-ed25519-927cd80b86e0ffe9"
+    },
+    {
+     "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAB8uUt9f+cqpbAs7CZffP63Irm/hzPupo1NNuc49/VPU=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-11-01T00:00:00.000Z",
+     "valid_to": "2026-12-15T00:00:00.000Z",
+     "status": "retired",
+     "retirement_signature": "DHT+3Hc4D5WBib31INouSHUiRj+CfB+PhQk2yLzdB1a3txZMlJrS9EFwOUiBMvODHLOfpuXPMpX0pAzXnwVuCA==",
+     "retirement_signed_by": "anchor-ed25519-88c14e49d81c7316"
+    }
+   ],
+   "service": {
+    "ok": false,
+    "usable": false,
+    "detail": "BROKEN: 2 of 2 key(s) do not verify",
+    "entries": [
+     {
+      "key_id": "anchor-ed25519-88c14e49d81c7316",
+      "state": "broken",
+      "detail": "anchor-ed25519-927cd80b86e0ffe9 must end (valid_to) after it starts and no later than this key's valid_from 2026-12-01T00:00:00.000Z",
+      "revoked_ancestor": null
+     },
+     {
+      "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+      "state": "broken",
+      "detail": "retired statement signed by anchor-ed25519-88c14e49d81c7316 does not verify",
+      "revoked_ancestor": null
+     }
+    ]
+   }
+  },
+  "successor_backdated": {
+   "keys": [
+    {
+     "key_id": "anchor-ed25519-468f64c5235792bd",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAfCa/uAr5rRpwwzwEDLYgreNN67romL1wc0TkJ1uv4KI=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2020-01-01T00:00:00.000Z",
+     "status": "active",
+     "successor_signature": "I7gtPJyIsjdQcyPtVYETarDhLrp8IfRJzay+3GAhDkNWKZ9Xs6nwVpZVI9YSCLXzHV2MWqQyvM/vfUewxj0NDg==",
+     "signed_by": "anchor-ed25519-927cd80b86e0ffe9"
+    },
+    {
+     "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAB8uUt9f+cqpbAs7CZffP63Irm/hzPupo1NNuc49/VPU=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-11-01T00:00:00.000Z",
+     "valid_to": "2026-11-02T00:00:00.000Z",
+     "status": "retired",
+     "retirement_signature": "b1dj4zb/bgfTtOTLXEpcB5GgdYsoOLzcXWQbxQoF6O8bTAsJcwMCaat4abhniL51Htzddn0aaKBuOeBZiieOAA==",
+     "retirement_signed_by": "anchor-ed25519-468f64c5235792bd"
+    }
+   ],
+   "service": {
+    "ok": false,
+    "usable": false,
+    "detail": "BROKEN: 1 of 2 key(s) do not verify",
+    "entries": [
+     {
+      "key_id": "anchor-ed25519-468f64c5235792bd",
+      "state": "broken",
+      "detail": "successor_signature by anchor-ed25519-927cd80b86e0ffe9 does not verify",
+      "revoked_ancestor": null
+     },
+     {
+      "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+      "state": "genesis",
+      "detail": "genesis key; SHA-256(SPKI) matches the pinned fingerprint; valid_from 2026-11-01T00:00:00.000Z (pinned); retired from 2026-11-02T00:00:00.000Z, statement signed by successor anchor-ed25519-468f64c5235792bd",
+      "revoked_ancestor": null
+     }
+    ]
+   }
+  },
+  "fork": {
+   "keys": [
+    {
+     "key_id": "anchor-ed25519-88c14e49d81c7316",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEABvHhG621kEv2uJ1KN0gWDwk5JGHb19cwlkHuHEgJiyQ=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-12-01T00:00:00.000Z",
+     "status": "active",
+     "successor_signature": "dXH5D1T5WiGkLEKml87XzusXBSfm78seInIfKU2w/fYzC2rP4xGYFBsxWs8qnrZvdZQpUxYuw1jKbtsZoXN9DQ==",
+     "signed_by": "anchor-ed25519-927cd80b86e0ffe9"
+    },
+    {
+     "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAB8uUt9f+cqpbAs7CZffP63Irm/hzPupo1NNuc49/VPU=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-11-01T00:00:00.000Z",
+     "valid_to": "2026-12-01T00:00:00.000Z",
+     "status": "retired",
+     "retirement_signature": "DHT+3Hc4D5WBib31INouSHUiRj+CfB+PhQk2yLzdB1a3txZMlJrS9EFwOUiBMvODHLOfpuXPMpX0pAzXnwVuCA==",
+     "retirement_signed_by": "anchor-ed25519-88c14e49d81c7316"
+    },
+    {
+     "key_id": "anchor-ed25519-468f64c5235792bd",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAfCa/uAr5rRpwwzwEDLYgreNN67romL1wc0TkJ1uv4KI=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-12-01T00:00:00.000Z",
+     "status": "active",
+     "successor_signature": "LHjta2E8N0alPuxb2dqigvMvy1wPCQDt0SBzOD72rUGVRqCjXzQZQSFQgyeM5oquNXd8tF6oOwMtQqZK6SGOAQ==",
+     "signed_by": "anchor-ed25519-927cd80b86e0ffe9"
+    }
+   ],
+   "service": {
+    "ok": false,
+    "usable": false,
+    "detail": "BROKEN: 3 of 3 key(s) do not verify",
+    "entries": [
+     {
+      "key_id": "anchor-ed25519-88c14e49d81c7316",
+      "state": "broken",
+      "detail": "anchor-ed25519-927cd80b86e0ffe9 has 2 successors; the chain must not fork",
+      "revoked_ancestor": null
+     },
+     {
+      "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+      "state": "broken",
+      "detail": "2 successors; the chain must not fork",
+      "revoked_ancestor": null
+     },
+     {
+      "key_id": "anchor-ed25519-468f64c5235792bd",
+      "state": "broken",
+      "detail": "anchor-ed25519-927cd80b86e0ffe9 has 2 successors; the chain must not fork",
+      "revoked_ancestor": null
+     }
+    ]
+   }
+  },
+  "genesis_valid_from_in_list_ignored": {
+   "keys": [
+    {
+     "key_id": "anchor-ed25519-88c14e49d81c7316",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEABvHhG621kEv2uJ1KN0gWDwk5JGHb19cwlkHuHEgJiyQ=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-12-01T00:00:00.000Z",
+     "status": "active",
+     "successor_signature": "dXH5D1T5WiGkLEKml87XzusXBSfm78seInIfKU2w/fYzC2rP4xGYFBsxWs8qnrZvdZQpUxYuw1jKbtsZoXN9DQ==",
+     "signed_by": "anchor-ed25519-927cd80b86e0ffe9"
+    },
+    {
+     "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAB8uUt9f+cqpbAs7CZffP63Irm/hzPupo1NNuc49/VPU=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2020-01-01T00:00:00.000Z",
+     "valid_to": "2026-12-01T00:00:00.000Z",
+     "status": "retired",
+     "retirement_signature": "DHT+3Hc4D5WBib31INouSHUiRj+CfB+PhQk2yLzdB1a3txZMlJrS9EFwOUiBMvODHLOfpuXPMpX0pAzXnwVuCA==",
+     "retirement_signed_by": "anchor-ed25519-88c14e49d81c7316"
+    }
+   ],
+   "service": {
+    "ok": true,
+    "usable": true,
+    "detail": "intact: 2 key(s), each verified back to the pinned genesis key",
+    "entries": [
+     {
+      "key_id": "anchor-ed25519-88c14e49d81c7316",
+      "state": "verified",
+      "detail": "transition signed by anchor-ed25519-927cd80b86e0ffe9, which ended at 2026-12-01T00:00:00.000Z; chain verified to the genesis; current key",
+      "revoked_ancestor": null
+     },
+     {
+      "key_id": "anchor-ed25519-927cd80b86e0ffe9",
+      "state": "genesis",
+      "detail": "genesis key; SHA-256(SPKI) matches the pinned fingerprint; valid_from 2026-11-01T00:00:00.000Z (pinned); retired from 2026-12-01T00:00:00.000Z, statement signed by successor anchor-ed25519-88c14e49d81c7316",
+      "revoked_ancestor": null
+     }
+    ]
+   }
+  },
+  "wrong_genesis": {
+   "keys": [
+    {
+     "key_id": "anchor-ed25519-468f64c5235792bd",
+     "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAfCa/uAr5rRpwwzwEDLYgreNN67romL1wc0TkJ1uv4KI=\n-----END PUBLIC KEY-----\n",
+     "valid_from": "2026-11-01T00:00:00.000Z",
+     "status": "active"
+    }
+   ],
+   "service": {
+    "ok": false,
+    "usable": false,
+    "detail": "BROKEN: 1 of 1 key(s) do not verify",
+    "entries": [
+     {
+      "key_id": "anchor-ed25519-468f64c5235792bd",
+      "state": "broken",
+      "detail": "genesis fingerprint 468f64c5235792bdbbf3a3d54db9a219594a5c55e241eb44bb13478f3fb12da1 does not match the pinned 927cd80b86e0ffe9441ba4f41339f20cdfcf55da5063a5a0f13d35cb4b4a83c7",
+      "revoked_ancestor": null
+     }
+    ]
+   }
+  },
+  "empty": {
+   "keys": [],
+   "service": {
+    "ok": false,
+    "usable": false,
+    "detail": "no keys published",
+    "entries": []
+   }
+  }
+ }
+}

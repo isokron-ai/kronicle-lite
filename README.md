@@ -348,7 +348,7 @@ timestamp authorities (Sectigo, DigiCert) on every receipt, and the keys and
 roots to check them. A client checks it offline with one command:
 
 ```sh
-npx -y kronicle-lite verify-audit pack/ --key auditor-key.pem   # the key fingerprint from the report / SOW
+npx -y kronicle-lite verify-audit pack/ --key-fingerprint <SHA-256 of the auditor key, from the report or SOW>
 ```
 
 ```sh
@@ -362,15 +362,22 @@ kronicle-lite audit package --audit-id A --out pack/ --timestamps stamps/
 - **Claims.** `claims.json` lists what the pack claims: `integrity`, `chain`,
   `receipts`, `independent_timestamps`, `harness_frozen_before_runs`,
   `run_sequence`. `audit package` declares only what the store's contents
-  support. `verify-audit` checks exactly those and prints `PASS` / `FAIL` per
-  claim, with the evidence for every check (hashes, roots, keys, TSA names and
+  support. `verify-audit` pins the auditor key by fingerprint, verifies
+  `SHA256SUMS` before it reads `claims.json`, always checks `integrity` and
+  `chain`, then the declared claims and what they depend on (every claim when
+  `claims.json` is missing or unauthenticated), and prints `PASS` / `FAIL` per
+  claim with the evidence for every check (hashes, roots, keys, TSA names and
   signed times); the rest show as `not declared` (`--require CLAIM` makes one
-  mandatory). Exit 0 means every declared claim passed; `--json` follows
-  `VerifyAuditJsonSchema`.
+  mandatory). Exit 0 means every checked claim passed; an unpinned auditor key
+  never exits 0; `--json` follows `VerifyAuditJsonSchema`.
 - **Scope.** The claims establish integrity, ordering and independent time.
   The depth and method of the audit are described in its report.
 - **Trust.** The production anchor service key (a genesis key pinned by its
-  SPKI SHA-256; later keys only through a successor-signature chain back to it)
+  SPKI SHA-256; later keys only through the service's signed key chain back to
+  it, checked by the same rules as the service, with a rollback cache in the
+  data dir; a revoked key's receipt only with a verified TSA time before its
+  `compromised_since` − 5 min; `--genesis <sha256>@<valid_from>` for a
+  self-hosted service)
   and the timestamping CAs of Sectigo (Root R46) and DigiCert (G4 TimeStamping
   CAs) ship in the package; nothing in the pack is trusted on its own say-so
   (`--anchor-keys` / `--tsa-roots` for a self-hosted anchor or other TSAs).
