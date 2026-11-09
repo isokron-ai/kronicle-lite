@@ -46,16 +46,19 @@ export const SERVICE_KEY_PREFIX = 'anchor-ed25519-';
 export const PINS_FILE = 'anchor-keys.pinned.json';
 
 /**
- * Service keys shipped with the package, by anchor origin, with the validity
- * the service publishes. IsoKron's audit-verification service
- * (https://anchor.isokron.ai) signs with anchor-ed25519-3dca1ecf66c2993e
- * from 2026-11-01T02:29:25.705Z. Rotation: a later key is trusted only with a
- * successor signature from this one (see reconcileServiceKeys).
+ * Genesis service keys shipped with the package, by anchor origin, with the
+ * validity the service publishes and the full SHA-256 of the key's SPKI (the
+ * fingerprint published out of band; verify-audit refuses a shipped entry
+ * whose PEM does not hash to it). IsoKron's audit-verification service
+ * (https://anchor.isokron.ai) signs with anchor-ed25519-3dca1ecf66c2993e from
+ * 2026-11-01T02:29:25.705Z. A later key is trusted only through a chain of
+ * successor signatures that verifies back to this genesis key.
  */
-export const SHIPPED_SERVICE_KEYS: Readonly<Record<string, readonly { key_id: string; public_key_pem: string; valid_from: string }[]>> = {
+export const SHIPPED_SERVICE_KEYS: Readonly<Record<string, readonly { key_id: string; spki_sha256: string; public_key_pem: string; valid_from: string }[]>> = {
   'https://anchor.isokron.ai': [
     {
       key_id: 'anchor-ed25519-3dca1ecf66c2993e',
+      spki_sha256: '3dca1ecf66c2993e534ff08fe350dc9368ca52042e38b20a9d58cd7c2b7b3367',
       public_key_pem: '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAvJAsc6UvXIKrZXFNO6jjSKKnkUKZvh2crVOyvrQqJm4=\n-----END PUBLIC KEY-----\n',
       valid_from: '2026-11-01T02:29:25.705Z',
     },

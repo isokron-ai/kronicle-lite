@@ -222,7 +222,7 @@ stamp carries a later time.
 | `anchors/index.json` | summary of the anchors (informational; `verify-audit` does not read it) |
 | `auditor-key.pem` | the auditor (store) public key; its fingerprint belongs in the report and SOW |
 | `anchor-keys.json` | the anchor service keys; only a source of rotation successors, never of trust |
-| `tsa-roots/*.pem` | TSA roots (`sectigo.pem` = USERTrust RSA, `digicert.pem` = DigiCert Trusted Root G4, `custom-N.pem` for other TSAs) |
+| `tsa-roots/*.pem` | the pinned timestamping CAs: `sectigo.pem` = Sectigo Public Time Stamping Root R46 (self-signed and USERTrust cross-signed forms of one key), `digicert.pem` = DigiCert Trusted G4 TimeStamping RSA4096 SHA256 2025 CA1 and the 2022 G4 RSA4096 SHA256 TimeStamping CA; `custom-N.pem` for other TSAs |
 | `claims.json` | what the pack claims (below) and, with `run_sequence`, the run count, each `run_seq` and every capture interruption |
 | `COMPLETION.txt` | one page: manifest SHA-256, signing key fingerprint, final anchored root, timestamp times, claims |
 | `VERIFY.md` | the one-command check and the raw commands (`shasum`, `openssl`, `jq`) with this pack's file names |
@@ -248,7 +248,7 @@ passed.
 | `integrity` | `SHA256SUMS.sig` verifies under the auditor key and every file matches `SHA256SUMS` with none unlisted; the bundle's canonical, signature, events, artifacts, refs and missing steps |
 | `chain` | the bundle's chain and signed root steps |
 | `receipts` | per receipt: canonical; countersigned by a trusted service key valid at `received_at`; `chain_id`/`key_id` derive from the auditor key and the checkpoint signature verifies; the root equals the FORMAT §2 Merkle root of that range recomputed from `events.jsonl`. Then: each anchor extends the previous one on range and on every clock, and every audit event is committed by a verified anchor |
-| `independent_timestamps` | per token: granted; CMS SignedData over TSTInfo; messageImprint = hash of the receipt file; signed attributes (contentType, messageDigest, ESS signing-certificate) and signature verify; signer has the timeStamping EKU and was valid at genTime; the path through embedded CAs ends at a trusted root, every certificate valid at the check time. Every anchor has at least one token, and every token passes |
+| `independent_timestamps` | per token: granted; CMS SignedData over TSTInfo; messageImprint = hash of the receipt file; signed attributes (contentType, messageDigest, ESS signing-certificate) and signature verify; the signer was valid at genTime and its EKU is critical and timeStamping only; the path through embedded CAs ends at a pinned timestamping CA; intermediates have keyCertSign and timeStamping (or no) EKU; no unknown critical extension; inner and outer certificate signature algorithms agree; every certificate valid at the check time. The signer's subject DN is reported. Every anchor has at least one token, and every token passes |
 | `harness_frozen_before_runs` | the freeze event (`harness_frozen`, or the 0.9.0 `finding` with `class: protocol_freeze`) records a harness digest; every run names that digest; the freeze is first committed by a timestamped anchor that covers no run; every run carries the freeze nonce, or (without it) records a `measured_at` after the freeze anchor's latest RFC 3161 time |
 | `run_sequence` | `run_seq` over the `run_completed` events is 1..N with no gap or repeat; N equals `planned_runs`, the report's `run_count` and `claims.json` `runs.count` where present; `claims.json` lists exactly the runs recorded as `capture: "interrupted"` |
 
@@ -270,17 +270,23 @@ no timestamp; `measured_at` and payload values are recorded by the auditor.
 
 - **Auditor key:** pin it with `--key` from the report or SOW. Without
   `--key`, `auditor-key.pem` is used and the output says so.
-- **Anchor service key:** the shipped pin (`SHIPPED_SERVICE_KEYS`,
-  `anchor-ed25519-3dca1ecf66c2993e` for `https://anchor.isokron.ai`), or
-  `--anchor-keys FILE` for a self-hosted service. The pack's `anchor-keys.json`
-  adds only keys with a valid successor signature from a trusted key, and can
-  only tighten status and validity. No trust on first use.
-- **TSA roots:** shipped (`src/audit/tsa-roots.ts`: USERTrust RSA for Sectigo,
-  DigiCert Trusted Root G4), or `--tsa-roots DIR`. The pack's `tsa-roots/` is
-  for the openssl route and is never trusted by `verify-audit`. Path building
-  asks the trusted roots first, so DigiCert's embedded G4 cross-certificate
-  (signed by the retired Assured ID root, which makes OpenSSL with a full
-  system bundle fail) is never followed.
+- **Anchor service key:** a genesis key pinned by its full SPKI SHA-256
+  (`SHIPPED_SERVICE_KEYS`: `anchor-ed25519-3dca1ecf66c2993e`,
+  `3dca1ecf66c2993e534ff08fe350dc9368ca52042e38b20a9d58cd7c2b7b3367`, for
+  `https://anchor.isokron.ai`), or `--anchor-keys FILE` for a self-hosted
+  service. A later key is trusted only through a chain of successor signatures
+  in the pack's `anchor-keys.json` that verifies back to a genesis key; a key
+  listed there that does not chain is a FAIL. The document can only tighten
+  status and validity. No trust on first use.
+- **TSA CAs:** pinned to the timestamping-specific CAs, not the general
+  public roots above them (`src/audit/tsa-roots.ts`): Sectigo Public Time
+  Stamping Root R46 (both forms of its key) and the DigiCert Trusted G4
+  TimeStamping CAs; or `--tsa-roots DIR`. A certificate from another branch of
+  USERTrust or DigiCert G4 cannot sign a timestamp that verifies. A TSA moving
+  to a new issuing CA needs a kronicle-lite release (or `--tsa-roots`). The
+  pack's `tsa-roots/` holds the same certificates for the openssl route and is
+  never trusted by `verify-audit`. Path building asks the pinned certificates
+  first, so embedded cross-certificates are never needed.
 - **No openssl needed.** RFC 3161 tokens are verified in-process with
   `node:crypto` (a small DER reader in `src/audit/der.ts` and the CMS checks above). It runs the
   same on Linux, macOS and Windows, and a missing or old openssl cannot turn a
@@ -296,7 +302,7 @@ with OpenSSL 3 and `jq`:
 openssl pkeyutl -verify -pubin -inkey auditor-key.pem -rawin -in SHA256SUMS -sigfile SHA256SUMS.sig
 shasum -a 256 -c SHA256SUMS                 # or sha256sum -c, or openssl dgst -sha256 FILE
 D=$(shasum -a 256 anchors/01-harness-frozen.receipt.json | cut -c1-64)
-openssl ts -verify -digest $D -in anchors/01-harness-frozen.sectigo.tsr -CAfile tsa-roots/sectigo.pem
+openssl ts -verify -digest $D -in anchors/01-harness-frozen.sectigo.tsr -CAfile tsa-roots/sectigo.pem -partial_chain
 # anchor service countersignature: canonical receipt minus signature (jq -cjS sorts keys, no newline)
 R=anchors/01-harness-frozen.receipt.json
 jq -r --arg k "$(jq -r .service_key_id $R)" '.keys[] | select(.key_id == $k) | .public_key_pem' anchor-keys.json > service-key.pem
@@ -304,7 +310,9 @@ jq -cjS 'del(.signature)' $R > body.bin && jq -r .signature $R | openssl base64 
 openssl pkeyutl -verify -pubin -inkey service-key.pem -rawin -in body.bin -sigfile sig.bin
 ```
 
-`jq -cjS` output equals RFC 8785 for these objects (ASCII strings, integers).
+`-partial_chain` lets openssl stop at a pinned CA that is not self-signed (the
+DigiCert TimeStamping CAs, the cross-signed R46). `jq -cjS` output equals RFC
+8785 for these objects (ASCII strings, integers).
 Compare `service-key.pem` with the key published at isokron.ai/verify (or the
 shipped pin above). LibreSSL (macOS's default `openssl`) lacks raw Ed25519
 verification; use OpenSSL 3 (`brew install openssl@3`).
@@ -315,7 +323,7 @@ TSA certificates expire, and `openssl ts -verify` checks them at the current
 time by default. After expiry:
 
 - verify each token at its own genTime against the same pinned roots:
-  `openssl ts -verify … -attime <genTime as Unix seconds>` (`VERIFY.md` prints
+  `openssl ts -verify … -partial_chain -attime <genTime as Unix seconds>` (`VERIFY.md` prints
   the value per token), or `kronicle-lite verify-audit PACK --tsa-at-gentime`;
 - keep the pack whole: each token carries its TSA chain and `tsa-roots/` the
   roots, so nothing has to be fetched again;

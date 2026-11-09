@@ -369,8 +369,10 @@ kronicle-lite audit package --audit-id A --out pack/ --timestamps stamps/
   `VerifyAuditJsonSchema`.
 - **Scope.** The claims establish integrity, ordering and independent time.
   The depth and method of the audit are described in its report.
-- **Trust.** The production anchor service key and the Sectigo / DigiCert TSA
-  roots ship in the package; nothing in the pack is trusted on its own say-so
+- **Trust.** The production anchor service key (a genesis key pinned by its
+  SPKI SHA-256; later keys only through a successor-signature chain back to it)
+  and the timestamping CAs of Sectigo (Root R46) and DigiCert (G4 TimeStamping
+  CAs) ship in the package; nothing in the pack is trusted on its own say-so
   (`--anchor-keys` / `--tsa-roots` for a self-hosted anchor or other TSAs).
   RFC 3161 is verified in-process (no openssl needed).
 - **Without kronicle-lite.** Every pack has a `VERIFY.md` with the raw
@@ -378,8 +380,8 @@ kronicle-lite audit package --audit-id A --out pack/ --timestamps stamps/
   files and their signature, `openssl ts -verify` for each token, `jq` +
   `openssl pkeyutl` for the anchor receipts' Ed25519 signatures.
 - **Later years.** TSA certificates expire: re-verify with
-  `openssl ts -verify -attime <genTime>` (or `verify-audit --tsa-at-gentime`)
-  against the same pinned roots, and keep the pack whole (the tokens carry
+  `openssl ts -verify -partial_chain -attime <genTime>` (or `verify-audit --tsa-at-gentime`)
+  against the same pinned CAs, and keep the pack whole (the tokens carry
   their TSA chains). `COMPLETION.txt` holds the values for the report's first
   page: manifest SHA-256, signing key fingerprint, final anchored root and its
   timestamp times.

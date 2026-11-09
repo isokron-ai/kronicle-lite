@@ -33,7 +33,7 @@
  * rest are reported as not declared. Trust comes from the package source or
  * the operator, never from the pack: anchor service keys are the shipped pins
  * (SHIPPED_SERVICE_KEYS) or an explicit --anchor-keys file, plus successors
- * those keys sign; TSA roots are SHIPPED_TSA_ROOTS or an explicit --tsa-roots
+ * those keys sign; TSA CAs are SHIPPED_TSA_ROOTS (timestamping CAs) or an explicit --tsa-roots
  * directory. Hostile input yields failed checks, never a throw.
  */
 
@@ -307,8 +307,15 @@ function serviceTrust(opts: VerifyAuditOptions, pkgDoc: unknown | undefined): { 
       keys.set(e.key_id, { key_id: e.key_id, public_key_pem: e.public_key_pem, status: e.status, valid_from: e.valid_from, valid_to: e.valid_to, source: 'file', signed_by: null });
     }
   } else {
+    // The genesis pins: each PEM must hash to its shipped SPKI fingerprint and derive its key id.
     for (const list of Object.values(SHIPPED_SERVICE_KEYS)) {
-      for (const k of list) keys.set(k.key_id, { key_id: k.key_id, public_key_pem: k.public_key_pem, status: 'active', valid_from: k.valid_from, valid_to: null, source: 'shipped', signed_by: null });
+      for (const k of list) {
+        if (spki(k.public_key_pem) !== k.spki_sha256 || serviceKeyIdFromPem(k.public_key_pem) !== k.key_id) {
+          fileProblems.push(`shipped genesis key ${k.key_id} does not match its pinned fingerprint ${k.spki_sha256}`);
+          continue;
+        }
+        keys.set(k.key_id, { key_id: k.key_id, public_key_pem: k.public_key_pem, status: 'active', valid_from: k.valid_from, valid_to: null, source: 'shipped', signed_by: null });
+      }
     }
   }
   if (pkgDoc === undefined) return { keys, fileProblems, pkgProblems };
@@ -662,8 +669,15 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     for (const p of trust.fileProblems) add('pack', null, null, 'anchor keys', false, p);
     if (pkgDoc !== undefined) {
       const listed = isJsonObject(pkgDoc) && Array.isArray(pkgDoc['keys']) ? (pkgDoc['keys'] as unknown[]).map((k) => (isJsonObject(k) ? sOrNull(k['key_id']) : null)).filter((k): k is string => k !== null) : [];
-      const desc = listed.map((k) => `${k} (${trust.keys.has(k) ? (trust.keys.get(k)!.source === 'successor' ? `successor of ${trust.keys.get(k)!.signed_by}` : 'trusted') : 'not trusted'})`).join(', ');
-      add('pack', null, null, 'anchor-keys.json', trust.pkgProblems.length === 0, trust.pkgProblems.length === 0 ? `lists ${desc || 'no keys'}` : trust.pkgProblems.join('; '));
+      // Every listed key must be a genesis key or reach one through successor signatures; a break fails.
+      const chainOf = (id: string): string => {
+        const parts: string[] = [];
+        for (let k = trust.keys.get(id); k && parts.length < 16; k = k.signed_by ? trust.keys.get(k.signed_by) : undefined) parts.push(k.signed_by ? k.key_id : `${k.key_id} (genesis)`);
+        return parts.join(' ← ');
+      };
+      const broken = listed.filter((k) => !trust.keys.has(k));
+      const problems = [...trust.pkgProblems, ...broken.map((k) => `${k} does not chain to a genesis key (no valid successor signature from a trusted key)`)];
+      add('pack', null, null, 'anchor-keys.json', problems.length === 0, problems.length === 0 ? `lists ${listed.map(chainOf).join('; ') || 'no keys'}` : problems.join('; '));
     }
     result.trust.service_key_ids = [...trust.keys.keys()];
     const roots: string[] = [];
@@ -1051,8 +1065,8 @@ export function renderVerifyAudit(r: VerifyAuditResult): string {
   L.push(`${PACK_NAME}  ${r.package}`);
   L.push(`audit          ${r.audit_id ?? '?'}${r.bundle_format ? `  (${r.bundle_format})` : ''}`);
   L.push(`auditor key    ${r.auditor.key_id ?? '?'}  spki sha256 ${r.auditor.spki_sha256 ?? '?'}  (${r.auditor.source === 'pinned' ? 'pinned with --key' : 'from auditor-key.pem'})`);
-  L.push(`service keys   ${r.trust.service_key_ids.join(', ') || '-'}  (${r.trust.service_keys === 'shipped' ? 'shipped pins' : '--anchor-keys'})`);
-  L.push(`TSA roots      ${r.trust.tsa_roots === 'skipped' ? 'not used (--no-tsa)' : `${r.trust.tsa_roots === 'shipped' ? 'shipped' : '--tsa-roots'}, validity checked at ${r.trust.tsa_time === 'now' ? 'the current time' : 'genTime'}`}`);
+  L.push(`service keys   ${r.trust.service_key_ids.join(', ') || '-'}  (${r.trust.service_keys === 'shipped' ? 'genesis: shipped pin' : 'genesis: --anchor-keys'}, successors by signature chain)`);
+  L.push(`TSA CAs        ${r.trust.tsa_roots === 'skipped' ? 'not used (--no-tsa)' : `${r.trust.tsa_roots === 'shipped' ? 'shipped timestamping CA pins (Sectigo R46, DigiCert G4 TimeStamping)' : '--tsa-roots'}, validity checked at ${r.trust.tsa_time === 'now' ? 'the current time' : 'genTime'}`}`);
   L.push('', 'Claims');
   for (const c of r.claims) L.push(`  ${LABEL[c.status].padEnd(12)}  ${c.claim.padEnd(27)} ${c.evidence}`.trimEnd());
   for (const g of ['pack', 'bundle'] as const) {

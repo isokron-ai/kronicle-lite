@@ -267,19 +267,26 @@ export function buildAuditPackage(
   }
   writeNew(join(out, 'anchor-keys.json'), JSON.stringify({ v: 1, keys: [...keys.values()] }, null, 1) + '\n');
   mkdirSync(join(out, 'tsa-roots'), { mode: 0o755 });
-  const rootFiles: { file: string; pem: string }[] = SHIPPED_TSA_ROOTS.map((r) => ({ file: `${r.name}.pem`, pem: r.pem }));
-  for (const pem of opts.tsa_roots ?? []) {
-    if (rootFiles.some((r) => r.pem.trim() === pem.trim())) continue;
-    rootFiles.push({ file: `custom-${rootFiles.length - SHIPPED_TSA_ROOTS.length + 1}.pem`, pem });
+  // The pinned TSA CAs, one file per TSA (several certificates each), then any custom roots.
+  const rootFiles: { file: string; pems: string[] }[] = [];
+  for (const r of SHIPPED_TSA_ROOTS) {
+    const f = rootFiles.find((x) => x.file === `${r.name}.pem`);
+    if (f) f.pems.push(r.pem);
+    else rootFiles.push({ file: `${r.name}.pem`, pems: [r.pem] });
   }
-  for (const r of rootFiles) writeNew(join(out, 'tsa-roots', r.file), r.pem);
+  let custom = 0;
+  for (const pem of opts.tsa_roots ?? []) {
+    if (rootFiles.some((r) => r.pems.some((x) => x.trim() === pem.trim()))) continue;
+    rootFiles.push({ file: `custom-${++custom}.pem`, pems: [pem] });
+  }
+  for (const r of rootFiles) writeNew(join(out, 'tsa-roots', r.file), r.pems.join(''));
   // The root each token chains to, for VERIFY.md's openssl commands.
   const rootFor = new Map<string, string>();
   for (const a of anchors) {
     const receipt = readBundleFile(join(anchorsDir, a.file), 64 * 1024);
     for (const t of a.timestamps) {
       const bytes = readBundleFile(join(anchorsDir, t.file), MAX_TSR_BYTES);
-      const hit = rootFiles.find((r) => verifyTimestamp(bytes, { message: receipt, roots: [r.pem], at: 'gentime' }).ok);
+      const hit = rootFiles.find((r) => verifyTimestamp(bytes, { message: receipt, roots: r.pems, at: 'gentime' }).ok);
       rootFor.set(t.file, hit?.file ?? `${t.tsa}.pem`);
     }
   }
@@ -424,13 +431,17 @@ function verifyMd(v: { audit_id: string; keyLine: string; manifestSha: string; r
     '### 2. Independent time: each RFC 3161 token',
     '',
     'Each token stamps the SHA-256 of its receipt file and embeds the timestamp authority\'s certificate',
-    'chain; `tsa-roots/` holds the roots. Check the root fingerprints against the authorities\' own sites',
-    '(`openssl x509 -in tsa-roots/sectigo.pem -noout -fingerprint -sha256`).',
+    'chain. `tsa-roots/` holds the pinned timestamping CAs (not the general public roots):',
+    '`sectigo.pem` is Sectigo Public Time Stamping Root R46 (self-signed and USERTrust cross-signed forms',
+    'of one key), `digicert.pem` the DigiCert Trusted G4 TimeStamping CAs. `-partial_chain` lets openssl',
+    'stop at a pinned CA that is not self-signed. Check the fingerprints against the authorities\' sites',
+    '(`openssl crl2pkcs7 -nocrl -certfile tsa-roots/digicert.pem | openssl pkcs7 -print_certs -noout`,',
+    'then `openssl x509 -noout -fingerprint -sha256` on each).',
     '',
     '```sh',
     ...v.anchors.flatMap((a) => [
       `D=$(shasum -a 256 anchors/${a.file} | cut -c1-64)`,
-      ...a.timestamps.map((t) => `openssl ts -verify -digest $D -in anchors/${t.file} -CAfile tsa-roots/${v.rootFor.get(t.file)}`),
+      ...a.timestamps.map((t) => `openssl ts -verify -digest $D -in anchors/${t.file} -CAfile tsa-roots/${v.rootFor.get(t.file)} -partial_chain`),
       ...a.timestamps.slice(0, 1).map((t) => `openssl ts -reply -in anchors/${t.file} -text | grep 'Time stamp'`),
     ]),
     '```',
@@ -469,7 +480,7 @@ function verifyMd(v: { audit_id: string; keyLine: string; manifestSha: string; r
     '',
     '```sh',
     ...v.anchors.flatMap((a) =>
-      a.timestamps.map((t) => `openssl ts -verify -digest $(shasum -a 256 anchors/${a.file} | cut -c1-64) -in anchors/${t.file} -CAfile tsa-roots/${v.rootFor.get(t.file)} -attime ${epoch(t.gen_time)}   # ${t.gen_time}`),
+      a.timestamps.map((t) => `openssl ts -verify -digest $(shasum -a 256 anchors/${a.file} | cut -c1-64) -in anchors/${t.file} -CAfile tsa-roots/${v.rootFor.get(t.file)} -partial_chain -attime ${epoch(t.gen_time)}   # ${t.gen_time}`),
     ),
     '```',
     '',

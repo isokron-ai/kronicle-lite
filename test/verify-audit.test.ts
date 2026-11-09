@@ -22,7 +22,7 @@ import { pushCheckpoint } from '../src/anchor/anchor.js';
 import { serviceKeyIdFromPem, SHIPPED_SERVICE_KEY_PINS, SHIPPED_SERVICE_KEYS, successorSigningPayload } from '../src/anchor/trust.js';
 import { exportBundle, signManifest, type BundleManifest } from '../src/audit/bundle.js';
 import { buildAuditPackage, stampAnchor } from '../src/audit/package.js';
-import { inspectTimestamp, timestampRequest, checkTimestampReply, verifyTimestamp } from '../src/audit/rfc3161.js';
+import { inspectTimestamp, OID, timestampRequest, checkTimestampReply, verifyTimestamp } from '../src/audit/rfc3161.js';
 import { BUNDLE_FORMAT_V1, BUNDLE_FORMAT_V2 } from '../src/audit/schemas.js';
 import { SHIPPED_TSA_ROOTS } from '../src/audit/tsa-roots.js';
 import { listPackFiles, sha256sums, SUMS_FILES, verifyAudit, VerifyAuditJsonSchema, type VerifyAuditOptions } from '../src/audit/verify-audit.js';
@@ -216,7 +216,7 @@ describe('verify-audit: a synthetic evidence pack end to end', () => {
     expect(completion).toMatch(/timestamps +\d{4}-.*\(alpha\), .*\(beta\)/);
     const verify = readFileSync(join(f.pkg, 'VERIFY.md'), 'utf8');
     expect(verify).toContain('openssl pkeyutl -verify -pubin -inkey auditor-key.pem -rawin -in SHA256SUMS -sigfile SHA256SUMS.sig');
-    expect(verify).toContain('openssl ts -verify -digest $D -in anchors/01-harness-frozen.alpha.tsr -CAfile tsa-roots/custom-1.pem');
+    expect(verify).toContain('openssl ts -verify -digest $D -in anchors/01-harness-frozen.alpha.tsr -CAfile tsa-roots/custom-1.pem -partial_chain');
     expect(verify).toMatch(/-attime \d{10}/);
     for (const t of [readFileSync(join(f.pkg, 'VERIFY.md'), 'utf8'), completion]) expect(t).not.toMatch(/immutable|tamper-proof|certified|trustless/i);
   });
@@ -230,7 +230,7 @@ describe('verify-audit: a synthetic evidence pack end to end', () => {
     expect(r.out).toMatch(/PASS {2}harness frozen before runs +harness abababababababab… frozen, committed .*3\/3 run\(s\) name that harness and carry the freeze receipt digest/);
     expect(r.out).toMatch(/PASS {2}run sequence +3 run\(s\), run_seq 1\.\.3 contiguous; matches planned_runs 3, report_run_count 3, claims\.json 3; 1 capture interruption\(s\): run 3 \(proxy restarted; resumed\)/);
     expect(r.out).toMatch(/PASS {2}SHA256SUMS +\d+ file\(s\) match; signed by ed25519-/);
-    expect(r.out).toMatch(/PASS {2}RFC 3161 alpha +\d{4}-\d\d-\d\dT.*signed by Alpha TSA Signer, root Alpha TSA Root/);
+    expect(r.out).toMatch(/PASS {2}RFC 3161 alpha +\d{4}-\d\d-\d\dT.*signed by CN=Alpha TSA Signer, root CN=Alpha TSA Root/);
     expect(r.out).toMatch(/PASS {2}root matches bundle +seq 1\.\.1 root [0-9a-f]{64}/);
     expect(r.out).toContain(`manifest sha256  ${f.pack.manifest_sha256}`);
     expect(r.out).toMatch(/final root +[0-9a-f]{64} \(seq 1\.\.5, 03-report-issued\)/);
@@ -378,7 +378,7 @@ describe('verify-audit: a synthetic evidence pack end to end', () => {
     const r = verifyAudit(f.pkg, noKeys); // the pack's own anchor-keys.json lists the stub key: not a trust root
     expect(r.ok).toBe(false);
     expect(r.checks.filter((c) => c.check === 'service signature').every((c) => c.status === 'fail' && c.evidence.includes('is not trusted (trusted: anchor-ed25519-3dca1ecf66c2993e'))).toBe(true);
-    expect(r.checks.find((c) => c.check === 'anchor-keys.json')!.evidence).toMatch(/anchor-ed25519-[0-9a-f]{16} \(not trusted\)/);
+    expect(r.checks.find((c) => c.check === 'anchor-keys.json')).toMatchObject({ status: 'fail', evidence: expect.stringMatching(/anchor-ed25519-[0-9a-f]{16} does not chain to a genesis key/) });
 
     // Rotation: trust K0 only; the pack lists the stub key with a successor signature by K0.
     const { privateKey, publicKey } = generateKeyPairSync('ed25519');
@@ -392,10 +392,26 @@ describe('verify-audit: a synthetic evidence pack end to end', () => {
     const trustK0 = { ...noKeys, anchor_keys: { keys: [{ key_id: k0, public_key_pem: k0pem }] } };
     const ok = verifyAudit(d, trustK0);
     expect(failedChecks(ok)).toEqual([]);
-    expect(ok.checks.find((c) => c.check === 'anchor-keys.json')!.evidence).toContain(`${s.key_id} (successor of ${k0})`);
+    expect(ok.checks.find((c) => c.check === 'anchor-keys.json')!.evidence).toContain(`${s.key_id} ← ${k0} (genesis)`);
     rewrite(join(d, 'anchor-keys.json'), JSON.stringify({ v: 1, keys: [{ ...s, successor_signature: successor_signature.replace(/^./, (c) => (c === 'A' ? 'B' : 'A')), signed_by: k0 }] }));
     resign(d, f.dataDir);
-    expect(verifyAudit(d, trustK0).ok).toBe(false); // no valid successor signature: not admitted
+    const broken = verifyAudit(d, trustK0); // no valid successor signature: not admitted, and the break fails
+    expect(broken.ok).toBe(false);
+    expect(broken.checks.find((c) => c.check === 'anchor-keys.json')).toMatchObject({ status: 'fail', evidence: expect.stringContaining(`${s.key_id} does not chain to a genesis key`) });
+  });
+
+  it('the shipped genesis key must match its pinned fingerprint', () => {
+    const entry = SHIPPED_SERVICE_KEYS['https://anchor.isokron.ai']![0]! as { public_key_pem: string };
+    const real = entry.public_key_pem;
+    entry.public_key_pem = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }) as string;
+    try {
+      const { anchor_keys: _k, ...noKeys } = trustOpts(f);
+      const r = verifyAudit(f.pkg, noKeys);
+      expect(r.checks.find((c) => c.check === 'anchor keys')).toMatchObject({ status: 'fail', evidence: expect.stringMatching(/shipped genesis key anchor-ed25519-3dca1ecf66c2993e does not match its pinned fingerprint 3dca1ecf/) });
+      expect(r.trust.service_key_ids).toEqual([]);
+    } finally {
+      entry.public_key_pem = real;
+    }
   });
 
   it('--no-tsa: independent_timestamps not checked, no RFC 3161 lines, times from the anchor service', () => {
@@ -533,7 +549,7 @@ describe('verify-audit: claims, ordering, run sequence and the v1 convention', (
     const f = await build('milestones', { tsas: old, genTime: (i) => new Date(Date.UTC(2020, 5, 1, 0, 0, i)) });
     const now = cli(['verify-audit', f.pkg, ...trustArgs(f)]);
     expect(now.code).toBe(1);
-    expect(now.out).toMatch(/FAIL {2}RFC 3161 alpha +certificate Old TSA Signer is not valid at/);
+    expect(now.out).toMatch(/FAIL {2}RFC 3161 alpha +certificate CN=Old TSA Signer is not valid at/);
     const at = cli(['verify-audit', f.pkg, ...trustArgs(f), '--tsa-at-gentime']);
     expect(at.code).toBe(0);
     expect(at.out).toContain('validity checked at genTime');
@@ -607,25 +623,32 @@ describe('RFC 3161: real Sectigo and DigiCert tokens against the shipped roots',
     for (const f of readdirSync(dir)) expect(readFileSync(join(dir, f)).toString('latin1')).not.toMatch(/\?token=|ghp_|github_pat_|gho_/);
   });
 
-  it('every token verifies over sha256(receipt file), Sectigo to USERTrust, DigiCert to G4', () => {
+  it('every token verifies over sha256(receipt file) to the pinned timestamping CA (Sectigo Root R46, DigiCert G4 TimeStamping CA)', () => {
     expect(tokens).toHaveLength(6);
     for (const t of tokens) {
       const receipt = readFileSync(join(dir, `${t.split('.')[0]}.receipt.json`));
       const v = verifyTimestamp(readFileSync(join(dir, t)), { message: receipt, roots, now: at });
       expect(v.problem, t).toBeNull();
       expect(v.ok).toBe(true);
-      expect(v.root).toBe(t.includes('sectigo') ? 'USERTrust RSA Certification Authority' : 'DigiCert Trusted Root G4');
+      expect(v.root).toMatch(t.includes('sectigo') ? /CN=Sectigo Public Time Stamping Root R46$/ : /CN=DigiCert Trusted G4 TimeStamping RSA4096 SHA256 2025 CA1$/);
+      expect(v.signer).toMatch(t.includes('sectigo') ? /^C=GB, ST=Greater London, O=Sectigo Limited, CN=Sectigo Public Time Stamping Signer R37$/ : /^C=US, O=DigiCert\\, Inc\., CN=DigiCert SHA256 RSA4096 Timestamp Responder 2026 1$/);
       expect(v.info!.gen_time).toMatch(/^2026-11-09T05:02:\d\d\.000Z$/);
     }
   });
 
-  it('DigiCert: the G4 root alone is enough (the embedded cross-certificate to the retired Assured ID root is not followed)', () => {
-    const t = tokens.find((x) => x.includes('digicert'))!;
-    const receipt = readFileSync(join(dir, `${t.split('.')[0]}.receipt.json`));
-    const g4 = SHIPPED_TSA_ROOTS.find((r) => r.name === 'digicert')!.pem;
-    expect(verifyTimestamp(readFileSync(join(dir, t)), { message: receipt, roots: [g4], now: at }).ok).toBe(true);
-    const usertrust = SHIPPED_TSA_ROOTS.find((r) => r.name === 'sectigo')!.pem;
-    expect(verifyTimestamp(readFileSync(join(dir, t)), { message: receipt, roots: [usertrust], now: at }).problem).toMatch(/does not chain/);
+  it('each TSA verifies only under its own pinned CA (the embedded cross-certificates are never needed)', () => {
+    const pins = (name: string) => SHIPPED_TSA_ROOTS.filter((r) => r.name === name).map((r) => r.pem);
+    for (const t of tokens) {
+      const receipt = readFileSync(join(dir, `${t.split('.')[0]}.receipt.json`));
+      const own = t.includes('sectigo') ? 'sectigo' : 'digicert';
+      const other = own === 'sectigo' ? 'digicert' : 'sectigo';
+      expect(verifyTimestamp(readFileSync(join(dir, t)), { message: receipt, roots: pins(own), now: at }).ok).toBe(true);
+      expect(verifyTimestamp(readFileSync(join(dir, t)), { message: receipt, roots: pins(other), now: at }).problem).toMatch(/does not chain to a trusted TSA root/);
+    }
+    // the self-signed R46 alone is enough for Sectigo: its key is the cross-signed R46's
+    const t = tokens.find((x) => x.includes('sectigo'))!;
+    const r46 = SHIPPED_TSA_ROOTS.find((r) => r.subject.includes('R46 (self-signed)'))!.pem;
+    expect(verifyTimestamp(readFileSync(join(dir, t)), { message: readFileSync(join(dir, `${t.split('.')[0]}.receipt.json`)), roots: [r46], now: at }).ok).toBe(true);
   });
 
   it('fails for other bytes, and once the chain has expired (unless checked at genTime)', () => {
@@ -647,21 +670,56 @@ describe('RFC 3161: real Sectigo and DigiCert tokens against the shipped roots',
   });
 });
 
+describe('RFC 3161: certificate profile', () => {
+  const at = { now: new Date('2030-01-01T00:00:00Z') };
+  const check = (tsa: TestTsa) => verifyTimestamp(tsa.stamp('m'), { message: 'm', roots: [tsa.root.pem], ...at });
+
+  it('a conforming chain (signer → intermediate → pinned root) verifies and reports the signer subject', () => {
+    const v = check(makeTsa({ name: 'Ok', intermediate: { eku: [OID.timeStamping], ekuCritical: false } }));
+    expect(v).toMatchObject({ ok: true, signer: 'CN=Ok TSA Signer', root: 'CN=Ok TSA Root' });
+  });
+
+  it('signer EKU must be critical and timeStamping only', () => {
+    expect(check(makeTsa({ signer: { ekuCritical: false } })).problem).toBe('signing certificate CN=Test TSA Signer: extended key usage must be critical and timeStamping only');
+    expect(check(makeTsa({ signer: { eku: [OID.timeStamping, '1.3.6.1.5.5.7.3.1'] } })).problem).toMatch(/must be critical and timeStamping only/);
+    expect(check(makeTsa({ signer: { eku: [] } })).problem).toMatch(/must be critical and timeStamping only/);
+  });
+
+  it('intermediates: timeStamping or no EKU, and keyCertSign', () => {
+    expect(check(makeTsa({ intermediate: {} })).ok).toBe(true); // no EKU
+    expect(check(makeTsa({ intermediate: { eku: ['1.3.6.1.5.5.7.3.1'], ekuCritical: false } })).problem).toBe('intermediate CN=Test TSA CA: extended key usage does not include timeStamping');
+    // without keyCertSign the CA cannot issue: path building finds no issuer (the profile check would refuse it too)
+    expect(check(makeTsa({ intermediate: { keyUsage: 0x02 } })).problem).toMatch(/does not chain to a trusted TSA root|keyUsage lacks keyCertSign/);
+  });
+
+  it('unknown critical extensions and mismatched inner / outer signature algorithms are refused', () => {
+    expect(check(makeTsa({ signer: { unknownCritical: true } })).problem).toBe('certificate CN=Test TSA Signer has an unrecognised critical extension 1.3.6.1.4.1.99999.7');
+    expect(check(makeTsa({ intermediate: { unknownCritical: true } })).problem).toMatch(/CN=Test TSA CA has an unrecognised critical extension/);
+    expect(check(makeTsa({ signer: { innerAlgMismatch: true } })).problem).toBe('certificate CN=Test TSA Signer: tbsCertificate.signature differs from signatureAlgorithm');
+  });
+});
+
 describe('shipped trust', () => {
-  it('the production anchor key pin derives its key id; the TSA roots match their published fingerprints', () => {
+  it('the genesis anchor key pin derives its key id and fingerprint; the TSA CAs match their fingerprints', () => {
     const prod = SHIPPED_SERVICE_KEYS['https://anchor.isokron.ai']!;
     expect(prod.map((k) => k.key_id)).toEqual(['anchor-ed25519-3dca1ecf66c2993e']);
+    expect(createHash('sha256').update(new X509Certificate(SHIPPED_TSA_ROOTS[0]!.pem).publicKey.export({ type: 'spki', format: 'der' })).digest('hex')).toBe(
+      createHash('sha256').update(new X509Certificate(SHIPPED_TSA_ROOTS[1]!.pem).publicKey.export({ type: 'spki', format: 'der' })).digest('hex'),
+    ); // both R46 forms are one key
+    expect(prod[0]!.spki_sha256).toBe('3dca1ecf66c2993e534ff08fe350dc9368ca52042e38b20a9d58cd7c2b7b3367');
     expect(serviceKeyIdFromPem(prod[0]!.public_key_pem)).toBe('anchor-ed25519-3dca1ecf66c2993e');
     expect(SHIPPED_SERVICE_KEY_PINS['https://anchor.isokron.ai']).toEqual([prod[0]!.public_key_pem]);
     for (const r of SHIPPED_TSA_ROOTS) {
       const c = new X509Certificate(r.pem);
       expect(c.fingerprint256.replace(/:/g, '').toLowerCase()).toBe(r.sha256);
-      expect(c.subject).toContain(r.subject);
+      expect(c.subject).toContain(`CN=${r.subject.split(' (')[0]}`);
       expect(c.ca).toBe(true);
     }
-    expect(SHIPPED_TSA_ROOTS.map((r) => r.sha256)).toEqual([
-      'e793c9b02fd8aa13e21c31228accb08119643b749c898964b1746d46c3d4cbd2',
-      '552f7bdcf1a7af9e6ce672017f4f12abf77240c78e761ac203d1d9d20ac89988',
+    expect(SHIPPED_TSA_ROOTS.map((r) => [r.name, r.sha256])).toEqual([
+      ['sectigo', '4941b001b8a97e961b7817c9d9e960ec4b056bfc915a8c1aabf6ef6b3ac046a5'],
+      ['sectigo', 'b53ac15cc1afb6e2ac06828f555bb3bf5bad8b2bac1733ce4cb7aafe729356de'],
+      ['digicert', 'ca0b1554ecd901ea19dcad8749e9f2648c8d6dfcea1add9d2c2109415bb82ccd'],
+      ['digicert', '281734d4592d1291d27190709cb510b07e22c405d5e0d6119b70e73589f98acf'],
     ]);
   });
 });

@@ -26,14 +26,25 @@ export interface TestCert {
 
 let serialCounter = 1000;
 
-export function makeCert(o: {
+export interface CertOpts {
   cn: string;
   issuer?: TestCert;
   ca?: boolean;
   timeStamping?: boolean;
   notBefore?: Date;
   notAfter?: Date;
-}): TestCert {
+  /** extKeyUsage critical (default true) and its OIDs (default [timeStamping] when timeStamping). */
+  ekuCritical?: boolean;
+  eku?: string[];
+  /** keyUsage byte (bit 5 = 0x04 keyCertSign); omitted when undefined. */
+  keyUsage?: number;
+  /** Add a critical extension nobody knows. */
+  unknownCritical?: boolean;
+  /** tbsCertificate.signature names ecdsa-with-SHA384 while the outer algorithm is ecdsa-with-SHA256. */
+  innerAlgMismatch?: boolean;
+}
+
+export function makeCert(o: CertOpts): TestCert {
   const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
   const spki = publicKey.export({ type: 'spki', format: 'der' });
   const subject = name(o.cn);
@@ -41,11 +52,14 @@ export function makeCert(o: {
   const exts: Buffer[] = [];
   if (o.ca) exts.push(ext('2.5.29.19', true, derSeq(derBool(true))));
   else exts.push(ext('2.5.29.19', true, derSeq()));
-  if (o.timeStamping) exts.push(ext('2.5.29.37', true, derSeq(derOid(OID.timeStamping))));
+  const eku = o.eku ?? (o.timeStamping ? [OID.timeStamping] : []);
+  if (eku.length) exts.push(ext('2.5.29.37', o.ekuCritical ?? true, derSeq(...eku.map(derOid))));
+  if (o.keyUsage !== undefined) exts.push(ext('2.5.29.15', true, der(TAG.BIT_STRING, Buffer.from([0x01, o.keyUsage]))));
+  if (o.unknownCritical) exts.push(ext('1.3.6.1.4.1.99999.7', true, derSeq()));
   const tbs = derSeq(
     der(ctx(0), derInt(2)),
     derInt(serial),
-    ecdsaAlg(),
+    o.innerAlgMismatch ? derSeq(derOid(OID.ecdsaSha384)) : ecdsaAlg(),
     o.issuer ? o.issuer.subject : subject,
     derSeq(derX509Time(o.notBefore ?? new Date('2020-01-01T00:00:00Z')), derX509Time(o.notAfter ?? new Date('2090-01-01T00:00:00Z'))),
     subject,
@@ -65,15 +79,20 @@ export interface TestTsa {
   stamp(message: Buffer | string, o?: { genTime?: Date; nonce?: Buffer; digest?: Buffer; noEss?: boolean }): Buffer;
 }
 
-export function makeTsa(o: { name?: string; signerNotAfter?: Date; signerNotBefore?: Date; timeStamping?: boolean } = {}): TestTsa {
+export function makeTsa(
+  o: { name?: string; signerNotAfter?: Date; signerNotBefore?: Date; signer?: Partial<CertOpts>; intermediate?: Partial<CertOpts> } = {},
+): TestTsa {
   const root = makeCert({ cn: `${o.name ?? 'Test'} TSA Root`, ca: true });
+  const mid = o.intermediate ? makeCert({ cn: `${o.name ?? 'Test'} TSA CA`, issuer: root, ca: true, keyUsage: 0x06, ...o.intermediate }) : null;
   const signer = makeCert({
     cn: `${o.name ?? 'Test'} TSA Signer`,
-    issuer: root,
-    timeStamping: o.timeStamping ?? true,
+    issuer: mid ?? root,
+    timeStamping: true,
     ...(o.signerNotBefore ? { notBefore: o.signerNotBefore } : {}),
     ...(o.signerNotAfter ? { notAfter: o.signerNotAfter } : {}),
+    ...o.signer,
   });
+  const issuer = mid ?? root;
   return {
     root,
     signer,
@@ -96,13 +115,13 @@ export function makeTsa(o: { name?: string; signerNotAfter?: Date; signerNotBefo
       const sig = sign('sha256', signedAttrsSet, signer.key);
       const signerInfo = derSeq(
         derInt(1),
-        derSeq(root.subject, derInt(signer.serial)),
+        derSeq(issuer.subject, derInt(signer.serial)),
         derSeq(derOid(OID.sha256)),
         der(ctx(0), ...attrs),
         ecdsaAlg(),
         derOctets(sig),
       );
-      const signedData = derSeq(derInt(3), derSet(derSeq(derOid(OID.sha256))), derSeq(derOid(OID.tstInfo), der(ctx(0), derOctets(tstInfo))), der(ctx(0), signer.der, root.der), derSet(signerInfo));
+      const signedData = derSeq(derInt(3), derSet(derSeq(derOid(OID.sha256))), derSeq(derOid(OID.tstInfo), der(ctx(0), derOctets(tstInfo))), der(ctx(0), signer.der, ...(mid ? [mid.der] : []), root.der), derSet(signerInfo));
       const token = derSeq(derOid(OID.signedData), der(ctx(0), signedData));
       return derSeq(derSeq(derInt(0)), token);
     },

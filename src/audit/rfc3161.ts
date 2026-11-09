@@ -13,19 +13,23 @@
  *      signer certificate; the signature over the signed attributes verifies
  *      with the signer certificate's key (RSA PKCS#1 v1.5, RSA-PSS, ECDSA or
  *      Ed25519; SHA-1 refused);
- *   5. the signer certificate has the timeStamping extended key usage and was
- *      valid at genTime;
+ *   5. the signer certificate was valid at genTime and its extended key
+ *      usage is critical and timeStamping only (RFC 3161 §2.3);
  *   6. a path exists from the signer, through CA certificates embedded in the
- *      token, to one of the trusted roots, every certificate valid at the
- *      check time (now by default, or genTime).
+ *      token, to one of the pinned certificates (`roots`: verify-audit pins the
+ *      timestamping CAs, src/audit/tsa-roots.ts), every certificate valid at
+ *      the check time (now by default, or genTime);
+ *   7. every intermediate is a CA with keyCertSign whose extended key usage,
+ *      if present, includes timeStamping; no certificate on the path has a
+ *      critical extension this code does not know, and each one's
+ *      tbsCertificate.signature equals its outer signatureAlgorithm.
  *
- * Path building prefers the trusted roots: at each step it first asks whether
- * a trusted root issued the current certificate, and only then looks at the
- * certificates the token embeds. DigiCert tokens embed "DigiCert Trusted Root
- * G4" cross-signed by the retired "Assured ID Root CA"; OpenSSL with a full
- * system bundle follows that cross-certificate and fails with "unable to get
- * local issuer". Here the G4 intermediate's issuer is found among the trusted
- * roots first, so the cross-certificate is never used.
+ * Path building asks the pinned certificates first: at each step it checks
+ * whether a pinned certificate issued the current one, and only then looks at
+ * the certificates the token embeds, so embedded cross-certificates (DigiCert
+ * tokens carry "DigiCert Trusted Root G4" cross-signed by the retired
+ * "Assured ID Root CA", which makes OpenSSL with a full system bundle fail)
+ * are never needed.
  *
  * Not checked: revocation (CRL/OCSP need the network; verification is
  * offline), TSA policy OIDs, and the accuracy field (genTime is reported as
@@ -106,9 +110,9 @@ export interface TimestampVerification {
   ok: boolean;
   problem: string | null;
   info: TimestampInfo | null;
-  /** Subject common name (or full subject) of the signing certificate. */
+  /** Subject DN of the signing certificate. */
   signer: string | null;
-  /** The trusted root the path ended at. */
+  /** Subject DN of the pinned certificate the path ended at. */
   root: string | null;
   /** SHA-256 fingerprint of that root (hex, lowercase). */
   root_sha256: string | null;
@@ -127,7 +131,8 @@ export interface VerifyTimestampOptions {
   now?: Date;
 }
 
-const cn = (c: X509Certificate): string => c.subject.split('\n').find((l) => l.startsWith('CN='))?.slice(3) ?? c.subject.replace(/\n/g, ', ');
+/** The certificate's subject DN, one line ("C=GB, O=Sectigo Limited, CN=…"). */
+const subjectOf = (c: X509Certificate): string => c.subject.split('\n').filter(Boolean).join(', ');
 const fingerprint256 = (c: X509Certificate): string => c.fingerprint256.replace(/:/g, '').toLowerCase();
 
 function algOid(t: Tlv | undefined, what: string): { oid: string; params: Tlv | undefined } {
@@ -319,8 +324,75 @@ function essCertHash(p: ParsedToken): { alg: 'sha1' | 'sha256' | 'sha384' | 'sha
   throw new DerError('signed attributes carry no ESS signing-certificate (RFC 3161 §2.4.1)');
 }
 
+/** Extensions every path certificate may mark critical; any other critical extension is refused (RFC 5280 §4.2). */
+const KNOWN_EXTENSIONS = new Set([
+  '2.5.29.19', // basicConstraints
+  '2.5.29.15', // keyUsage
+  '2.5.29.37', // extKeyUsage
+  '2.5.29.14', // subjectKeyIdentifier
+  '2.5.29.35', // authorityKeyIdentifier
+  '2.5.29.32', // certificatePolicies
+  '2.5.29.17', // subjectAltName
+  '2.5.29.18', // issuerAltName
+  '2.5.29.31', // cRLDistributionPoints
+  '1.3.6.1.5.5.7.1.1', // authorityInfoAccess
+  '1.3.6.1.4.1.11129.2.4.2', // signed certificate timestamps
+]);
+
+interface CertProfile {
+  /** tbsCertificate.signature and the outer signatureAlgorithm (DER), which must be identical. */
+  innerAlg: Buffer;
+  outerAlg: Buffer;
+  extensions: { oid: string; critical: boolean; value: Buffer }[];
+}
+
+function certProfile(c: X509Certificate): CertProfile {
+  const top = children(parseDer(c.raw));
+  const tbs = children(expect(top[0], TAG.SEQUENCE, 'TBSCertificate'));
+  const i = tbs[0]?.tag === ctx(0) ? 2 : 1; // [0] version, serial
+  const extensions: CertProfile['extensions'] = [];
+  const ext = tbs.find((t) => t.tag === ctx(3));
+  if (ext) {
+    for (const e of children(expect(children(ext)[0], TAG.SEQUENCE, 'extensions'))) {
+      const f = children(e);
+      const critical = f.length === 3 && f[1]!.tag === TAG.BOOLEAN && f[1]!.value[0] !== 0;
+      extensions.push({ oid: readOid(f[0]!), critical, value: Buffer.from(expect(f[f.length - 1], TAG.OCTET_STRING, 'extension value').value) });
+    }
+  }
+  return { innerAlg: Buffer.from(expect(tbs[i], TAG.SEQUENCE, 'tbs signature').bytes), outerAlg: Buffer.from(expect(top[1], TAG.SEQUENCE, 'signatureAlgorithm').bytes), extensions };
+}
+
+const ekuOf = (p: CertProfile): { critical: boolean; oids: string[] } | null => {
+  const e = p.extensions.find((x) => x.oid === '2.5.29.37');
+  return e ? { critical: e.critical, oids: children(parseDer(e.value)).map(readOid) } : null;
+};
+/** keyCertSign (bit 5) set in keyUsage; false when keyUsage is absent. */
+const keyCertSign = (p: CertProfile): boolean => {
+  const e = p.extensions.find((x) => x.oid === '2.5.29.15');
+  if (!e) return false;
+  const bits = expect(parseDer(e.value), TAG.BIT_STRING, 'keyUsage').value;
+  return bits.length >= 2 && (bits[1]! & 0x04) !== 0;
+};
+
+/** RFC 5280 / RFC 3161 profile checks on one path certificate. */
+function checkProfile(c: X509Certificate, role: 'signer' | 'intermediate' | 'anchor'): void {
+  const p = certProfile(c);
+  const name = subjectOf(c);
+  if (!p.innerAlg.equals(p.outerAlg)) throw new DerError(`certificate ${name}: tbsCertificate.signature differs from signatureAlgorithm`);
+  const unknown = p.extensions.filter((e) => e.critical && !KNOWN_EXTENSIONS.has(e.oid));
+  if (unknown.length) throw new DerError(`certificate ${name} has an unrecognised critical extension ${unknown[0]!.oid}`);
+  const eku = ekuOf(p);
+  if (role === 'signer') {
+    // RFC 3161 §2.3: exactly one extended key usage, timeStamping, marked critical.
+    if (!eku || !eku.critical || eku.oids.length !== 1 || eku.oids[0] !== OID.timeStamping) throw new DerError(`signing certificate ${name}: extended key usage must be critical and timeStamping only`);
+  } else if (role === 'intermediate') {
+    if (!c.ca) throw new DerError(`intermediate ${name} is not a CA certificate`);
+    if (eku && !eku.oids.includes(OID.timeStamping)) throw new DerError(`intermediate ${name}: extended key usage does not include timeStamping`);
+    if (!keyCertSign(p)) throw new DerError(`intermediate ${name}: keyUsage lacks keyCertSign`);
+  }
+}
+
 const validAt = (c: X509Certificate, t: Date): boolean => Date.parse(c.validFrom) <= t.getTime() && t.getTime() <= Date.parse(c.validTo);
-const extKeyUsage = (c: X509Certificate): string[] => ((c as unknown as { extKeyUsage?: string[] }).extKeyUsage ?? c.keyUsage ?? []) as string[];
 const issuedBy = (child: X509Certificate, parent: X509Certificate): boolean => {
   try {
     return child.checkIssued(parent) && child.verify(parent.publicKey);
@@ -342,11 +414,11 @@ export function verifyTimestamp(der: Buffer, opts: VerifyTimestampOptions): Time
     const sid = p.signer.sid;
     const signer = p.certs.find((c) => ('ski' in sid ? c.ski !== null && c.ski.equals(sid.ski) : c.issuer.equals(sid.issuer) && c.serial.equals(sid.serial)));
     if (!signer) throw new DerError('the token does not embed its signing certificate (request it with certReq)');
-    out.signer = cn(signer.cert);
+    out.signer = subjectOf(signer.cert);
     verifySignedAttrs(p, signer.cert.publicKey);
     const ess = essCertHash(p);
     if (!createHash(ess.alg).update(signer.der).digest().equals(ess.hash)) throw new DerError('the ESS signing-certificate does not name the signing certificate');
-    if (!extKeyUsage(signer.cert).includes(OID.timeStamping)) throw new DerError(`signing certificate ${out.signer} lacks the timeStamping extended key usage`);
+    checkProfile(signer.cert, 'signer');
     if (!validAt(signer.cert, p.genTime)) throw new DerError(`genTime ${p.info.gen_time} is outside the signing certificate's validity (${signer.cert.validFrom} to ${signer.cert.validTo})`);
 
     const at = opts.at instanceof Date ? opts.at : opts.at === 'gentime' ? p.genTime : (opts.now ?? new Date());
@@ -373,12 +445,13 @@ export function verifyTimestamp(der: Buffer, opts: VerifyTimestampOptions): Time
       cur = next.cert;
     }
     if (!anchor) throw new DerError(`signing certificate ${out.signer} does not chain to a trusted TSA root`);
-    out.root = cn(anchor);
+    out.root = subjectOf(anchor);
     out.root_sha256 = fingerprint256(anchor);
     for (const c of [...path, anchor]) {
-      if (!validAt(c, at)) throw new DerError(`certificate ${cn(c)} is not valid at ${at.toISOString()} (valid ${c.validFrom} to ${c.validTo})`);
+      if (!validAt(c, at)) throw new DerError(`certificate ${subjectOf(c)} is not valid at ${at.toISOString()} (valid ${c.validFrom} to ${c.validTo})`);
     }
-    for (const c of path.slice(1)) if (!c.ca) throw new DerError(`intermediate ${cn(c)} is not a CA certificate`);
+    for (const c of path.slice(1)) checkProfile(c, 'intermediate');
+    checkProfile(anchor, 'anchor');
     out.ok = true;
   } catch (err) {
     out.problem = err instanceof Error ? err.message : String(err);

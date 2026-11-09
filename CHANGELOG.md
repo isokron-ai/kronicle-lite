@@ -20,11 +20,15 @@ uses semantic versioning once past 0.x.
 - **RFC 3161 in-process** (`src/audit/rfc3161.ts`, `src/audit/der.ts`):
   timestamp tokens are verified with `node:crypto` only (CMS SignedData,
   signed attributes, ESS signing-certificate, RSA / RSA-PSS / ECDSA / Ed25519,
-  path to a trusted root), so no openssl is needed and none can be missing.
-  Shipped roots: USERTrust RSA (Sectigo) and DigiCert Trusted Root G4; path
-  building asks trusted roots first, so DigiCert's embedded cross-certificate
-  to the retired Assured ID root is never followed. `--tsa-at-gentime` for
-  certificates that expired since the stamp.
+  path to a pinned CA), so no openssl is needed and none can be missing.
+  Pinned to the timestamping-specific CAs, not general public roots: Sectigo
+  Public Time Stamping Root R46 and the DigiCert Trusted G4 TimeStamping CAs.
+  Certificate profile enforced: signer EKU critical and timeStamping only;
+  intermediates keyCertSign with timeStamping or no EKU; unknown critical
+  extensions refused; inner and outer signature algorithms must agree; the
+  signer's subject DN is reported. Embedded cross-certificates (DigiCert's G4
+  cross-signed by the retired Assured ID root) are never needed.
+  `--tsa-at-gentime` for certificates that expired since the stamp.
 - **`audit stamp`**: RFC 3161 tokens over an anchor receipt's sha256 from
   Sectigo and DigiCert (or `--tsa name=url`), checked against the request
   (imprint, nonce) and kept once written.
@@ -44,10 +48,12 @@ uses semantic versioning once past 0.x.
 
 ### Changed
 
-- **The production anchor service key is pinned in the package**
-  (`anchor-ed25519-3dca1ecf66c2993e`, valid from 2026-11-01T02:29:25.705Z):
-  `https://anchor.isokron.ai` is no longer trusted on first use. Rotation
-  still works through successor signatures.
+- **The production anchor service key is pinned in the package** as a genesis
+  key (`anchor-ed25519-3dca1ecf66c2993e`, SPKI SHA-256
+  `3dca1ecf…7b3367`, valid from 2026-11-01T02:29:25.705Z):
+  `https://anchor.isokron.ai` is no longer trusted on first use. Later keys
+  only through successor signatures chaining back to it; in `verify-audit` a
+  key in the pack's `anchor-keys.json` that does not chain is a FAIL.
 - Docs: the anchor service is described as IsoKron's audit-verification
   service (optional, self-hostable), not as a tier; the receipt caveat says
   the license key "only authorizes".
