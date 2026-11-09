@@ -367,9 +367,12 @@ kronicle-lite audit package --audit-id A --out pack/ --timestamps stamps/
   `chain`, then the declared claims and what they depend on (every claim when
   `claims.json` is missing or unauthenticated), and prints `PASS` / `FAIL` per
   claim with the evidence for every check (hashes, roots, keys, TSA names and
-  signed times); the rest show as `not declared` (`--require CLAIM` makes one
-  mandatory). Exit 0 means every checked claim passed; an unpinned auditor key
-  never exits 0; `--json` follows `VerifyAuditJsonSchema`.
+  signed times); the rest show as `not declared` (`--require CLAIM` checks one
+  and needs it to pass). A declared claim that is not checked (for example
+  under `--no-tsa`) gives `NOT VERIFIED`, unless the user opts out of it with
+  `--skip-claim CLAIM` (`skipped by user`). Exit 0 means every checked claim
+  passed and none was left unchecked; an unpinned auditor key never exits 0;
+  `--json` follows `VerifyAuditJsonSchema`.
 - **Scope.** The claims establish integrity, ordering and independent time.
   The depth and method of the audit are described in its report.
 - **Trust.** The production anchor service key (a genesis key pinned by its

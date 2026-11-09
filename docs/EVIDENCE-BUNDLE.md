@@ -257,10 +257,16 @@ when the runs carry `run_seq`. It prints why a claim is not declared.
    A `--require`d claim passes when it was checked and passed, whether the pack
    declares it or not.
 
-It prints one line per claim: `PASS`, `FAIL`, `not declared`, or `not checked`
-(the claims that need RFC 3161 tokens, under `--no-tsa`; `--require` of one of
-them with `--no-tsa` is a usage error). Exit 0 means every checked claim
-passed. If the verifier stops part way (an internal error), every claim it was
+It prints one line per claim: `PASS`, `FAIL`, `not declared`, `not checked`
+or `skipped`. A claim the pack declares (or a checked claim needs) that is not
+verified is `not checked`, for example the claims that need RFC 3161 tokens
+under `--no-tsa`, and it blocks exit 0: the result is `NOT VERIFIED`. To verify
+without a claim, opt out of it explicitly with `--skip-claim CLAIM[,…]`: it is
+reported as `skipped by user`, and exit 0 then needs every other checked claim
+to pass. A claim that depends on a skipped one is `not checked`. `integrity`
+and `chain` cannot be skipped; `--skip-claim` of a `--require`d claim, and
+`--require` of a token claim with `--no-tsa`, are usage errors (exit 2). Exit 0
+means every checked claim passed and none was left unchecked. If the verifier stops part way (an internal error), every claim it was
 checking is FAIL.
 
 | Claim | Checks |

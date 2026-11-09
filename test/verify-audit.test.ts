@@ -458,9 +458,10 @@ describe('review probes P1: claims and the auditor key', () => {
   it('P1e: --require independent_timestamps --no-tsa is a usage error', () => {
     expect(cli(['verify-audit', f.pkg, '--key-fingerprint', f.fp, '--genesis', f.genesis, '--no-tsa', '--require', 'independent_timestamps']).code).toBe(2);
     expect(cli(['verify-audit', f.pkg, '--key-fingerprint', f.fp, '--genesis', f.genesis, '--no-tsa', '--require', 'harness_frozen_before_runs']).code).toBe(2);
+    // a declared claim left unchecked blocks exit 0 (R7a)
     const r = cli(['verify-audit', f.pkg, '--key-fingerprint', f.fp, '--genesis', f.genesis, '--no-tsa']);
-    expect(r.code).toBe(0);
-    expect(r.out).toMatch(/^ {2}not checked {3}independent_timestamps +skipped \(--no-tsa\)/m);
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/^ {2}not checked {3}independent_timestamps +not checked \(--no-tsa\); the pack declares it/m);
     expect(r.out).toMatch(/^ {2}not checked {3}harness_frozen_before_runs/m);
   });
 
@@ -1406,11 +1407,58 @@ describe('review round 2 (N1–N9): every R-case fails closed', () => {
     });
   });
 
-  it('R7a: --no-tsa on a pack that declares TSA claims: they are listed as not checked, and RESULT says so', () => {
-    const r = cli(['verify-audit', f.pkg, '--key-fingerprint', f.fp, '--genesis', f.genesis, '--no-tsa']);
-    expect(r.code).toBe(0);
-    expect(r.out).toMatch(/not checked +harness_frozen_before_runs +skipped \(--no-tsa\)/);
-    expect(r.out).toMatch(/^RESULT: VERIFIED .*\(independent_timestamps, harness_frozen_before_runs not checked\)/m);
+  describe('R7a: a declared claim that is not checked blocks exit 0; --skip-claim opts out explicitly', () => {
+    const base = () => ['verify-audit', f.pkg, '--key-fingerprint', f.fp, '--genesis', f.genesis];
+    it('--no-tsa on a pack that declares TSA claims: exit 1, NOT VERIFIED, each printed as not checked (--no-tsa)', () => {
+      const r = cli([...base(), '--no-tsa']);
+      expect(r.code).toBe(1);
+      expect(r.out).toMatch(/^ {2}not checked {3}independent_timestamps +not checked \(--no-tsa\)/m);
+      expect(r.out).toMatch(/^ {2}not checked {3}harness_frozen_before_runs +not checked \(--no-tsa\)/m);
+      expect(r.out).toMatch(/^RESULT: NOT VERIFIED {2}independent_timestamps, harness_frozen_before_runs not checked; passed: integrity, chain, receipts, run_sequence$/m);
+      const j = verifyAudit(f.pkg, { ...trustOpts(f), no_tsa: true });
+      expect(j.ok).toBe(false);
+      expect(VerifyAuditJsonSchema.safeParse(j).success).toBe(true);
+    });
+    it('--no-tsa --skip-claim for both: exit 0, reported as skipped by user', () => {
+      const r = cli([...base(), '--no-tsa', '--skip-claim', 'independent_timestamps,harness_frozen_before_runs']);
+      expect(r.code).toBe(0);
+      expect(r.out).toMatch(/^ {2}skipped {7}independent_timestamps +skipped by user \(--skip-claim independent_timestamps\); the pack declares it/m);
+      expect(r.out).toMatch(/^ {2}skipped {7}harness_frozen_before_runs +skipped by user/m);
+      expect(r.out).toMatch(/^RESULT: VERIFIED {2}integrity, chain, receipts, run_sequence {2}\(independent_timestamps, harness_frozen_before_runs skipped by user\)$/m);
+      const j = verifyAudit(f.pkg, { ...trustOpts(f), no_tsa: true, skip_claims: ['independent_timestamps', 'harness_frozen_before_runs'] });
+      expect(claimStatus(j)).toMatchObject({ independent_timestamps: 'skipped', harness_frozen_before_runs: 'skipped' });
+      expect(j.ok).toBe(true);
+      expect(VerifyAuditJsonSchema.safeParse(j).success).toBe(true);
+    });
+    it('skipping one but not the other still blocks; a claim that depends on a skipped one is not checked', () => {
+      expect(cli([...base(), '--no-tsa', '--skip-claim', 'harness_frozen_before_runs']).code).toBe(1);
+      // with tokens checked: skipping independent_timestamps leaves harness_frozen_before_runs (which needs it) unchecked
+      const r = verifyAudit(f.pkg, { ...trustOpts(f), skip_claims: ['independent_timestamps'] });
+      expect(claimStatus(r)).toMatchObject({ independent_timestamps: 'skipped', harness_frozen_before_runs: 'not_checked' });
+      expect(r.claims.find((c) => c.claim === 'harness_frozen_before_runs')!.evidence).toBe('not checked: it depends on independent_timestamps, which was skipped by user (--skip-claim)');
+      expect(r.ok).toBe(false);
+      const r2 = verifyAudit(f.pkg, { ...trustOpts(f), skip_claims: ['receipts'] });
+      expect(claimStatus(r2)).toMatchObject({ receipts: 'skipped', independent_timestamps: 'not_checked', harness_frozen_before_runs: 'not_checked' });
+      expect(r2.ok).toBe(false);
+      const r3 = verifyAudit(f.pkg, { ...trustOpts(f), skip_claims: ['independent_timestamps', 'harness_frozen_before_runs'] });
+      expect(r3.ok).toBe(true);
+    });
+    it('--skip-claim of integrity or chain, of a claim also --require\'d, or of an unknown claim: exit 2', () => {
+      for (const extra of [['--skip-claim', 'integrity'], ['--skip-claim', 'chain'], ['--skip-claim', 'receipts', '--require', 'receipts'], ['--skip-claim', 'thoroughness']]) {
+        expect(cli([...base(), '--tsa-roots', f.rootsDir, ...extra]).code, extra.join(' ')).toBe(2);
+      }
+    });
+    it('a skipped claim never vouches for a retired key: receipts still needs its TSA time', () => {
+      const d = keyPack(rotated(R, GF, S, iso(now - 3600e3)), R, (i) => iso(now - 3 * 3600e3 + i * 1e3), null);
+      // stamped inside R's window, so only the skip can make receipts fail here
+      const ok = keyPack(rotated(R, GF, S, iso(now - 3600e3)), R, (i) => iso(now - 3 * 3600e3 + i * 1e3), ['integrity', 'chain', 'receipts'], (i) => new Date(now - 3 * 3600e3 + 60e3 + i * 1e3));
+      const s = verifyAudit(ok, { ...trustOpts(f), genesis: pinR, skip_claims: ['independent_timestamps'] });
+      expect(claimStatus(s)).toMatchObject({ receipts: 'fail', independent_timestamps: 'skipped' });
+      expect(s.checks.find((c) => c.check === 'stamped within key validity' && c.status === 'fail')!.evidence).toMatch(/RFC 3161 tokens are not checked here \(independent_timestamps skipped by user\)/);
+      const r = verifyAudit(d, { ...trustOpts(f), genesis: pinR, skip_claims: ['independent_timestamps'] });
+      expect(claimStatus(r).receipts).toBe('fail');
+      expect(r.ok).toBe(false);
+    });
   });
 
   it('N5: when the verifier stops part way, every claim it was checking is FAIL, none PASS', () => {

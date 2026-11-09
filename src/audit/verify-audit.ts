@@ -147,7 +147,8 @@ export type ClaimsFile = z.infer<typeof ClaimsFileSchema>;
 
 export type CheckGroup = 'pack' | 'bundle' | 'keys' | 'anchor' | 'timestamp' | 'timeline' | 'ordering' | 'runs';
 export type CheckStatus = 'pass' | 'fail' | 'not_applicable';
-export type ClaimStatus = 'pass' | 'fail' | 'not_declared' | 'not_checked';
+/** not_checked blocks exit 0 (a claim the pack makes that was not verified); skipped is the user's explicit --skip-claim. */
+export type ClaimStatus = 'pass' | 'fail' | 'not_declared' | 'not_checked' | 'skipped';
 
 export interface AuditCheck {
   group: CheckGroup;
@@ -301,6 +302,8 @@ export interface VerifyAuditOptions {
   no_tsa?: boolean;
   /** Check TSA certificate validity at genTime instead of now (certificates that expired since the stamp). */
   tsa_at?: 'now' | 'gentime';
+  /** Claims the caller explicitly does not check (--skip-claim): reported as skipped by user, never as passing. */
+  skip_claims?: Claim[];
   /** Claims the caller requires: each is checked (with what it depends on) and must pass, declared or not. */
   require?: Claim[];
   /** Check exactly these claims and skip SHA256SUMS / claims.json (the packager's own pass, before they exist). */
@@ -475,6 +478,12 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
   for (const c of opts.require ?? []) {
     if (noTsa && NEEDS_TSA.includes(c)) throw new VerifyAuditUsageError(`--require ${c} needs RFC 3161 tokens; it cannot be combined with --no-tsa`);
   }
+  const skipped = new Set<Claim>(opts.skip_claims ?? []);
+  for (const c of skipped) {
+    if (!(CLAIMS as readonly string[]).includes(c)) throw new VerifyAuditUsageError(`--skip-claim: unknown claim ${c} (one of ${CLAIMS.join(', ')})`);
+    if (ALWAYS.includes(c)) throw new VerifyAuditUsageError(`--skip-claim ${c}: ${ALWAYS.join(' and ')} are always checked`);
+    if ((opts.require ?? []).includes(c)) throw new VerifyAuditUsageError(`--skip-claim ${c} contradicts --require ${c}`);
+  }
   if (opts.key_fingerprint !== undefined && !HEX64.test(normFp(opts.key_fingerprint))) throw new VerifyAuditUsageError('--key-fingerprint must be the 64-hex SHA-256 of the auditor key (colons allowed)');
   const pinOrNull: GenesisPin | null = opts.genesis === undefined ? PRODUCTION_GENESIS : parseGenesisPin(opts.genesis);
   if (pinOrNull === null) throw new VerifyAuditUsageError('--genesis must be <sha256>@<valid_from> (the genesis key\'s SPKI SHA-256 and its valid_from, ISO 8601 UTC)');
@@ -526,6 +535,8 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
   let declared = new Set<Claim>();
   const required = new Set(opts.require ?? []);
   let checked = new Set<Claim>();
+  /** Claims that need a claim the user skipped (claim → the skipped one): not checked, which blocks exit 0. */
+  const blocked = new Map<Claim, Claim>();
   const on = (c: Claim) => checked.has(c);
   /** Set when receipts pulled in independent_timestamps: a receipt is signed by a key that is not the active head. */
   let tsaForKeys: string | null = null;
@@ -541,6 +552,20 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
             grew = true;
           }
         }
+    }
+    // The user's --skip-claim: not checked; a claim that depends on a skipped one cannot be checked either.
+    blocked.clear();
+    for (const c of skipped) checked.delete(c);
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (const c of [...checked]) {
+        const dep = (DEPENDS[c] ?? []).find((d) => skipped.has(d) || blocked.has(d));
+        if (dep !== undefined) {
+          checked.delete(c);
+          blocked.set(c, skipped.has(dep) ? dep : blocked.get(dep)!);
+          grew = true;
+        }
+      }
     }
   };
   setPolicy(opts.claims_override ?? CLAIMS);
@@ -562,7 +587,13 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     const isRequired = required.has(c);
     let status: ClaimStatus;
     let evidence: string;
-    if (!checked.has(c)) {
+    if (skipped.has(c)) {
+      status = 'skipped';
+      evidence = `skipped by user (--skip-claim ${c})${isDeclared ? '; the pack declares it' : ''}`;
+    } else if (blocked.has(c)) {
+      status = 'not_checked';
+      evidence = `not checked: it depends on ${blocked.get(c)}, which was skipped by user (--skip-claim)`;
+    } else if (!checked.has(c)) {
       status = 'not_declared';
       evidence = '';
     } else if (crashed !== null) {
@@ -571,7 +602,7 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
       evidence = `not finished: the verifier stopped (${crashed})`;
     } else if (noTsa && NEEDS_TSA.includes(c)) {
       status = 'not_checked';
-      evidence = 'skipped (--no-tsa)';
+      evidence = `not checked (--no-tsa)${isDeclared ? '; the pack declares it: --skip-claim ' + c + ' to verify without it' : ''}`;
     } else if (mine.some((k) => k.status === 'fail')) {
       status = 'fail';
       evidence = mine.filter((k) => k.status === 'fail').map((k) => `${k.subject ? `${k.subject} ` : ''}${k.check}: ${k.evidence}`)[0]!;
@@ -590,7 +621,8 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     result.failed === 0 &&
     result.auditor.source !== 'unpinned' &&
     ALWAYS.every((c) => result.claims.find((x) => x.claim === c)!.status === 'pass') &&
-    result.claims.every((c) => c.status !== 'fail');
+    // A claim the pack makes (or the checks need) that was not verified blocks exit 0, unless the user skipped it.
+    result.claims.every((c) => c.status !== 'fail' && c.status !== 'not_checked');
   return result;
 
   function claimSummaries(): Partial<Record<Claim, string>> {
@@ -797,7 +829,7 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     // verified RFC 3161 time inside the key's validity (before valid_to + 5 min; for a revoked key,
     // before compromised_since − 5 min): received_at is the signer's own claim. For such receipts,
     // receipts depends on independent timestamps; under --no-tsa they fail.
-    if (listOk && !noTsa && !on('independent_timestamps')) {
+    if (listOk && !noTsa && !on('independent_timestamps') && !skipped.has('independent_timestamps')) {
       for (const f of receipts) {
         let id: unknown = null;
         try {
@@ -866,7 +898,7 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
       const notHead = entry !== null && (entry.status ?? 'active') !== 'active';
       if (notHead && (noTsa || !on('independent_timestamps'))) {
         const need = compromisedSince !== null ? `before ${compromisedSince} − 5 min (compromised_since)` : `no later than ${entry!.valid_to ?? '?'} + 5 min (valid_to)`;
-        ok = add('timestamp', 'receipts', base, compromisedSince !== null ? 'stamped before compromise' : 'stamped within key validity', false, `${r.service_key_id} is ${entry!.status}; its receipt counts only with a verified RFC 3161 time ${need}, and RFC 3161 tokens are not checked here (${noTsa ? '--no-tsa' : 'independent_timestamps not checked'}); received_at is the signer's own claim and does not count`) && ok;
+        ok = add('timestamp', 'receipts', base, compromisedSince !== null ? 'stamped before compromise' : 'stamped within key validity', false, `${r.service_key_id} is ${entry!.status}; its receipt counts only with a verified RFC 3161 time ${need}, and RFC 3161 tokens are not checked here (${noTsa ? '--no-tsa' : skipped.has('independent_timestamps') ? 'independent_timestamps skipped by user' : 'independent_timestamps not checked'}); received_at is the signer's own claim and does not count`) && ok;
       }
 
       const cp = r.checkpoint;
@@ -1262,7 +1294,7 @@ export const VerifyAuditJsonSchema = z.strictObject({
     tsa_root_sha256: z.array(z.string().regex(/^[0-9a-f]{64}$/)),
     tsa_time: z.enum(['now', 'gentime']),
   }),
-  claims: z.array(z.strictObject({ claim: z.enum(CLAIMS), status: z.enum(['pass', 'fail', 'not_declared', 'not_checked']), declared: z.boolean(), required: z.boolean(), evidence: z.string() })).length(CLAIMS.length),
+  claims: z.array(z.strictObject({ claim: z.enum(CLAIMS), status: z.enum(['pass', 'fail', 'not_declared', 'not_checked', 'skipped']), declared: z.boolean(), required: z.boolean(), evidence: z.string() })).length(CLAIMS.length),
   checks: z.array(
     z.strictObject({ group: z.enum(['pack', 'bundle', 'keys', 'anchor', 'timestamp', 'timeline', 'ordering', 'runs']), claim: z.enum(CLAIMS).nullable(), subject: z.string().nullable(), check: z.string(), status: STATUS, evidence: z.string() }),
   ),
@@ -1314,7 +1346,7 @@ export const VerifyAuditJsonSchema = z.strictObject({
     .nullable(),
 });
 
-const LABEL: Record<CheckStatus | ClaimStatus, string> = { pass: 'PASS', fail: 'FAIL', not_applicable: 'N/A', not_declared: 'not declared', not_checked: 'not checked' };
+const LABEL: Record<CheckStatus | ClaimStatus, string> = { pass: 'PASS', fail: 'FAIL', not_applicable: 'N/A', not_declared: 'not declared', not_checked: 'not checked', skipped: 'skipped' };
 const GROUP_TITLE: Record<CheckGroup, string> = { pack: 'Pack', bundle: 'Evidence bundle', keys: 'Anchor service keys', anchor: 'Anchors', timestamp: 'Anchors', timeline: 'Timeline', ordering: 'Ordering', runs: 'Runs' };
 
 /** The human-readable report: claims, one PASS / FAIL / N/A line per check with its evidence, values to compare. */
@@ -1376,10 +1408,14 @@ export function renderVerifyAudit(r: VerifyAuditResult): string {
   L.push('');
   const passed = r.claims.filter((c) => c.status === 'pass').map((c) => c.claim);
   const unchecked = r.claims.filter((c) => c.status === 'not_checked').map((c) => c.claim);
+  const skippedC = r.claims.filter((c) => c.status === 'skipped').map((c) => c.claim);
+  const failedC = r.claims.filter((c) => c.status === 'fail').map((c) => c.claim);
   L.push(
     r.ok
-      ? `RESULT: VERIFIED  ${passed.join(', ')}${unchecked.length ? `  (${unchecked.join(', ')} not checked)` : ''}`
-      : `RESULT: FAILED  ${r.claims.filter((c) => c.status === 'fail').map((c) => c.claim).join(', ') || 'pack structure'} (${r.failed} failed check(s))`,
+      ? `RESULT: VERIFIED  ${passed.join(', ')}${skippedC.length ? `  (${skippedC.join(', ')} skipped by user)` : ''}`
+      : r.failed === 0 && failedC.length === 0 && unchecked.length > 0
+        ? `RESULT: NOT VERIFIED  ${unchecked.join(', ')} not checked${passed.length ? `; passed: ${passed.join(', ')}` : ''}`
+        : `RESULT: FAILED  ${failedC.join(', ') || 'pack structure'} (${r.failed} failed check(s))${unchecked.length ? `; not checked: ${unchecked.join(', ')}` : ''}`,
   );
   return L.join('\n') + '\n';
 }

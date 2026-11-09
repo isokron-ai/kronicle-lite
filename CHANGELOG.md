@@ -99,6 +99,12 @@ uses semantic versioning once past 0.x.
   source is labelled (`--genesis` or `KRONICLE_ANCHOR_GENESIS`).
   `keyListRegression` is isokron-anchor PR #3 (7e0e96f): any change to a kept
   key other than the status progression is a rollback.
+- **Unchecked claims block exit 0:** a claim the pack declares that is not
+  checked (for example under `--no-tsa`) is `not checked` and the result is
+  `NOT VERIFIED` (exit 1). `--skip-claim CLAIM[,…]` opts out explicitly
+  (`skipped by user`; exit 0 if every other checked claim passes); a claim
+  that depends on a skipped one is `not checked`; `integrity` and `chain`
+  cannot be skipped.
 - **`--require`** passes when the claim was checked and passed, declared or
   reached as a dependency. A verifier error marks every claim it was checking
   FAIL.

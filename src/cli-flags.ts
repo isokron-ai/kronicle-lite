@@ -18,7 +18,7 @@ export const COMMAND_OPTIONS: Readonly<Record<string, readonly string[]>> = {
   'audit export': ['audit-id', 'out'],
   'audit stamp': ['anchor-id', 'out', 'tsa', 'json'],
   'audit package': ['audit-id', 'out', 'timestamps', 'tsa-roots', 'anchor-keys', 'genesis', 'json'],
-  'verify-audit': ['allow-hardlinks', 'anchor-keys', 'genesis', 'json', 'key', 'key-fingerprint', 'max-bytes', 'no-tsa', 'require', 'tsa-at-gentime', 'tsa-roots'],
+  'verify-audit': ['allow-hardlinks', 'anchor-keys', 'genesis', 'json', 'key', 'key-fingerprint', 'max-bytes', 'no-tsa', 'require', 'skip-claim', 'tsa-at-gentime', 'tsa-roots'],
   rebuild: [],
   demo: ['dir', 'keep'],
   checkpoint: ['from', 'to', 'push', ...ANCHOR],

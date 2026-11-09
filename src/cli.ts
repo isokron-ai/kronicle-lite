@@ -241,7 +241,7 @@ Usage:
                                                                  store supports), SHA256SUMS(.sig), COMPLETION.txt, VERIFY.md;
                                                                  then runs verify-audit on it
   kronicle-lite verify-audit PACK --key-fingerprint SHA256 | --key PEM-FILE [--anchor-keys FILE] [--genesis SHA256@VALID_FROM]
-                 [--tsa-roots DIR] [--no-tsa] [--tsa-at-gentime] [--require CLAIM,…] [--max-bytes N] [--allow-hardlinks] [--json]
+                 [--tsa-roots DIR] [--no-tsa] [--tsa-at-gentime] [--require CLAIM,…] [--skip-claim CLAIM,…] [--max-bytes N] [--allow-hardlinks] [--json]
                                                                  verify an IsoKron Evidence Pack offline. The auditor key is
                                                                  pinned by its SHA-256 from the report or SOW (--key-fingerprint;
                                                                  --key, --anchor-keys, --tsa-roots must not resolve into the
@@ -252,7 +252,10 @@ Usage:
                                                                  run_sequence; every claim when claims.json is missing or
                                                                  unauthenticated), each PASS or FAIL with its evidence; others
                                                                  are "not declared" (--require CLAIM checks one and needs it
-                                                                 to pass, declared or not). Trust: the
+                                                                 to pass, declared or not). A declared claim that is not
+                                                                 checked (e.g. under --no-tsa) blocks exit 0: NOT VERIFIED;
+                                                                 --skip-claim CLAIM opts out of one explicitly ("skipped by
+                                                                 user"). Trust: the
                                                                  compiled genesis pin of the anchor service key chain
                                                                  (--genesis or KRONICLE_ANCHOR_GENESIS, <sha256>@<valid_from>,
                                                                  for a self-hosted service) and the pinned TSA CAs (--tsa-roots).
@@ -852,7 +855,7 @@ async function main(argv: string[]): Promise<number> {
 /** `verify-audit PACKAGE`: exit 0 verified, 1 a check failed, 2 usage or an unreadable package / trust input. */
 async function verifyAuditCommand(positional: string[], flags: Record<string, string | true>, dataDir: string): Promise<number> {
   const usage =
-    'usage: kronicle-lite verify-audit PACK --key-fingerprint SHA256 | --key PEM-FILE [--anchor-keys FILE] [--genesis SHA256@VALID_FROM] [--tsa-roots DIR] [--no-tsa] [--tsa-at-gentime] [--require CLAIM,…] [--max-bytes N] [--allow-hardlinks] [--json]';
+    'usage: kronicle-lite verify-audit PACK --key-fingerprint SHA256 | --key PEM-FILE [--anchor-keys FILE] [--genesis SHA256@VALID_FROM] [--tsa-roots DIR] [--no-tsa] [--tsa-at-gentime] [--require CLAIM,…] [--skip-claim CLAIM,…] [--max-bytes N] [--allow-hardlinks] [--json]';
   const dir = positional[0];
   if (!dir) {
     process.stderr.write(`${usage}\n`);
@@ -881,6 +884,7 @@ async function verifyAuditCommand(positional: string[], flags: Record<string, st
     if (maxBytes !== undefined && maxBytes <= 0) throw new Error('--max-bytes must be a positive integer');
     const require = list(flags['require']);
     for (const c of require) if (!(CLAIMS as readonly string[]).includes(c)) throw new Error(`--require: unknown claim ${c} (one of ${CLAIMS.join(', ')})`);
+    const skip = list(flags['skip-claim']);
     if (flags['no-tsa'] === true && (roots !== undefined || flags['tsa-at-gentime'] === true)) throw new Error('--no-tsa cannot be combined with --tsa-roots or --tsa-at-gentime');
     opts = {
       ...(key ? { key_pem: readBundleFile(key, 64 * 1024, { followLinks: true }).toString('utf8') } : {}),
@@ -894,6 +898,7 @@ async function verifyAuditCommand(positional: string[], flags: Record<string, st
       ...(maxBytes !== undefined ? { max_bytes: maxBytes } : {}),
       ...(flags['allow-hardlinks'] === true ? { allow_hardlinks: true } : {}),
       ...(require.length ? { require: require as Claim[] } : {}),
+      ...(skip.length ? { skip_claims: skip as Claim[] } : {}),
     };
   } catch (err) {
     process.stderr.write(`error: ${(err as Error).message}\n${usage}\n`);
