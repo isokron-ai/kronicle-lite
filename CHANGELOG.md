@@ -141,7 +141,8 @@ uses semantic versioning once past 0.x.
       compile it; the length bound is `maxLength` and is checked in code.
       Catalogs re-pinned. `doctor --full` now checks the audit projection,
       as `verify-chain` does.
-    - The lost-update lookup scans events since the cursor (#36).
+    - Deferred: the lost-update lookup still scans events since the cursor;
+      an index for it is tracked in #36.
   - **Dogfood follow-ups (pre-release audit run).**
     - **One slug rule (KL-5).** The CLI accepted `finding/G-2`, MCP
       `put_document` refused it: each path had its own regex. One pattern

@@ -87,7 +87,9 @@ Hostile input fails cleanly:
   arm64, Node 25): with `leaf_count` 1e12 (refused from the manifest) or a
   consistent one (stopped at the first surplus or bad line), exit 1 in about
   0.1 s at about 70 MB RSS. Before, the verifier ran out of heap after 52 s
-  and 103 s at 4.4 GB (exit 134). A self-signed sparse 500 MiB
+  and 103 s at 4.4 GB (exit 134). Memory is bounded by the signed index,
+  not by the bundle: a 56 MB manifest listing 600k stubs takes 2.5 to 4.8 s
+  at about 1 GB. A self-signed sparse 500 MiB
   `events.jsonl` that matches its digest fails in about 40 ms (Linux,
   Node 22).
 - **Files.** `manifest.json`, `events.jsonl` and every blob must be regular
