@@ -1,8 +1,9 @@
 /**
  * The anchor service key-list model: a port of isokron-anchor
  * `src/core/servicekeys.ts` and the GenesisPin of `src/core/genesis.ts`
- * (feat/audit-anchoring f289c6b). The code below the adapter is the service's,
- * statement for statement, with its error texts, so that a key list valid for
+ * (isokron-anchor PR #3, fix/rollback-cache 7e0e96f: feat/audit-anchoring
+ * f289c6b plus the stricter keyListRegression). The code below the adapter is
+ * the service's, statement for statement, with its error texts, so that a key list valid for
  * the service, its verification page and its client is valid here, and one
  * that is BROKEN there is BROKEN here. test/keychain.test.ts holds lists the
  * service's scripts/rotate-key.mjs built and its own checkKeyChain judged, and
@@ -66,7 +67,11 @@ export interface GenesisPin {
   valid_from: string;
 }
 const ISO_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
-/** `<sha256>@<valid_from>` (sha256 may carry colons) or {sha256, valid_from}; null when malformed (the service's parseGenesisPin). */
+/**
+ * `<sha256>@<valid_from>` (sha256 may carry colons) or {sha256, valid_from}; null when malformed.
+ * The service's parseGenesisPin, plus one change: the result is canonical (lowercase hex, and
+ * valid_from as Date#toISOString), so `…00Z` and `…00.000Z` are one pin, never two cache slots.
+ */
 export function parseGenesisPin(v: unknown): GenesisPin | null {
   let sha: unknown;
   let vf: unknown;
@@ -83,7 +88,9 @@ export function parseGenesisPin(v: unknown): GenesisPin | null {
   const s = sha.replace(/:/g, '').toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(s)) return null;
   if (!ISO_UTC.test(vf) || !Number.isFinite(Date.parse(vf))) return null;
-  return { sha256: s, valid_from: vf };
+  const canonical = new Date(Date.parse(vf)).toISOString();
+  if (canonical.slice(0, 19) !== vf.slice(0, 19)) return null; // a calendar field out of range (rolled over)
+  return { sha256: s, valid_from: canonical };
 }
 export const formatGenesisPin = (p: GenesisPin): string => `${p.sha256}@${p.valid_from}`;
 /** The compiled production pin (isokron-anchor src/core/genesis.ts PRODUCTION_GENESIS). */
@@ -425,19 +432,39 @@ export function checkKeyChain(input: readonly ServiceKeyEntry[], genesis: Genesi
 
 const STATUS_RANK: Record<string, number> = { active: 0, retired: 1, revoked: 2 };
 
+/** Fields a key's status progression may change, together with its signed statement. */
+const STATUS_FIELDS = new Set(['status', 'valid_to', 'compromised_since', 'retirement_signature', 'retirement_signed_by']);
+
 /**
- * Rollback check for a client that keeps the key list it last trusted:
- * null when `fresh` keeps every key of `cached` with the same public key and
- * a status, valid_to and compromised_since at least as strong; otherwise why
- * not. A list that drops a key (a prefix of the cached chain), turns revoked
- * into retired/active or retired into active, removes or extends valid_to,
- * or removes or moves compromised_since later, is a regression.
+ * Rollback check for a client that keeps the key list it last trusted: null
+ * when `fresh` keeps every key of `cached` unchanged except for an allowed
+ * status progression; otherwise why not. Regressions:
+ *   - a kept key is missing (an older prefix of the chain, or a truncated list);
+ *   - any field outside the status fields differs: public_key_pem, valid_from,
+ *     successor_signature, signed_by, alg, or any other member (a re-signed
+ *     list that moves a key's valid_from is refused);
+ *   - the status goes back (revoked → retired/active, retired → active), a
+ *     valid_to is removed or moved later, a compromised_since is removed or
+ *     moved later;
+ *   - the status statement (retirement_signature / retirement_signed_by)
+ *     changes while status, valid_to and compromised_since stay the same.
+ * Allowed: new keys, and active → retired → revoked, an earlier valid_to or
+ * compromised_since, each with its new statement (whose signature the chain
+ * check verifies).
  */
 export function keyListRegression(cached: readonly ServiceKeyEntry[], fresh: readonly ServiceKeyEntry[]): string | null {
+  const same = (a: unknown, b: unknown) => canonicalize(a ?? null) === canonicalize(b ?? null);
+  const show = (v: unknown) => (v === undefined || v === null ? 'unset' : typeof v === 'string' ? (v.length > 40 ? `${v.slice(0, 40)}…` : v) : canonicalize(v));
   for (const c of cached) {
     const f = fresh.find((k) => k.key_id === c.key_id);
     if (!f) return `${c.key_id} is in the key list seen earlier but missing now (an older or truncated list)`;
-    if (f.public_key_pem.trim() !== c.public_key_pem.trim()) return `${c.key_id} has a different public key than in the list seen earlier`;
+    if (String(f.public_key_pem ?? '').trim() !== String(c.public_key_pem ?? '').trim()) return `${c.key_id} has a different public key than in the list seen earlier`;
+    const cr = c as unknown as Record<string, unknown>;
+    const fr = f as unknown as Record<string, unknown>;
+    for (const field of new Set([...Object.keys(cr), ...Object.keys(fr)])) {
+      if (field === 'public_key_pem' || STATUS_FIELDS.has(field)) continue;
+      if (!same(cr[field], fr[field])) return `${c.key_id} ${field} was ${show(cr[field])} in the list seen earlier and is ${show(fr[field])} now`;
+    }
     const cs = c.status ?? 'active';
     const fs = f.status ?? 'active';
     // An unknown status is not a rollback: such a list does not verify anyway.
@@ -445,6 +472,10 @@ export function keyListRegression(cached: readonly ServiceKeyEntry[], fresh: rea
     if (c.valid_to != null && (f.valid_to == null || !(Date.parse(f.valid_to) <= Date.parse(c.valid_to)))) return `${c.key_id} valid_to was ${c.valid_to} in the list seen earlier and is ${f.valid_to ?? 'unset'} now`;
     if (c.compromised_since != null && (f.compromised_since == null || !(Date.parse(f.compromised_since) <= Date.parse(c.compromised_since)))) {
       return `${c.key_id} compromised_since was ${c.compromised_since} in the list seen earlier and is ${f.compromised_since ?? 'unset'} now`;
+    }
+    const progressed = !(same(c.status ?? 'active', f.status ?? 'active') && same(c.valid_to, f.valid_to) && same(c.compromised_since, f.compromised_since));
+    if (!progressed && (!same(c.retirement_signature, f.retirement_signature) || !same(c.retirement_signed_by, f.retirement_signed_by))) {
+      return `${c.key_id} status statement changed without a status change since the list seen earlier`;
     }
   }
   return null;

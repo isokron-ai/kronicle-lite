@@ -79,10 +79,29 @@ uses semantic versioning once past 0.x.
   signing key's `valid_to` invalidates the receipt.
 - **Timestamps:** an unreadable receipt fails `independent_timestamps`; each
   receipt needs valid tokens from two different pinned TSA CAs.
-- **Ordering:** every run must be committed by a later timestamped anchor; a
-  `/1` bundle's `measured_at` must lie between the freeze anchor's TSA time and
-  the run's committing anchor's TSA time; a `/2` bundle accepts the freeze
-  nonce only.
+- **Ordering:** every run must be committed by a later timestamped anchor and
+  carry the freeze nonce, in every bundle format; `measured_at` (the auditor's
+  own record) is never a basis, so a `/1` bundle does not get
+  `harness_frozen_before_runs` declared, and fails it if declared.
+- **Retired and revoked keys:** a receipt signed by a key that is not the
+  active head needs a verified RFC 3161 time inside the key's validity
+  (`valid_to` + 5 min; revoked: before `compromised_since` − 5 min), so
+  `receipts` pulls in `independent_timestamps` for it, and `--no-tsa` fails it.
+- **Trust inputs outside the pack:** `--key`, `--anchor-keys` and `--tsa-roots`
+  paths that resolve into the pack (symlinks followed, `..`-prefixed names
+  handled, hard links to pack files) are refused, exit 2. `COMPLETION.txt` and
+  `VERIFY.md` carry placeholders, never the auditor fingerprint or a genesis
+  pin.
+- **Rollback cache:** one slot per canonical genesis pin (`…00Z` and
+  `…00.000Z` are one pin); every slot is shape-checked, and a damaged cache
+  fails and is never overwritten; a first list is reported as recorded, not
+  as PASS; library callers pass `seen_dir` or `rollback: 'off'`. The genesis
+  source is labelled (`--genesis` or `KRONICLE_ANCHOR_GENESIS`).
+  `keyListRegression` is isokron-anchor PR #3 (7e0e96f): any change to a kept
+  key other than the status progression is a rollback.
+- **`--require`** passes when the claim was checked and passed, declared or
+  reached as a dependency. A verifier error marks every claim it was checking
+  FAIL.
 - **RFC 3161 parsing and paths:** pathLenConstraint; a CA-flagged signer and a
   signer without digitalSignature/nonRepudiation keyUsage are refused;
   `grantedWithMods`, unexpected fields, SignedData / SignerInfo / TSTInfo

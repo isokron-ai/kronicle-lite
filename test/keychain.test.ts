@@ -37,7 +37,7 @@ describe('key chain: same verdicts as the anchor service', () => {
   }
 
   it('covers rotation, revocation (by the key itself, an earlier key, a later key) and each tampering the review named', () => {
-    expect(v.generated_by).toMatch(/^isokron-anchor feat\/audit-anchoring [0-9a-f]{7,}: /);
+    expect(v.generated_by).toMatch(/^isokron-anchor fix\/rollback-cache 7e0e96f \(PR #3\): /);
     expect(Object.keys(v.cases).sort()).toEqual(
       [
         'empty',
@@ -94,6 +94,16 @@ describe('checkServiceKey: a revoked key never vouches on received_at alone', ()
 });
 
 describe('genesis pin', () => {
+  it('N4: the pin is canonical: case, colons and the spelling of valid_from do not make another pin', () => {
+    const want = { sha256: v.genesis.sha256, valid_from: '2026-11-01T00:00:00.000Z' };
+    for (const vf of ['2026-11-01T00:00:00Z', '2026-11-01T00:00:00.0Z', '2026-11-01T00:00:00.00Z', '2026-11-01T00:00:00.000Z']) {
+      expect(parseGenesisPin(`${v.genesis.sha256.toUpperCase()}@${vf}`)).toEqual(want);
+      expect(parseGenesisPin(`${v.genesis.sha256.match(/../g)!.join(':')}@${vf}`)).toEqual(want);
+      expect(parseGenesisPin({ sha256: v.genesis.sha256, valid_from: vf })).toEqual(want);
+    }
+    expect(parseGenesisPin(`${v.genesis.sha256}@2026-02-30T00:00:00Z`)).toBeNull(); // would roll over to March
+    expect(parseGenesisPin(`${v.genesis.sha256}@2026-11-01T24:00:00Z`)).toBeNull();
+  });
   it('is <sha256>@<valid_from>; a bare hash or a non-UTC time is not a pin', () => {
     expect(parseGenesisPin(`${v.genesis.sha256}@${v.genesis.valid_from}`)).toEqual(v.genesis);
     expect(parseGenesisPin(v.genesis.sha256)).toBeNull();
@@ -165,4 +175,27 @@ describe('signed key statements: the service README test vectors', () => {
       expect(verifySignature(pub, t.message.replace('2027-', '2028-'), t.signature)).toBe(false);
     });
   }
+});
+
+/** isokron-anchor fix/rollback-cache 7e0e96f test/node/keys.test.ts "round 5 L2", on the fixture lists. */
+describe('keyListRegression refuses any change to a kept key except the status progression (service 7e0e96f)', () => {
+  const kept = list('two_rotations');
+  const [k3, k2, k1] = kept.map((k) => k.key_id) as [string, string, string];
+  const set = (keys: typeof kept, kid: string, over: Record<string, unknown>) => keys.map((k) => (k.key_id === kid ? { ...k, ...over } : k));
+  it('a moved valid_from, successor_signature, signed_by, alg or any other field is refused', () => {
+    expect(keyListRegression(kept, set(kept, k2, { valid_from: '2026-11-15T00:00:00.000Z' }))).toMatch(new RegExp(`${k2} valid_from was 2026-12-01T00:00:00.000Z in the list seen earlier and is 2026-11-15T00:00:00.000Z now`));
+    expect(keyListRegression(kept, set(kept, k3, { successor_signature: 'A'.repeat(86) + '==' }))).toMatch(/successor_signature was .* now/);
+    expect(keyListRegression(kept, set(kept, k3, { signed_by: k1 }))).toMatch(/signed_by was .* now/);
+    expect(keyListRegression(kept, set(kept, k3, { alg: 'EdDSA' }))).toMatch(/alg was unset .* is EdDSA now/);
+    expect(keyListRegression(kept, set(kept, k3, { note: 'x' }))).toMatch(/note was unset .* is x now/);
+    expect(keyListRegression(kept, kept)).toBeNull();
+  });
+  it('a changed status statement without a status change is refused', () => {
+    const k1e = kept.find((k) => k.key_id === k1)!;
+    expect(keyListRegression(kept, set(kept, k1, { retirement_signature: 'B'.repeat(86) + '==', retirement_signed_by: k1e.retirement_signed_by }))).toMatch(/status statement changed without a status change/);
+  });
+  it('allowed: new keys, active/retired → revoked with its statement', () => {
+    expect(keyListRegression(list('one_rotation'), kept)).toBeNull();
+    expect(keyListRegression(kept, list('revoked_middle'))).toBeNull();
+  });
 });

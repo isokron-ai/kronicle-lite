@@ -390,8 +390,10 @@ kronicle-lite audit package --audit-id A --out pack/ --timestamps stamps/
   `openssl ts -verify -partial_chain -attime <genTime>` (or `verify-audit --tsa-at-gentime`)
   against the same pinned CAs, and keep the pack whole (the tokens carry
   their TSA chains). `COMPLETION.txt` holds the values for the report's first
-  page: manifest SHA-256, signing key fingerprint, final anchored root and its
-  timestamp times.
+  page: manifest SHA-256, signing key, final anchored root and its timestamp
+  times. It never carries the auditor fingerprint or a genesis pin (a forger
+  would write their own); `audit package` prints the fingerprint on the
+  operator's terminal for the report.
 - **Milestone events.** `harness_frozen`, `run_completed` (numbered by
   `run_seq`, with the freeze nonce) and `report_issued` ([AUDIT.md](docs/AUDIT.md));
   a bundle that uses them is format `/2`, which needs kronicle-lite 0.10.0 to

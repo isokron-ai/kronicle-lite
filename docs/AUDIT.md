@@ -110,8 +110,8 @@ timestamps:
   digest the timestamp authorities stamped). A run that records it as `nonce`
   (and, where it can, uses it in the names of objects it creates on the system
   under test) could not have been recorded before the freeze. `verify-audit`
-  checks `harness_frozen_before_runs` on the nonce when every run carries it,
-  otherwise on `measured_at`.
+  checks `harness_frozen_before_runs` on the nonce only: every run must carry
+  it. `measured_at` is the auditor's own record and never shows the order.
 - Each run names the harness digest it ran under (`fingerprint`); it must be
   the frozen one.
 - `run_seq` numbers the runs 1..N. Declare N at freeze time (`planned_runs`)
@@ -126,8 +126,10 @@ A bundle holding a milestone kind is exported as
 
 **The 0.9.0 convention.** Before these kinds, a harness freeze was recorded as
 `finding` with `class: "protocol_freeze"` and `fingerprint`, and runs as
-`call_measured` with `measured_at`. `verify-audit` reads that convention too
-(ordering on `measured_at`; no `run_sequence`, which needs `run_seq`).
+`call_measured` with `measured_at`. `verify-audit` reads that convention too,
+but `harness_frozen_before_runs` needs the freeze nonce, which `call_measured`
+cannot carry: `audit package` does not declare it for such a bundle (and
+`run_sequence` needs `run_seq`).
 
 **0.8.x stores.** A store made by 0.8.x gains the tables on its first
 read-write open. Opened read-only (`verify-chain`, `verify`, `doctor`, a

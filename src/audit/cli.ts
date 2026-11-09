@@ -110,7 +110,7 @@ export async function runAuditCli(positional: string[], flags: Flags, dataDir: s
           ...(ts ? { timestamps_dir: ts } : {}),
           ...(roots ? { tsa_roots: readPemDir(roots) } : {}),
           ...(keysFile ? { anchor_keys: JSON.parse(readFileSync(keysFile, 'utf8')) as unknown } : {}),
-          ...(genesis !== undefined ? { genesis } : {}),
+          ...(genesis.genesis !== undefined ? { genesis: genesis.genesis } : {}),
         });
         process.stdout.write(flags['json'] === true ? JSON.stringify(r, null, 2) + '\n' : renderPackage(r));
         return r.check.ok ? 0 : 1;

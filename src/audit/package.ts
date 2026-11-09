@@ -315,10 +315,13 @@ export async function buildAuditPackage(
     ...(opts.genesis !== undefined ? { genesis: opts.genesis } : {}),
     ...(opts.tsa_roots ? { tsa_roots: [...SHIPPED_TSA_ROOTS.map((r) => ({ name: r.name, pem: r.pem })), ...opts.tsa_roots] } : {}),
     ...(opts.now ? { now: opts.now } : {}),
+    // The packager is an anchor client too: its data dir keeps the key list it has seen (an in-memory store opts out, and says so).
+    ...(store.dataDir !== null ? { seen_dir: store.dataDir } : { rollback: 'off' as const }),
   };
   const probe = verifyAudit(out, { ...trustOpts, claims_override: CLAIMS });
-  // A self-hosted anchor service's pin goes into the printed commands (the compiled pin needs none).
-  const genesisArg = opts.genesis !== undefined ? ` --genesis ${probe.trust.genesis_sha256}@${probe.trust.genesis_valid_from}` : '';
+  // Files inside the pack never carry trust values (the auditor fingerprint, a genesis pin): a forger
+  // would write their own. They name where the reader gets them; a self-hosted service needs its pin.
+  const genesisArg = opts.genesis !== undefined ? ' --genesis <the anchor service genesis pin, sha256@valid_from, from its operator>' : '';
   const runs = probe.run_sequence;
   const decisions: { claim: Claim; declared: boolean; why: string }[] = [
     { claim: 'integrity', declared: true, why: 'always' },
@@ -347,7 +350,7 @@ export async function buildAuditPackage(
   writeNew(join(out, 'claims.json'), JSON.stringify(claims, null, 1) + '\n');
 
   const last = anchors[anchors.length - 1];
-  const keyLine = `${signer.key_id} (SHA-256 of the public key's SPKI: ${chainId})`;
+  const keyLine = `${signer.key_id} (compare its SPKI SHA-256 with the fingerprint in your report or SOW)`;
   const finalTimes = last ? (last.timestamps.length ? last.timestamps.map((t) => `${t.gen_time} (${t.tsa})`).join(', ') : `${last.received_at} (anchor service)`) : '-';
   writeNew(
     join(out, 'COMPLETION.txt'),
@@ -366,8 +369,8 @@ export async function buildAuditPackage(
       ...anchors.map((a) => `  ${a.file.replace(/\.receipt\.json$/, '').padEnd(26)} seq ${a.from_seq}..${a.to_seq}  ${a.timestamps.length ? a.timestamps.map((t) => `${t.tsa} ${t.gen_time}`).join(', ') : `anchor service ${a.received_at}`}`),
       `Claims                ${claims.claims.join(', ')}`,
       '',
-      `Verify:  npx -y kronicle-lite@${VERSION} verify-audit <this directory> --key-fingerprint ${chainId}${genesisArg}`,
-      '         (take the fingerprint from the report or SOW, not from a copy of this file)',
+      `Verify:  npx -y kronicle-lite@${VERSION} verify-audit <this directory> --key-fingerprint <auditor key fingerprint from your report or SOW>${genesisArg}`,
+      '         (this file does not carry the fingerprint: take it from the report or SOW)',
       'Raw commands without kronicle-lite: VERIFY.md',
       '',
     ].join('\n'),
@@ -416,8 +419,8 @@ function verifyMd(v: { audit_id: string; keyLine: string; manifestSha: string; r
     `- Final anchored root: \`${v.root}\``,
     `- Claims: ${v.claims.join(', ')}`,
     '',
-    'Compare the signing key with the fingerprint in your report or statement of work before you rely',
-    'on anything else here.',
+    'This file does not carry the auditor key fingerprint: take it from your report or statement of',
+    'work, and compare `auditor-key.pem` with it before you rely on anything else here.',
     '',
     '## One command',
     '',

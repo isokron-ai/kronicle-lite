@@ -244,20 +244,23 @@ Usage:
                  [--tsa-roots DIR] [--no-tsa] [--tsa-at-gentime] [--require CLAIM,…] [--max-bytes N] [--allow-hardlinks] [--json]
                                                                  verify an IsoKron Evidence Pack offline. The auditor key is
                                                                  pinned by its SHA-256 from the report or SOW (--key-fingerprint;
-                                                                 --key must not be a file inside the pack). SHA256SUMS is
+                                                                 --key, --anchor-keys, --tsa-roots must not resolve into the
+                                                                 pack). SHA256SUMS is
                                                                  verified first; integrity and chain are always checked, then
                                                                  the claims in the authenticated claims.json (receipts,
                                                                  independent_timestamps, harness_frozen_before_runs,
                                                                  run_sequence; every claim when claims.json is missing or
                                                                  unauthenticated), each PASS or FAIL with its evidence; others
-                                                                 are "not declared" (--require makes one mandatory). Trust: the
+                                                                 are "not declared" (--require CLAIM checks one and needs it
+                                                                 to pass, declared or not). Trust: the
                                                                  compiled genesis pin of the anchor service key chain
                                                                  (--genesis or KRONICLE_ANCHOR_GENESIS, <sha256>@<valid_from>,
                                                                  for a self-hosted service) and the pinned TSA CAs (--tsa-roots).
                                                                  A revoked service key's receipt counts only with a verified
-                                                                 RFC 3161 time before its compromised_since − 5 min.
-                                                                 Remembers the newest anchor key list per genesis in the data
-                                                                 dir and fails on a rollback. Establishes integrity, ordering
+                                                                 RFC 3161 time before its compromised_since − 5 min, a retired
+                                                                 key's only with one before its valid_to + 5 min (--no-tsa
+                                                                 fails both). Remembers the newest anchor key list per genesis
+                                                                 pin in the data dir and fails on a rollback or a damaged cache. Establishes integrity, ordering
                                                                  and independent time; the audit's depth is described in its
                                                                  report. Exit 0 every checked claim passed, 1 a check failed,
                                                                  2 usage or an unreadable pack
@@ -855,7 +858,7 @@ async function verifyAuditCommand(positional: string[], flags: Record<string, st
     process.stderr.write(`${usage}\n`);
     return 2;
   }
-  const { verifyAudit, renderVerifyAudit, VerifyAuditUsageError, CLAIMS, genesisFromCli } = await import('./audit/verify-audit.js');
+  const { verifyAudit, renderVerifyAudit, VerifyAuditUsageError, CLAIMS, genesisFromCli, refuseInsidePack } = await import('./audit/verify-audit.js');
   const { readBundleFile } = await import('./audit/verify-bundle.js');
   const { readPemDir } = await import('./audit/package.js');
   let opts: VerifyAuditOptions;
@@ -864,19 +867,16 @@ async function verifyAuditCommand(positional: string[], flags: Record<string, st
     const fingerprint = str(flags['key-fingerprint']);
     const genesis = genesisFromCli(str(flags['genesis']));
     const keys = str(flags['anchor-keys']);
-    if (key) {
-      // The pack's own key file pins nothing: whoever made the pack wrote it.
-      const { realpathSync } = await import('node:fs');
-      const { relative, isAbsolute } = await import('node:path');
-      let rel: string | null = null;
-      try {
-        rel = relative(realpathSync(dir), realpathSync(key));
-      } catch {
-        rel = null;
-      }
-      if (rel !== null && !rel.startsWith('..') && !isAbsolute(rel)) throw new Error(`--key ${key} is inside the pack; pin the auditor key from outside it (--key-fingerprint from the report or SOW)`);
-    }
+    // Trust inputs from inside the pack pin nothing: whoever made the pack wrote them.
+    if (key) refuseInsidePack(dir, key, '--key');
+    if (keys) refuseInsidePack(dir, keys, '--anchor-keys');
     const roots = str(flags['tsa-roots']);
+    if (roots) {
+      refuseInsidePack(dir, roots, '--tsa-roots');
+      const { readdirSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      for (const f of readdirSync(roots)) if (/\.(pem|crt)$/i.test(f)) refuseInsidePack(dir, join(roots, f), '--tsa-roots');
+    }
     const maxBytes = num(flags['max-bytes']);
     if (maxBytes !== undefined && maxBytes <= 0) throw new Error('--max-bytes must be a positive integer');
     const require = list(flags['require']);
@@ -885,7 +885,7 @@ async function verifyAuditCommand(positional: string[], flags: Record<string, st
     opts = {
       ...(key ? { key_pem: readBundleFile(key, 64 * 1024, { followLinks: true }).toString('utf8') } : {}),
       ...(fingerprint ? { key_fingerprint: fingerprint } : {}),
-      ...(genesis !== undefined ? { genesis } : {}),
+      ...genesis,
       seen_dir: dataDir,
       ...(keys ? { anchor_keys: JSON.parse(readBundleFile(keys, 1024 * 1024, { followLinks: true }).toString('utf8')) as unknown } : {}),
       ...(roots ? { tsa_roots: readPemDir(roots) } : {}),
