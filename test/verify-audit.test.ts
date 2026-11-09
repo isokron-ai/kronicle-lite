@@ -280,10 +280,13 @@ describe('verify-audit: a synthetic evidence pack end to end', () => {
     const blocks = [...raw.matchAll(/```sh\n([\s\S]*?)```/g)].map((m) => m[1]!).join('\n');
     const script = blocks.split('\n').filter((l) => !/^sha256sum /.test(l) || spawnSync('sha256sum', ['--version']).status === 0);
     const r = spawnSync('bash', ['-euo', 'pipefail', '-c', script.join('\n')], { cwd: d, encoding: 'utf8' });
-    expect(r.stderr + r.stdout).not.toMatch(/fail|error/i);
+    const all = r.stdout + r.stderr;
+    // (some runners' openssl.cnf prints include-path noise on stderr; judge the verification lines only)
+    expect(all).not.toMatch(/Verification: FAILED|Signature Verification Failure|: FAILED/);
     expect(r.status).toBe(0);
-    expect((r.stdout + r.stderr).match(/Verification: OK/g)?.length).toBeGreaterThanOrEqual(12);
-    expect(r.stdout + r.stderr).toMatch(/Signature Verified Successfully/);
+    expect(all.match(/Verification: OK/g)?.length).toBeGreaterThanOrEqual(12); // 6 tokens, now and at genTime
+    expect(all.match(/Signature Verified Successfully/g)?.length).toBe(3); // SHA256SUMS, a receipt, its checkpoint
+    expect(all.match(/: OK$/gm)?.length).toBeGreaterThanOrEqual(25); // shasum -c lines
   });
 
   it('one byte flipped in an artifact: exit 1, integrity FAIL (SHA256SUMS and the bundle artifacts check)', () => {
