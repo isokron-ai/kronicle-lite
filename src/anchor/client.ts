@@ -12,7 +12,7 @@
  */
 
 import { parseAnchorReceipt, verifyAnchorReceiptSignature, type AnchorReceipt } from './receipt.js';
-import { checkPublishedServiceKey } from './trust.js';
+import { checkServiceKey, PRODUCTION_GENESIS, type GenesisPin, type ServiceKeyEntry } from './keychain.js';
 import type { WireCheckpoint } from './wire.js';
 
 export const DEFAULT_ANCHOR_TIMEOUT_MS = 10_000;
@@ -72,7 +72,7 @@ export interface RemoteChain {
 export interface ServiceKeys {
   v: 1;
   issuer: string;
-  keys: { key_id: string; public_key_pem: string; status: string; valid_from: string; valid_to: string | null }[];
+  keys: ServiceKeyEntry[];
 }
 
 export class AnchorApiError extends Error {
@@ -336,33 +336,30 @@ export class AnchorClient {
 
   /**
    * The published key for `service_key_id` when it may vouch for something
-   * issued at `at` — the service's own rule (isokron-anchor
-   * src/core/servicekeys.ts): listed once, derives to its key_id, usable
-   * Ed25519 point, status active (or retired with valid_to), inside its
-   * validity window, successor signature verified when present. Unpinned:
-   * the anchor commands verify against the local pins (trust.ts), not this.
+   * issued at `at`: the list chains to `genesis` and the key is the current
+   * head (isokron-anchor checkServiceKey, revoked and nonHead 'reject').
+   * Not rollback-checked: the anchor commands go through trust.ts.
    */
-  async servicePublicKeyPem(service_key_id: string, at: string): Promise<string | null> {
+  async servicePublicKeyPem(service_key_id: string, at: string, genesis: GenesisPin = PRODUCTION_GENESIS): Promise<string | null> {
     const keys = await this.serviceKeys();
-    const c = checkPublishedServiceKey(Array.isArray(keys?.keys) ? keys.keys : [], service_key_id, at);
-    return c.ok ? c.pem : null;
+    const c = checkServiceKey(Array.isArray(keys?.keys) ? keys.keys : [], service_key_id, at, genesis, { revoked: 'reject', nonHead: 'reject' });
+    return c.ok ? c.entry.public_key_pem : null;
   }
 
   /**
    * Parse + countersignature check against the keys this client was given
-   * (preloaded) or fetched, with the service's key rules at the receipt's
-   * signed time. Throws on failure. NOT pinned: a key document from the
-   * same channel as the receipt proves little on its own — the CLI and MCP
-   * paths use verifyReceiptWithPins.
+   * (preloaded) or fetched, with the service's rules (head key only, the list
+   * chained to `genesis`). Throws on failure. Not rollback-checked: the CLI
+   * and MCP paths use trust.ts verifyReceiptWithKeys.
    */
-  async verifyReceipt(input: unknown): Promise<AnchorReceipt> {
+  async verifyReceipt(input: unknown, genesis: GenesisPin = PRODUCTION_GENESIS): Promise<AnchorReceipt> {
     const parsed = parseAnchorReceipt(input);
     if (!parsed.ok) throw new Error(`anchor receipt malformed: ${parsed.detail}`);
     const id = parsed.value.service_key_id;
     const keys = await this.serviceKeys();
-    const c = checkPublishedServiceKey(Array.isArray(keys?.keys) ? keys.keys : [], id, parsed.value.received_at);
+    const c = checkServiceKey(Array.isArray(keys?.keys) ? keys.keys : [], id, parsed.value.received_at, genesis, { revoked: 'reject', nonHead: 'reject' });
     if (!c.ok) throw new Error(`service key ${id} (${this.baseUrl}/.well-known/anchor-keys.json): ${c.detail}`);
-    if (!verifyAnchorReceiptSignature(parsed.value, c.pem)) throw new Error('anchor receipt countersignature does not verify');
+    if (!verifyAnchorReceiptSignature(parsed.value, c.entry.public_key_pem)) throw new Error('anchor receipt countersignature does not verify');
     return parsed.value;
   }
 }

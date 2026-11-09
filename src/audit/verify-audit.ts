@@ -52,7 +52,7 @@
  */
 
 import { createPublicKey, X509Certificate } from 'node:crypto';
-import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 
 import { z } from 'zod';
@@ -474,11 +474,15 @@ export function refuseInsidePack(packDir: string, p: string, flag: string): void
     throw new VerifyAuditUsageError(`${flag} ${p} is ${st.nlink > 1n ? 'a hard link to ' : ''}a file inside the pack; trust inputs must come from outside it`);
   }
 }
+const MAX_PACK_ENTRIES = 200_000;
+/** (dev, ino) of every regular file under the pack. Fails closed when the pack is too deep or too large to list. */
 function packInodes(pack: string): Set<string> {
   const out = new Set<string>();
+  let entries = 0;
   const walk = (d: string, depth: number) => {
-    if (depth > 8 || out.size > 100_000) return;
+    if (depth > 64) throw new VerifyAuditUsageError(`the pack is nested deeper than 64 directories; trust inputs cannot be checked against it`);
     for (const e of readdirSync(d, { withFileTypes: true })) {
+      if (++entries > MAX_PACK_ENTRIES) throw new VerifyAuditUsageError(`the pack holds more than ${MAX_PACK_ENTRIES} entries; trust inputs cannot be checked against it`);
       const f = join(d, e.name);
       if (e.isDirectory()) walk(f, depth + 1);
       else if (e.isFile()) {
@@ -489,6 +493,76 @@ function packInodes(pack: string): Set<string> {
   };
   walk(pack, 0);
   return out;
+}
+
+/** An opened trust input: checked by the identity of the open file, read from the same descriptor. */
+export interface OpenTrustInput {
+  /** Reads the whole file from the checked descriptor (at most `maxBytes`). */
+  read(): Buffer;
+  close(): void;
+}
+
+/**
+ * T8: open a trust input (--key, --anchor-keys, a --tsa-roots file) ONCE. The path checks run first
+ * (refuseInsidePack); then the descriptor's own (dev, ino), from fstat, must be a regular file that
+ * is not a file of the pack; and the content is read from that descriptor. Swapping the path (a
+ * symlink flipped after the check) cannot change what is read.
+ */
+export function openTrustInput(packDir: string, p: string, flag: string, maxBytes: number): OpenTrustInput {
+  refuseInsidePack(packDir, p, flag);
+  let fd: number;
+  try {
+    fd = openSync(p, 'r');
+  } catch (err) {
+    throw new VerifyAuditUsageError(`${flag} ${p}: ${(err as Error).message}`);
+  }
+  try {
+    const st = fstatSync(fd, { bigint: true });
+    if (!st.isFile()) throw new VerifyAuditUsageError(`${flag} ${p} is not a regular file`);
+    let pack: string;
+    try {
+      pack = realpathSync.native(packDir);
+    } catch {
+      pack = realpathSync(packDir);
+    }
+    if (packInodes(pack).has(`${st.dev}:${st.ino}`)) throw new VerifyAuditUsageError(`${flag} ${p} is a file inside the pack; trust inputs must come from outside it`);
+    if (st.size > BigInt(maxBytes)) throw new VerifyAuditUsageError(`${flag} ${p} is larger than ${maxBytes} bytes`);
+  } catch (err) {
+    closeSync(fd);
+    throw err;
+  }
+  let open = true;
+  return {
+    read(): Buffer {
+      const chunks: Buffer[] = [];
+      let total = 0;
+      let pos = 0;
+      for (;;) {
+        const buf = Buffer.alloc(64 * 1024);
+        const n = readSync(fd, buf, 0, buf.length, pos);
+        if (n === 0) break;
+        pos += n;
+        total += n;
+        if (total > maxBytes) throw new VerifyAuditUsageError(`${flag} ${p} is larger than ${maxBytes} bytes`);
+        chunks.push(buf.subarray(0, n));
+      }
+      return Buffer.concat(chunks);
+    },
+    close(): void {
+      if (open) closeSync(fd);
+      open = false;
+    },
+  };
+}
+
+/** openTrustInput, read, close. */
+export function readTrustInput(packDir: string, p: string, flag: string, maxBytes: number): Buffer {
+  const h = openTrustInput(packDir, p, flag, maxBytes);
+  try {
+    return h.read();
+  } finally {
+    h.close();
+  }
 }
 
 // ───────────────────────────── verify ─────────────────────────────

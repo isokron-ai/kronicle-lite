@@ -603,9 +603,9 @@ holds the public half so a copied database verifies on its own. Setting
 `UNVERIFIED` / `unknown_key`.
 
 ```
-<data-dir>/config.json               {"anchor_url", "license_key"}, mode 0600 (0.4.0; created with anchor_url only)
-<data-dir>/anchor-keys.pinned.json   pinned anchor service keys, mode 0600 (0.9.0; §9)
-<data-dir>/anchor-keys.cache.json    0.4.0–0.8.0: last fetched service key document; no longer written or trusted (0.9.0)
+<data-dir>/config.json               {"anchor_url", "license_key", "anchor_genesis"}, mode 0600 (0.4.0; created with anchor_url only)
+<data-dir>/anchor-keys.cache.json    0.10.0: service key lists kept per service and genesis pin (rollback reference; §9)
+<data-dir>/anchor-keys.pinned.json   0.8.1–0.9.x pin store; no longer read (0.10.0)
 ```
 
 ## 7. Export
@@ -685,22 +685,32 @@ cross-checked and a disagreement is reported, never used. Every receipt held
 in `anchors` is checked, whether or not the service lists it; `--offline`
 re-verifies the stored `receipt_json`.
 
-Pins (`anchor-keys.pinned.json`, `{v:1, keys:[{key_id, public_key_pem,
-status, valid_from, valid_to, source, pinned_at, signed_by, issuer}]}`):
-with nothing pinned, the first key document fetched is pinned (`tofu`). A
-package-shipped pin for the origin or `service_key_pins: [PEM…]` in
-`config.json` is authoritative and turns first-use pinning off. A new key is
-pinned only when its `successor_signature` is a valid Ed25519 signature by a
-pinned, non-revoked key named in `signed_by` over
-`canonicalize({key_id, public_key_pem, valid_from})`, or by
-`kronicle-lite anchor keys add PEM-FILE`. A pinned public key is never
-replaced from the network; status and validity only tighten (active →
-retired → revoked; `valid_to` only earlier). A key document entry whose
-key_id does not derive from its public key fails verification. Key rules
-match the service's (`isokron-anchor src/core/servicekeys.ts`): absent
-status reads as `active`; `retired` needs `valid_to`; `valid_from ≤
-received_at < valid_to`; a key listed twice or with a `successor_signature`
-that does not verify is refused. Ed25519 checks on these paths are strict:
+Service keys (0.10.0): the service's own model (`isokron-anchor
+src/core/servicekeys.ts`, vendored in `src/anchor/service-core/`). The key
+list must be one signed chain from the genesis pin (compiled for
+`https://anchor.isokron.ai`; `--genesis` / `KRONICLE_ANCHOR_GENESIS` /
+`anchor_genesis` in `config.json` for a self-hosted service, as
+`<sha256>@<valid_from>`): successor, retirement and revocation statements as
+the service's README "Signed key statements (byte-exact)" specifies. A
+receipt counts only when its key is the current head (`checkServiceKey` with
+revoked and nonHead `'reject'`) and `valid_from ≤ received_at < valid_to`;
+a retired or revoked key's receipt needs an independent RFC 3161 time, which
+this client does not check. Every list fetched is first checked for
+rollback against the one kept for that service and pin in
+`anchor-keys.cache.json` (`{v:2, records:{"<url>|<pin>": {anchor_url,
+genesis, keys}}}`, the service client's format): a dropped key, or any
+change to a kept key other than the status progression, refuses it. The
+read, check and write run under `anchor-keys.cache.json.lock`, the protocol
+of isokron-anchor's client (its README "Safe writes"): O_EXCL, 0600,
+`{"pid", "created_at"}`; stale only when the pid is not running or after 10
+minutes (by `created_at`, or mtime when it does not parse or lies over 1
+minute ahead); retried every 25 ms, refused after 10 s; not written in a
+read-only data dir. Just before the rename the writer re-checks the lock
+("cache lock lost" otherwise), re-reads the cache and merges every record
+(the stronger list wins, a contradiction refuses). A pre-v2 single-document file is adopted only
+when it chains to the pin and names this service (if it names one), and is
+never the offline kept list until a fetch confirms it.
+`--offline` uses the list kept for the service each receipt was pushed to. Ed25519 checks on these paths are strict:
 small-order or non-canonical public keys and R, and S ≥ L, never verify.
 
 The chain listing is paginated by newer services (`next_cursor`, null on

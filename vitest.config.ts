@@ -5,6 +5,6 @@ export default defineConfig({
     include: ['test/**/*.test.ts'],
     // generous: a loaded runner (or the full suite in parallel) is several times slower than a quiet laptop
     testTimeout: 60_000,
-    setupFiles: ['test/helpers/yield.ts'],
+    setupFiles: ['test/helpers/yield.ts', 'test/helpers/anchor-genesis.ts'],
   },
 });

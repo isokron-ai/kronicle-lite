@@ -21,14 +21,14 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { pushCheckpoint } from '../src/anchor/anchor.js';
 import { formatGenesisPin, keyListRegression, PRODUCTION_GENESIS, retirementSigningPayload, successorSigningPayload, type ServiceKeyEntry } from '../src/anchor/keychain.js';
 import { anchorReceiptSigningPayload } from '../src/anchor/receipt.js';
-import { serviceKeyIdFromPem, SHIPPED_SERVICE_KEY_PINS, SHIPPED_SERVICE_KEYS } from '../src/anchor/trust.js';
+import { serviceKeyIdFromPem, SHIPPED_SERVICE_KEYS } from '../src/anchor/trust.js';
 import { exportBundle, signManifest, type BundleManifest } from '../src/audit/bundle.js';
 import { buildAuditPackage, stampAnchor } from '../src/audit/package.js';
 import { inspectTimestamp, OID, timestampRequest, checkTimestampReply, verifyTimestamp } from '../src/audit/rfc3161.js';
 import { BUNDLE_FORMAT_V1, BUNDLE_FORMAT_V2 } from '../src/audit/schemas.js';
 import { readTime, TAG } from '../src/audit/der.js';
 import { SHIPPED_TSA_ROOTS } from '../src/audit/tsa-roots.js';
-import { listPackFiles, refuseInsidePack, renderVerifyAudit, SEEN_KEYS_FILE, sha256sums, SUMS_FILES, verifyAudit, VerifyAuditJsonSchema, VerifyAuditUsageError, type VerifyAuditOptions } from '../src/audit/verify-audit.js';
+import { listPackFiles, openTrustInput, readTrustInput, refuseInsidePack, renderVerifyAudit, SEEN_KEYS_FILE, sha256sums, SUMS_FILES, verifyAudit, VerifyAuditJsonSchema, VerifyAuditUsageError, type VerifyAuditOptions } from '../src/audit/verify-audit.js';
 import { verifyBundle } from '../src/audit/verify-bundle.js';
 import { canonicalize } from '../src/crypto/canonical.js';
 import { chainIdFromPublicKeyPem } from '../src/crypto/keys.js';
@@ -1162,7 +1162,6 @@ describe('shipped trust', () => {
     expect(formatGenesisPin(PRODUCTION_GENESIS)).toBe(`${prod[0]!.spki_sha256}@${prod[0]!.valid_from}`);
     expect(chainIdFromPublicKeyPem(prod[0]!.public_key_pem)).toBe(PRODUCTION_GENESIS.sha256);
     expect(serviceKeyIdFromPem(prod[0]!.public_key_pem)).toBe('anchor-ed25519-3dca1ecf66c2993e');
-    expect(SHIPPED_SERVICE_KEY_PINS['https://anchor.isokron.ai']).toEqual([prod[0]!.public_key_pem]);
     for (const r of SHIPPED_TSA_ROOTS) {
       const c = new X509Certificate(r.pem);
       expect(c.fingerprint256.replace(/:/g, '').toLowerCase()).toBe(r.sha256);
@@ -1411,6 +1410,39 @@ describe('review round 2 (N1–N9): every R-case fails closed', () => {
           if (existsSync(v)) expect(refused(d, v)).toThrow(/is inside the pack/);
           else expect(refused(d, v)).toThrow(/--key .*(ENOENT|no such file)/i);
         }
+      });
+
+      it('T8: a trust input is read from the descriptor that was checked; swapping the path after the check changes nothing', () => {
+        const { d } = mk();
+        const out = tempDir('kl-va-t8-');
+        writeFileSync(join(out, 'outside.pem'), 'OUTSIDE\n');
+        const link = join(out, 'key.pem');
+        symlinkSync(join(out, 'outside.pem'), link);
+        const h = openTrustInput(d, link, '--key', 64 * 1024);
+        try {
+          // the race the reviewer won: flip the symlink into the pack between the check and the read
+          rmSync(link);
+          symlinkSync(join(d, 'auditor-key.pem'), link);
+          expect(h.read().toString('utf8')).toBe('OUTSIDE\n');
+        } finally {
+          h.close();
+        }
+        // opened afresh, the flipped link is refused
+        expect(() => readTrustInput(d, link, '--key', 64 * 1024)).toThrow(/is inside the pack/);
+        // the same for a file in a --tsa-roots directory, and a file that is not regular or too large
+        expect(() => readTrustInput(d, out, '--tsa-roots', 64 * 1024)).toThrow(/is not a regular file/);
+        writeFileSync(join(out, 'big.pem'), Buffer.alloc(2048));
+        expect(() => readTrustInput(d, join(out, 'big.pem'), '--tsa-roots', 1024)).toThrow(/is larger than 1024 bytes/);
+        expect(readTrustInput(d, join(out, 'outside.pem'), '--key', 1024).toString('utf8')).toBe('OUTSIDE\n');
+      });
+
+      it('T8: the CLI reads --key, --anchor-keys and each --tsa-roots file through that path (and still verifies a good pack)', () => {
+        expect(cli(['verify-audit', f.pkg, '--key', f.keyFile, '--genesis', f.genesis, '--tsa-roots', f.rootsDir, '--anchor-keys', f.keysFile]).code).toBe(0);
+        const roots = tempDir('kl-va-t8-roots-');
+        writeFileSync(join(roots, 'empty.pem'), 'no certificates here\n');
+        const r = cli(['verify-audit', f.pkg, '--key-fingerprint', f.fp, '--genesis', f.genesis, '--tsa-roots', roots]);
+        expect(r.code).toBe(2);
+        expect(r.err).toMatch(/holds no PEM certificates/);
       });
 
       it('the symlink and hard-link cases, decided by identity: a symlinked directory into the pack, a symlinked file, a hard link', () => {

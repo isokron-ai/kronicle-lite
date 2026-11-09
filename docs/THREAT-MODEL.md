@@ -95,16 +95,15 @@ also controls `config.json`, `anchor_url`, the network path and the
   `receipt.checkpoint.signature` verifies against that local key. Unsigned
   listing fields and the local `anchors.root` column are cross-checked and
   reported when they disagree, never used.
-- Service keys: `key_id` must derive from `public_key_pem`; status must be
-  `active` or `retired`, and the receipt's signed `received_at` must lie in
-  the key's `valid_from`/`valid_to`. The production key for
-  `https://anchor.isokron.ai` ships pinned in the package (0.10.0), so that
-  origin is never trusted on first use. For another origin the first online
-  call pins the key it is served (trust on first use,
-  `<data-dir>/anchor-keys.pinned.json`) unless `config.json`
-  (`service_key_pins`) pins one. A pinned key is never overwritten from the network; a new key needs a
-  successor signature from a pinned key or `kronicle-lite anchor keys add`.
-  Status only tightens.
+- Service keys (0.10.0): the key list must be one signed chain from the
+  genesis pin (compiled for `https://anchor.isokron.ai`, so it is never
+  trusted on first use; a self-hosted service's pin by `--genesis`,
+  `KRONICLE_ANCHOR_GENESIS` or `anchor_genesis`), checked for rollback
+  against the list kept in the data dir before it is used. Only the current
+  head key vouches, with the receipt's signed `received_at` inside its
+  window: a retired or revoked key's receipt is refused, because that key
+  also signs `received_at`; an independent RFC 3161 time inside the key's
+  window (the verification page, `verify-audit`) is what vouches for it.
 - Every receipt held locally is checked online too, so a service (or a
   man-in-the-middle) that stops listing an anchor cannot hide a divergence
   in it; the omission is reported. A paginated listing is followed to the
@@ -118,14 +117,14 @@ also controls `config.json`, `anchor_url`, the network path and the
 - `http://` anchor URLs are refused unless the host is loopback or
   `--insecure-http` is given; `--key` on the command line warns.
 
-Limits: for a self-hosted origin, first-use pinning trusts the network once — pin out of band
-(`service_key_pins` or `anchor keys add`) if that first contact matters.
-Anyone who can write the data dir can also edit the pin file or the
+Limits: a self-hosted service's genesis pin must be obtained out of band
+(from its operator); the kept list only shows that later lists extend it.
+Anyone who can write the data dir can also edit the kept list or the
 client, so these checks protect a verifier running an honest client, e.g.
-an auditor who checks a copy of the data dir with pins they set themselves; they do
+an auditor who checks a copy of the data dir with a genesis pin they set themselves; they do
 not make the box owner's own `verify --remote` evidence for a third party.
-The service key document is not itself signed; a status change it reports
-can tighten a pin but a man-in-the-middle can withhold one.
+Each key status is a signed statement in the list, but a man-in-the-middle
+can still serve an older list to a client that has none kept yet.
 
 ## What it does not give you
 

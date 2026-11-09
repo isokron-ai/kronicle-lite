@@ -71,13 +71,18 @@ export function parseTsaList(spec: string): { name: string; url: string }[] {
 }
 
 /** PEM certificates from every *.pem / *.crt file in DIR (several per file allowed); each file is one TSA. */
+/** The certificate files of a TSA roots directory (*.pem, *.crt), sorted. */
+export const pemFileNames = (dir: string): string[] => readdirSync(dir).filter((f) => /\.(pem|crt)$/i.test(f)).sort();
+
+/** The PEM certificates in one file's text, named after the file (one TSA per file). */
+export function pemsFromText(file: string, text: string): { name: string; pem: string }[] {
+  const name = file.replace(/\.(pem|crt)$/i, '');
+  return [...text.matchAll(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g)].map((m) => ({ name, pem: m[0] + '\n' }));
+}
+
 export function readPemDir(dir: string): { name: string; pem: string }[] {
   const out: { name: string; pem: string }[] = [];
-  for (const f of readdirSync(dir).sort()) {
-    if (!/\.(pem|crt)$/i.test(f)) continue;
-    const text = readBundleFile(join(dir, f), 1024 * 1024, { followLinks: true }).toString('utf8');
-    for (const m of text.matchAll(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g)) out.push({ name: f.replace(/\.(pem|crt)$/i, ''), pem: m[0] + '\n' });
-  }
+  for (const f of pemFileNames(dir)) out.push(...pemsFromText(f, readBundleFile(join(dir, f), 1024 * 1024, { followLinks: true }).toString('utf8')));
   if (out.length === 0) throw new Error(`${dir} holds no PEM certificates (*.pem, *.crt)`);
   return out;
 }

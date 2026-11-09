@@ -1,28 +1,26 @@
 /**
  * Anchor configuration and the service-key cache.
  *
- *   <data-dir>/config.json              {"anchor_url": "...", "license_key": "KLA_..."}   mode 0600
- *   <data-dir>/anchor-keys.pinned.json  pinned anchor service keys (trust.ts)          mode 0600
- *   <data-dir>/anchor-keys.cache.json   0.4.0–0.8.0 only: last fetched key document; no longer
- *                                       written or trusted (it came over the same channel as
- *                                       the receipts — hardening A2-12)
+ *   <data-dir>/config.json              {"anchor_url", "license_key", "anchor_genesis"}   mode 0600
+ *   <data-dir>/anchor-keys.cache.json   0.10.0: the service key list kept per service and genesis
+ *                                       pin, the rollback reference (keys-cache.ts; the format of
+ *                                       isokron-anchor's own client)
+ *   <data-dir>/anchor-keys.pinned.json  0.8.1–0.9.x pin store; no longer read (trust.ts)
  *
  * Precedence: explicit arguments (CLI flags) > KRONICLE_ANCHOR_URL /
  * KRONICLE_ANCHOR_KEY > config.json > defaults. A store opened in memory
- * (tests, embedding) has no data dir; it reads env + defaults and keeps the
- * key cache in process.
+ * (tests, embedding) has no data dir; it reads env + defaults (keys-cache.ts
+ * keeps its records in process).
  */
 
 import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import type { ServiceKeys } from './client.js';
-
 export const DEFAULT_ANCHOR_URL = 'https://anchor.isokron.ai';
 export const CONFIG_FILE = 'config.json';
 export const KEYS_CACHE_FILE = 'anchor-keys.cache.json';
 /** Keys config.json may carry. Anything else is reported by `doctor`. */
-export const CONFIG_KEYS = ['anchor_url', 'license_key', 'service_key_pins'] as const;
+export const CONFIG_KEYS = ['anchor_url', 'license_key', 'anchor_genesis'] as const;
 
 export interface AnchorConfig {
   anchor_url: string;
@@ -107,32 +105,3 @@ export function assertAnchorTransport(anchorUrl: string, insecureHttp = false): 
   throw new AnchorConfigError(`anchor_url ${u.origin} must be https://`);
 }
 
-const memoryKeys = new Map<string, ServiceKeys>();
-
-/** @deprecated 0.8.1: the key cache is no longer trusted or written; see trust.ts (pins). */
-export function readKeysCache(dataDir: string | null): ServiceKeys | null {
-  if (!dataDir) return memoryKeys.get('memory') ?? null;
-  const p = join(dataDir, KEYS_CACHE_FILE);
-  if (!existsSync(p)) return null;
-  try {
-    const j = JSON.parse(readFileSync(p, 'utf8')) as ServiceKeys;
-    return Array.isArray(j?.keys) ? j : null;
-  } catch {
-    return null;
-  }
-}
-
-/** @deprecated 0.8.1: the key cache is no longer trusted or written; see trust.ts (pins). */
-export function writeKeysCache(dataDir: string | null, keys: ServiceKeys): void {
-  if (!dataDir) {
-    memoryKeys.set('memory', keys);
-    return;
-  }
-  try {
-    const p = join(dataDir, KEYS_CACHE_FILE);
-    writeFileSync(p, JSON.stringify(keys, null, 2) + '\n', { mode: 0o600 });
-    chmodSync(p, 0o600);
-  } catch {
-    // best effort: the cache only serves `verify --remote --offline`
-  }
-}

@@ -19,21 +19,12 @@ import { AnchorClient, AnchorListingError } from '../src/anchor/client.js';
 import { isUsableEd25519Point, verifyEd25519Strict } from '../src/anchor/ed25519-strict.js';
 import { AnchorConfigError, assertAnchorTransport } from '../src/anchor/config.js';
 import { anchorReceiptJcs, anchorReceiptSigningPayload, type AnchorReceipt } from '../src/anchor/receipt.js';
-import {
-  checkPublishedServiceKey,
-  PINS_FILE,
-  readPinFile,
-  reconcileServiceKeys,
-  serviceKeyIdFromPem,
-  serviceKeyRefusal,
-  verifyReceiptWithPins,
-  writePinFile,
-  type PinnedServiceKey,
-} from '../src/anchor/trust.js';
+import { formatGenesisPin, parseGenesisPin, retirementSigningPayload, successorSigningPayload, type GenesisPin } from '../src/anchor/keychain.js';
+import { KEYS_CACHE_FILE, readKeysCache } from '../src/anchor/keys-cache.js';
+import { acceptServiceKeys, anchorGenesis, LEGACY_PINS_FILE, serviceKeyIdFromPem, verifyReceiptWithKeys, type ServiceKeySet } from '../src/anchor/trust.js';
 import { checkpointSigningPayload } from '../src/chain/chain.js';
-import { canonicalize } from '../src/crypto/canonical.js';
 import { KronicleLite } from '../src/store.js';
-import { startAnchorStub, type AnchorBackend } from './helpers/anchor-stub.js';
+import { startAnchorStub, STUB_GENESIS, STUB_KEY_VALID_FROM, STUB_PRIVATE, type AnchorBackend } from './helpers/anchor-stub.js';
 
 const CLI = join(__dirname, '..', 'dist', 'cli.js');
 
@@ -113,25 +104,15 @@ function resign(r: AnchorReceipt, priv: KeyObject, patch: Partial<AnchorReceipt>
   return { ...body, signature: sign(null, Buffer.from(anchorReceiptSigningPayload(body as AnchorReceipt), 'utf8'), priv).toString('base64') } as AnchorReceipt;
 }
 
-function pin(pem: string, extra: Partial<PinnedServiceKey> = {}): PinnedServiceKey {
-  return {
-    key_id: serviceKeyIdFromPem(pem),
-    public_key_pem: pem,
-    status: 'active',
-    valid_from: null,
-    valid_to: null,
-    source: 'operator',
-    pinned_at: new Date().toISOString(),
-    signed_by: null,
-    issuer: null,
-    ...extra,
-  };
-}
+/** A genesis pin for a test key. */
+const pinOf = (k: { pem: string }, validFrom = '2026-01-01T00:00:00.000Z'): GenesisPin => parseGenesisPin(`${createHash('sha256').update(createPublicKey(k.pem).export({ type: 'spki', format: 'der' })).digest('hex')}@${validFrom}`)!;
 
 function cli(args: string[], env: Record<string, string | undefined> = {}): Promise<{ status: number | null; stdout: string; stderr: string }> {
   const e: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith('KRONICLE_ANCHOR_')) e[k] = v;
+  e['KRONICLE_ANCHOR_GENESIS'] = STUB_GENESIS; // the stub's pin; a test may override or drop it
   for (const [k, v] of Object.entries(env)) if (v !== undefined) e[k] = v;
+  for (const [k, v] of Object.entries(env)) if (v === undefined) delete e[k];
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [CLI, ...args], { env: e });
     let stdout = '';
@@ -287,17 +268,14 @@ describe('anchor client hardening (0.8.1, track 6)', { timeout: 60_000 }, () => 
     store.close();
   });
 
-  // ───────────────────────────── A2-12 ─────────────────────────────
+  // ───────────────────────────── A2-12 (0.10.0: the service's key model) ─────────────────────────────
 
-  it('A2-12: first use pins the service key (TOFU, 0600); a MITM key under the real key_id is refused and never overwrites the pin', async () => {
+  it('A2-12: the key list must chain to the genesis pin; a MITM key under the real key_id or its own is refused; the kept list is untouched', async () => {
     const { dataDir, store } = makeStore();
     const p = await pushCheckpoint(store, opts());
-    expect(p.key_notes.join('\n')).toMatch(/pinned 1 anchor service key\(s\) .* on first use/);
-    const pinsBefore = readFileSync(join(dataDir, PINS_FILE), 'utf8');
-    const pins = readPinFile(store);
-    expect(pins).toHaveLength(1);
-    expect(pins[0]).toMatchObject({ source: 'tofu', status: 'active' });
-    if (process.platform !== 'win32') expect((await import('node:fs')).statSync(join(dataDir, PINS_FILE)).mode & 0o777).toBe(0o600);
+    expect(existsSync(join(dataDir, KEYS_CACHE_FILE))).toBe(true);
+    if (process.platform !== 'win32') expect((await import('node:fs')).statSync(join(dataDir, KEYS_CACHE_FILE)).mode & 0o777).toBe(0o600);
+    const keptBefore = readFileSync(join(dataDir, KEYS_CACHE_FILE), 'utf8');
 
     const forged = rewriteSeq(store, 2, p.range[0], p.range[1]);
     const atk = ed25519();
@@ -314,11 +292,11 @@ describe('anchor client hardening (0.8.1, track 6)', { timeout: 60_000 }, () => 
     });
     const r = await verifyRemote(store, { ...opts(), fetch: mitm });
     expect(r.ok).toBe(false);
-    expect(r.problems.join('\n')).toMatch(/derives to anchor-ed25519-[0-9a-f]{16}; refusing it/);
+    expect(r.problems.join('\n')).toMatch(/service key list refused: anchor-ed25519-[0-9a-f]{16} has a different public key than in the list seen earlier/);
     expect(r.checks[0]).toMatchObject({ result: 'unverified', countersignature: 'failed' });
-    expect(readFileSync(join(dataDir, PINS_FILE), 'utf8')).toBe(pinsBefore);
+    expect(readFileSync(join(dataDir, KEYS_CACHE_FILE), 'utf8')).toBe(keptBefore);
 
-    // Attacker key under its OWN key_id: not pinned, no successor signature → receipts untrusted.
+    // Attacker key under its OWN key_id, as the only key: the real key is missing (rollback) and it does not chain to the pin.
     const own = rewriting((path, j) => {
       if (path === '/.well-known/anchor-keys.json') j.keys = [{ ...j.keys![0]!, key_id: atk.id, public_key_pem: atk.pem }];
       if (path.startsWith('/v1/chains/')) {
@@ -331,16 +309,21 @@ describe('anchor client hardening (0.8.1, track 6)', { timeout: 60_000 }, () => 
     });
     const r2 = await verifyRemote(store, { ...opts(), fetch: own });
     expect(r2.ok).toBe(false);
-    expect(r2.notes.join('\n')).toMatch(/not pinned and carries no valid successor signature/);
-    expect(r2.problems.join('\n')).toMatch(new RegExp(`service key ${atk.id} is not pinned`));
-    expect(readFileSync(join(dataDir, PINS_FILE), 'utf8')).toBe(pinsBefore);
+    expect(r2.problems.join('\n')).toMatch(/is in the key list seen earlier but missing now/);
+    expect(readFileSync(join(dataDir, KEYS_CACHE_FILE), 'utf8')).toBe(keptBefore);
+    // A fresh data dir has no kept list to compare with: the chain check alone refuses the attacker's key.
+    const fresh = makeStore(1);
+    const r3 = await verifyRemote(fresh.store, { ...opts(), fetch: own });
+    expect(r3.problems.join('\n')).toMatch(/does not chain to the genesis pin .*genesis fingerprint [0-9a-f]{64} does not match the pinned/);
+    fresh.store.close();
     store.close();
   });
 
   it('A2-12: receipt.checkpoint.signature is re-checked against the local chain key', async () => {
     const { store } = makeStore();
     const svc = ed25519();
-    writePinFile(store, [pin(svc.pem)]);
+    const svcPin = pinOf(svc);
+    expect(acceptServiceKeys(store, b.url, svcPin, { v: 1, keys: [{ key_id: svc.id, public_key_pem: svc.pem, valid_from: svcPin.valid_from, status: 'active' }] }).violations).toEqual([]);
     const cp = store.chain.latestCheckpoint()!;
     const { chain_id } = (await import('../src/anchor/anchor.js')).localChainIdentity(store);
     const base: AnchorReceipt = resign(
@@ -376,136 +359,186 @@ describe('anchor client hardening (0.8.1, track 6)', { timeout: 60_000 }, () => 
         status: 'pending_public',
       });
     };
+    const offline = { anchorUrl: b.url, offline: true, genesis: formatGenesisPin(svcPin) };
     record(base);
-    expect((await verifyRemote(store, { anchorUrl: b.url, offline: true })).ok).toBe(true);
+    expect((await verifyRemote(store, offline)).ok).toBe(true);
     // A service-signed receipt whose checkpoint root the chain key never signed.
     const forgedRoot = createHash('sha256').update('other').digest('hex');
     record(resign(base, svc.priv, { checkpoint: { ...base.checkpoint, root: forgedRoot } }));
-    const r = await verifyRemote(store, { anchorUrl: b.url, offline: true });
+    const r = await verifyRemote(store, offline);
     expect(r.ok).toBe(false);
     expect(r.problems.join('\n')).toMatch(/checkpoint signature does not verify against the local chain key/);
     expect(checkpointSigningPayload(base.checkpoint)).toContain(cp.root);
     store.close();
   });
 
-  it('A2-12: rotation needs a successor signature from a pinned key; config pins switch first-use pinning off', () => {
-    const { dataDir, store } = makeStore(1);
-    const k1 = ed25519();
-    const k2 = ed25519();
-    const k3 = ed25519();
-    writePinFile(store, [pin(k1.pem, { source: 'tofu' })]);
-    const entry = (k: { pem: string; id: string }, extra: Record<string, unknown> = {}) => ({
-      key_id: k.id,
-      public_key_pem: k.pem,
-      status: 'active',
-      valid_from: '2026-11-01T00:00:00.000Z',
-      valid_to: null,
-      ...extra,
+  it('item 2: only the head key vouches; a retired or revoked key\u2019s receipt is refused (no TSA time here); a forged successor breaks the list', () => {
+    const { store } = makeStore(1);
+    const G = ed25519();
+    const S = ed25519();
+    const X = ed25519();
+    const gFrom = '2026-01-01T00:00:00.000Z';
+    const sFrom = '2026-06-01T00:00:00.000Z';
+    const sig = (k: KeyObject, msg: string) => sign(null, Buffer.from(msg, 'utf8'), k).toString('base64');
+    const rotated = [
+      { key_id: S.id, public_key_pem: S.pem, valid_from: sFrom, status: 'active', successor_signature: sig(G.priv, successorSigningPayload({ key_id: S.id, public_key_pem: S.pem, valid_from: sFrom })), signed_by: G.id },
+      { key_id: G.id, public_key_pem: G.pem, valid_from: gFrom, valid_to: sFrom, status: 'retired', retirement_signature: sig(S.priv, retirementSigningPayload({ key_id: G.id, status: 'retired', valid_to: sFrom })), retirement_signed_by: S.id },
+    ];
+    const pin = pinOf(G, gFrom);
+    const set = acceptServiceKeys(store, 'https://anchor.test', pin, { v: 1, keys: rotated }).set!;
+    expect(set).not.toBeNull();
+    const receiptBy = (k: { id: string; priv: KeyObject }, at: string) =>
+      resign(
+        {
+          v: 1,
+          anchor_id: '01900000-0000-7000-8000-000000000002',
+          chain_id: 'ab'.repeat(32),
+          key_id: 'ed25519-0000000000000000',
+          checkpoint: { v: 1, from_seq: 1, to_seq: 1, leaf_count: 1, root: 'cd'.repeat(32), key_id: 'ed25519-0000000000000000', signature: 'A'.repeat(86) + '==' },
+          received_at: at,
+          tier: 'free',
+          service_key_id: k.id,
+          verified: ['chain_id', 'key_id', 'signature', 'range'],
+          signature: '',
+        },
+        k.priv,
+      );
+    expect(verifyReceiptWithKeys(receiptBy(S, '2026-07-01T00:00:00.000Z'), set).ok).toBe(true);
+    // G is retired: its receipt is dated inside its window, but received_at is its own claim.
+    expect(verifyReceiptWithKeys(receiptBy(G, '2026-03-01T00:00:00.000Z'), set)).toMatchObject({
+      ok: false,
+      reason: expect.stringMatching(new RegExp(`^${G.id} is retired \\(valid to ${sFrom}\\); its receipts count only with an RFC 3161 time inside its window: verify independent timestamps at https://anchor.test/v/[0-9a-f]{64} or with \`kronicle-lite verify-audit\``)),
     });
-    const succSig = (signer: KeyObject, k: { pem: string; id: string }) =>
-      sign(null, Buffer.from(canonicalize({ key_id: k.id, public_key_pem: k.pem, valid_from: '2026-11-01T00:00:00.000Z' }), 'utf8'), signer).toString('base64');
-    // k2 with a valid successor signature by k1; k3 signed by k2 (chained); a bogus one for k3 first.
-    const doc = {
-      v: 1,
-      keys: [
-        entry(k1, { status: 'retired', valid_to: '2026-11-02T00:00:00.000Z' }),
-        entry(k3, { signed_by: k2.id, successor_signature: succSig(k2.priv, k3) }),
-        entry(k2, { signed_by: k1.id, successor_signature: succSig(k1.priv, k2) }),
-      ],
-    };
-    const rec = reconcileServiceKeys(store, b.url, doc);
-    expect(rec.violations).toEqual([]);
-    const ids = Object.fromEntries(rec.keys.map((k) => [k.key_id, k]));
-    expect(ids[k2.id]).toMatchObject({ source: 'successor', signed_by: k1.id });
-    expect(ids[k3.id]).toMatchObject({ source: 'successor', signed_by: k2.id });
-    expect(ids[k1.id]).toMatchObject({ status: 'retired', valid_to: '2026-11-02T00:00:00.000Z' });
-
-    // A forged successor signature (by a non-pinned key) is not enough.
+    // S revoked by itself: refused, whatever received_at says.
+    const cs = '2026-08-01T00:00:00.000Z';
+    const vt = '2026-09-01T00:00:00.000Z';
+    const revoked = rotated.map((k) =>
+      k.key_id === S.id ? { ...k, status: 'revoked', valid_to: vt, compromised_since: cs, retirement_signature: sig(S.priv, retirementSigningPayload({ key_id: S.id, status: 'revoked', valid_to: vt, compromised_since: cs })), retirement_signed_by: S.id } : k,
+    );
+    const rset = acceptServiceKeys(store, 'https://anchor.test', pin, { v: 1, keys: revoked }).set!;
+    expect(verifyReceiptWithKeys(receiptBy(S, '2026-07-01T00:00:00.000Z'), rset)).toMatchObject({ ok: false, reason: expect.stringMatching(/^revoked key: .* is revoked \(compromised since 2026-08-01T00:00:00.000Z\)/) });
+    // ...and that revocation is now the kept reference: the older, unrevoked list is a rollback.
+    expect(acceptServiceKeys(store, 'https://anchor.test', pin, { v: 1, keys: rotated }).violations.join('\n')).toMatch(/was revoked in the list seen earlier and is active now/);
+    // A successor signed by a key that is not its predecessor: the list does not chain.
     const fresh = makeStore(1);
-    writePinFile(fresh.store, [pin(k1.pem, { source: 'tofu' })]);
-    const k4 = ed25519();
-    const bad = reconcileServiceKeys(fresh.store, b.url, { v: 1, keys: [entry(k1), entry(k2, { signed_by: k1.id, successor_signature: succSig(k4.priv, k2) })] });
-    expect(bad.keys.map((k) => k.key_id)).toEqual([k1.id]);
-    expect(bad.violations.join('\n')).toMatch(new RegExp(`${k2.id}: successor_signature by ${k1.id} does not verify`));
-    // No successor signature at all: not pinned, only a note.
-    const unsigned = reconcileServiceKeys(fresh.store, b.url, { v: 1, keys: [entry(k1), entry(k2)] });
-    expect(unsigned.keys.map((k) => k.key_id)).toEqual([k1.id]);
-    expect(unsigned.notes.join('\n')).toMatch(new RegExp(`${k2.id} .* not pinned`));
-
-    // Tighten-only: a later document cannot un-revoke or extend a pin.
-    reconcileServiceKeys(fresh.store, b.url, { v: 1, keys: [entry(k1, { status: 'revoked' })] });
-    const again = reconcileServiceKeys(fresh.store, b.url, { v: 1, keys: [entry(k1, { status: 'active' })] });
-    expect(again.keys.find((k) => k.key_id === k1.id)!.status).toBe('revoked');
+    const forgedSucc = rotated.map((k) => (k.key_id === S.id ? { ...k, successor_signature: sig(X.priv, successorSigningPayload({ key_id: S.id, public_key_pem: S.pem, valid_from: sFrom })) } : k));
+    const bad = acceptServiceKeys(fresh.store, 'https://anchor.test', pin, { v: 1, keys: forgedSucc });
+    expect(bad.set).toBeNull();
+    expect(bad.violations.join('\n')).toMatch(/does not chain to the genesis pin/);
     fresh.store.close();
-
-    // Config pins: authoritative, so an empty pin file does not TOFU an unknown key.
-    const cfgd = makeStore(1);
-    const cfgFile = join(cfgd.dataDir, 'config.json');
-    writeFileSync(cfgFile, JSON.stringify({ anchor_url: b.url, service_key_pins: [k1.pem] }));
-    const c = reconcileServiceKeys(cfgd.store, b.url, { v: 1, keys: [entry(k3)] });
-    expect(c.keys.map((k) => k.key_id)).toEqual([k1.id]);
-    expect(c.keys[0]!.source).toBe('config');
-    expect(existsSync(join(cfgd.dataDir, PINS_FILE))).toBe(false);
-    cfgd.store.close();
     store.close();
-    expect(dataDir).toBeTruthy();
   });
 
-  it('A2-12: anchor keys CLI lists, adds, removes and resets pins', async () => {
+  it('item 2: a signed revocation served by the service is kept; the old active list is then a rollback (push, verify)', async () => {
+    const { store } = makeStore(1);
+    await pushCheckpoint(store, opts());
+    expect((await verifyRemote(store, opts())).ok).toBe(true);
+    const cs = '2026-11-01T06:00:00.000Z';
+    const vt = new Date(Date.now() + 3600e3).toISOString();
+    const revoke = rewriting((path, j) => {
+      if (path === '/.well-known/anchor-keys.json') {
+        const k = j.keys![0]! as Record<string, unknown>;
+        j.keys = [{ ...k, status: 'revoked', valid_to: vt, compromised_since: cs, retirement_signature: sign(null, Buffer.from(retirementSigningPayload({ key_id: k['key_id'] as string, status: 'revoked', valid_to: vt, compromised_since: cs }), 'utf8'), STUB_PRIVATE).toString('base64'), retirement_signed_by: k['key_id'] }];
+      }
+      return j;
+    });
+    const r = await verifyRemote(store, { ...opts(), fetch: revoke });
+    expect(r.ok).toBe(false);
+    expect(r.problems.join('\n')).toMatch(/revoked key: anchor-ed25519-[0-9a-f]{16} is revoked \(compromised since 2026-11-01T06:00:00.000Z\)/);
+    const back = await verifyRemote(store, opts());
+    expect(back.ok).toBe(false);
+    expect(back.problems.join('\n')).toMatch(/service key list refused: .* was revoked in the list seen earlier and is active now/);
+    await expect(pushCheckpoint(store, opts())).rejects.toThrow(/was revoked in the list seen earlier and is active now.*nothing sent/);
+    store.close();
+  });
+
+  it('item 2: the genesis pin comes from --genesis, KRONICLE_ANCHOR_GENESIS, config.json anchor_genesis, else the compiled pin; old settings are refused', () => {
+    const { dataDir, store } = makeStore(1);
+    const prev = process.env['KRONICLE_ANCHOR_GENESIS'];
+    try {
+      delete process.env['KRONICLE_ANCHOR_GENESIS'];
+      expect(anchorGenesis(dataDir)).toMatchObject({ source: 'compiled', pin: { sha256: '3dca1ecf66c2993e534ff08fe350dc9368ca52042e38b20a9d58cd7c2b7b3367' } });
+      writeFileSync(join(dataDir, 'config.json'), JSON.stringify({ anchor_genesis: `${'ab'.repeat(32)}@2026-01-01T00:00:00Z` }));
+      expect(anchorGenesis(dataDir)).toEqual({ source: 'config', pin: { sha256: 'ab'.repeat(32), valid_from: '2026-01-01T00:00:00.000Z' } });
+      process.env['KRONICLE_ANCHOR_GENESIS'] = STUB_GENESIS;
+      expect(anchorGenesis(dataDir).source).toBe('env');
+      expect(anchorGenesis(dataDir, `${'cd'.repeat(32)}@${STUB_KEY_VALID_FROM}`).source).toBe('option');
+      expect(() => anchorGenesis(dataDir, 'cd'.repeat(32))).toThrow(/--genesis must be <sha256>@<valid_from>/);
+      writeFileSync(join(dataDir, 'config.json'), JSON.stringify({ service_key_pins: ['x'] }));
+      expect(() => anchorGenesis(dataDir)).toThrow(/service_key_pins is no longer read/);
+      writeFileSync(join(dataDir, 'config.json'), '{}');
+      process.env['KRONICLE_ANCHOR_GENESIS_SHA256'] = 'ab'.repeat(32);
+      expect(() => anchorGenesis(dataDir)).toThrow(/KRONICLE_ANCHOR_GENESIS_SHA256 is no longer read/);
+    } finally {
+      delete process.env['KRONICLE_ANCHOR_GENESIS_SHA256'];
+      if (prev === undefined) delete process.env['KRONICLE_ANCHOR_GENESIS'];
+      else process.env['KRONICLE_ANCHOR_GENESIS'] = prev;
+      store.close();
+    }
+  });
+
+  it('item 2: the kept-list file is the service client\u2019s format: records found under any spelling of the URL and pin; a damaged file is a violation', () => {
+    const { dataDir, store } = makeStore(1);
+    const G = ed25519();
+    const pin = pinOf(G, '2026-01-01T00:00:00.000Z');
+    const keys = [{ key_id: G.id, public_key_pem: G.pem, valid_from: '2026-01-01T00:00:00.000Z', status: 'active' }];
+    // as isokron-anchor's client writes it, with a URL and a pin spelled differently
+    const record = { anchor_url: 'https://Anchor.Test:443/', genesis: `${pin.sha256.toUpperCase()}@2026-01-01T00:00:00Z`, keys: { v: 1, keys } };
+    writeFileSync(join(dataDir, KEYS_CACHE_FILE), JSON.stringify({ v: 2, records: { [`${record.anchor_url}|${record.genesis}`]: record } }));
+    expect(readKeysCache(store, 'https://anchor.test', pin)!.keys).toEqual(keys);
+    // a fresh list that drops the kept key is a rollback
+    expect(acceptServiceKeys(store, 'https://anchor.test/', pin, { v: 1, keys: [] }).violations.join('\n')).toMatch(/is in the key list seen earlier but missing now/);
+    writeFileSync(join(dataDir, KEYS_CACHE_FILE), '{"v":2,"records":[]}');
+    expect(acceptServiceKeys(store, 'https://anchor.test', pin, { v: 1, keys }).violations.join('\n')).toMatch(/anchor-keys\.cache\.json has the wrong shape \(records\)/);
+    store.close();
+  });
+
+  it('A2-12: anchor keys shows the genesis pin and the kept list; add/remove/reset are gone (exit 2)', async () => {
     const { dataDir, store } = makeStore(1);
     store.close();
-    expect((await cli(['anchor', 'keys', '--data-dir', dataDir, '--url', b.url])).stdout).toMatch(/no anchor service key pinned/);
-    const k = ed25519();
-    const pemFile = join(dataDir, '..', 'svc.pem');
-    writeFileSync(pemFile, k.pem);
-    const add = await cli(['anchor', 'keys', 'add', pemFile, '--data-dir', dataDir]);
-    expect(add.status, add.stderr).toBe(0);
-    const list = await cli(['anchor', 'keys', 'list', '--data-dir', dataDir, '--url', b.url, '--json']);
-    expect(JSON.parse(list.stdout).keys).toMatchObject([{ key_id: k.id, source: 'operator' }]);
-    // With an operator pin in place the stub's key is not trusted: push is refused, nothing stored.
+    expect((await cli(['anchor', 'keys', '--data-dir', dataDir, '--url', b.url])).stdout).toMatch(/genesis pin {4}[0-9a-f]{64}@2026-11-01T00:00:00.000Z \(KRONICLE_ANCHOR_GENESIS\)\nkey list {7}none kept yet/);
     const push = await cli(['checkpoint', '--push', '--data-dir', dataDir], { KRONICLE_ANCHOR_URL: b.url, KRONICLE_ANCHOR_KEY: b.license });
-    expect(push.status).toBe(2);
-    expect(push.stderr).toMatch(/anchor receipt rejected: service key anchor-ed25519-[0-9a-f]{16} is not pinned/);
-    expect((await cli(['anchor', 'keys', 'remove', k.id, '--data-dir', dataDir])).status).toBe(0);
-    expect((await cli(['anchor', 'keys', 'reset', '--data-dir', dataDir])).status).toBe(0);
+    expect(push.status, push.stderr).toBe(0);
+    const list = await cli(['anchor', 'keys', 'list', '--data-dir', dataDir, '--url', b.url, '--json']);
+    expect(JSON.parse(list.stdout)).toMatchObject({ anchor_url: b.url, genesis: STUB_GENESIS, genesis_source: 'env', kept: true, chain: { ok: true, entries: [{ state: 'genesis' }] } });
+    writeFileSync(join(dataDir, LEGACY_PINS_FILE), '{"v":1,"keys":[]}');
+    expect((await cli(['anchor', 'keys', '--data-dir', dataDir, '--url', b.url])).stdout).toMatch(/anchor-keys.pinned.json \(the 0.9.x pin store\) is no longer read/);
+    for (const op of [['add', 'x.pem'], ['remove', 'k'], ['reset']]) {
+      const r = await cli(['anchor', 'keys', ...op, '--data-dir', dataDir]);
+      expect(r.status, op[0]).toBe(2);
+      expect(r.stderr).toMatch(/was removed in 0.10.0: trust comes from the anchor service's signed key chain/);
+    }
     expect((await cli(['anchor', 'keys', 'bogus', '--data-dir', dataDir])).status).toBe(2);
+    // the compiled pin, for a service whose list does not chain to it: push refused before anything is sent
+    const prod = await cli(['checkpoint', '--push', '--data-dir', dataDir], { KRONICLE_ANCHOR_URL: b.url, KRONICLE_ANCHOR_KEY: b.license, KRONICLE_ANCHOR_GENESIS: undefined });
+    expect(prod.status).not.toBe(0);
+    expect(prod.stdout + prod.stderr).toMatch(/does not chain to the genesis pin 3dca1ecf/);
   });
 
   // ───────────────────────────── A2-04 ─────────────────────────────
 
-  it('A2-04: key status and validity window are enforced against the receipt’s signed time', async () => {
-    const t = '2026-11-01T12:00:00.000Z';
-    expect(serviceKeyRefusal({ key_id: 'k', status: 'active', valid_from: '2026-11-01T00:00:00.000Z', valid_to: null }, t)).toBeNull();
-    expect(serviceKeyRefusal({ key_id: 'k', status: 'retired', valid_from: '2026-10-01T00:00:00.000Z', valid_to: '2026-11-02T00:00:00.000Z' }, t)).toBeNull();
-    expect(serviceKeyRefusal({ key_id: 'k', status: 'retired', valid_from: null, valid_to: '2026-11-01T06:00:00.000Z' }, t)).toMatch(/after .* valid_to/);
-    expect(serviceKeyRefusal({ key_id: 'k', status: 'retired', valid_from: null, valid_to: t }, t)).toMatch(/after .* valid_to/); // valid_to is exclusive
-    expect(serviceKeyRefusal({ key_id: 'k', status: 'active', valid_from: t, valid_to: null }, t)).toBeNull(); // valid_from is inclusive
-    expect(serviceKeyRefusal({ key_id: 'k', status: 'active', valid_from: '2026-11-02T00:00:00.000Z', valid_to: null }, t)).toMatch(/precedes .* valid_from/);
-    expect(serviceKeyRefusal({ key_id: 'k', status: 'retired', valid_from: null, valid_to: null }, t)).toMatch(/retired without valid_to/);
-    expect(serviceKeyRefusal({ key_id: 'k', status: 'active', valid_from: 'yesterday', valid_to: null }, t)).toMatch(/unparseable/);
-    expect(serviceKeyRefusal({ key_id: 'k', status: 'compromised' }, t)).toMatch(/is compromised/);
-    expect(serviceKeyRefusal({ key_id: 'k', status: 'revoked' }, t)).toMatch(/is revoked/);
-    expect(serviceKeyRefusal({ key_id: 'k' }, t)).toBeNull(); // absent status = active, as the service reads it
-
+  it('A2-04: key validity window against the receipt\u2019s signed time; the client helpers apply the same head-only rule', async () => {
     const { store } = makeStore(1);
     await pushCheckpoint(store, opts());
     const receipt = JSON.parse(store.chain.lastAnchor()!.receipt_json) as AnchorReceipt;
-    const [p] = readPinFile(store);
-    expect(verifyReceiptWithPins(receipt, [p!]).ok).toBe(true);
-    expect(verifyReceiptWithPins(receipt, [{ ...p!, status: 'compromised' }])).toMatchObject({ ok: false, reason: expect.stringMatching(/compromised/) });
-    expect(verifyReceiptWithPins(receipt, [{ ...p!, valid_to: '2020-01-01T00:00:00.000Z' }]).ok).toBe(false);
-    // The unpinned client check applies the same rules.
+    const set: ServiceKeySet = { anchor_url: b.url, genesis: parseGenesisPin(STUB_GENESIS)!, keys: readKeysCache(store, b.url, parseGenesisPin(STUB_GENESIS)!)!.keys, source: 'kept' };
+    expect(verifyReceiptWithKeys(receipt, set).ok).toBe(true);
+    expect(verifyReceiptWithKeys({ ...receipt, received_at: '2020-01-01T00:00:00.000Z' }, set)).toMatchObject({ ok: false, reason: expect.stringMatching(/precedes .* valid_from/) });
+    expect(verifyReceiptWithKeys(receipt, null)).toMatchObject({ ok: false, reason: expect.stringMatching(/no trusted anchor service key list/) });
+    // The unpinned client check: the list must chain to the pin, and only the head key vouches.
+    const pin = parseGenesisPin(STUB_GENESIS)!;
     const doc = (await (await fetch(`${b.url}/.well-known/anchor-keys.json`)).json()) as { v: 1; issuer: string; keys: { key_id: string; public_key_pem: string; status: string; valid_from: string; valid_to: string | null }[] };
-    await expect(new AnchorClient(b.url, { preloadedKeys: { ...doc, keys: [{ ...doc.keys[0]!, status: 'compromised' }] } }).verifyReceipt(receipt)).rejects.toThrow(/is compromised/);
-    await expect(new AnchorClient(b.url, { preloadedKeys: { ...doc, keys: [doc.keys[0]!, doc.keys[0]!] } }).verifyReceipt(receipt)).rejects.toThrow(/listed more than once/);
-    await expect(new AnchorClient(b.url, { preloadedKeys: { ...doc, keys: [{ ...doc.keys[0]!, status: 'retired', valid_to: '2020-01-01T00:00:00.000Z' }] } }).verifyReceipt(receipt)).rejects.toThrow(/valid_to/);
-    // A served status change is pinned (tighten-only) and fails the next verify.
-    const revoke = rewriting((path, j) => {
+    expect((await new AnchorClient(b.url, { preloadedKeys: doc }).verifyReceipt(receipt, pin)).anchor_id).toBe(receipt.anchor_id);
+    await expect(new AnchorClient(b.url, { preloadedKeys: doc }).verifyReceipt(receipt)).rejects.toThrow(/does not chain to the pinned genesis key/);
+    await expect(new AnchorClient(b.url, { preloadedKeys: { ...doc, keys: [{ ...doc.keys[0]!, status: 'compromised' }] } }).verifyReceipt(receipt, pin)).rejects.toThrow(/service key/);
+    await expect(new AnchorClient(b.url, { preloadedKeys: { ...doc, keys: [doc.keys[0]!, doc.keys[0]!] } }).verifyReceipt(receipt, pin)).rejects.toThrow(/listed more than once/);
+    // An unsigned status change served by the service breaks the list (it is not a revocation) and is not kept.
+    const unsigned = rewriting((path, j) => {
       if (path === '/.well-known/anchor-keys.json') j.keys = [{ ...j.keys![0]!, status: 'revoked' }];
       return j;
     });
-    expect((await verifyRemote(store, { ...opts(), fetch: revoke })).ok).toBe(false);
-    expect((await verifyRemote(store, opts())).ok).toBe(false); // still revoked locally
+    expect((await verifyRemote(store, { ...opts(), fetch: unsigned })).ok).toBe(false);
+    expect((await verifyRemote(store, opts())).ok).toBe(true);
     store.close();
   });
 
@@ -695,12 +728,12 @@ describe('anchor client hardening (0.8.1, track 6)', { timeout: 60_000 }, () => 
     const hi = Buffer.alloc(32);
     for (let i = 0, v = big; i < 32; i++, v >>= 8n) hi[i] = Number(v & 0xffn);
     if (big < 2n ** 256n) expect(verifyEd25519Strict(k.pem, 'm', Buffer.concat([sig.subarray(0, 32), hi]).toString('base64'))).toBe(false);
-    // A small-order service key in a key document is a violation and is never pinned.
+    // A small-order service key in a key list breaks it and is never kept.
     const { store } = makeStore(1);
-    const rec = reconcileServiceKeys(store, b.url, { v: 1, keys: [{ key_id: serviceKeyIdFromPem(pem), public_key_pem: pem, status: 'active', valid_from: null, valid_to: null }] });
-    expect(rec.keys).toHaveLength(0);
-    expect(rec.violations.join('\n')).toMatch(/not a usable Ed25519 public key/);
-    expect(checkPublishedServiceKey([{ key_id: serviceKeyIdFromPem(pem), public_key_pem: pem, status: 'active' }], serviceKeyIdFromPem(pem), '2026-11-01T00:00:00.000Z').ok).toBe(false);
+    const small = { v: 1, keys: [{ key_id: serviceKeyIdFromPem(pem), public_key_pem: pem, status: 'active', valid_from: '2026-01-01T00:00:00.000Z' }] };
+    const rec = acceptServiceKeys(store, b.url, pinOf({ pem }), small);
+    expect(rec.set).toBeNull();
+    expect(rec.violations.join('\n')).toMatch(/public key is unusable or does not derive to its key_id/);
     store.close();
   });
 });

@@ -13,6 +13,7 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { chainIdFromPublicKeyPem } from '../../src/crypto/keys.js';
 import type { AnchorBackend } from './anchor-stub.js';
 
 export const WORKER_DEV_LICENSE = 'KLA_dev-free-0001';
@@ -84,5 +85,8 @@ export async function startAnchorWorker(dir: string): Promise<AnchorBackend> {
     .map((s) => s.trim())
     .filter(Boolean);
   await db.batch(statements.map((s) => db.prepare(s)));
-  return { url, license: WORKER_DEV_LICENSE, stop: () => mf.dispose() };
+  // The worker's genesis is its only key (TEST_SERVICE_SEED) with the valid_from bound above.
+  const doc = (await (await fetch(`${url}/.well-known/anchor-keys.json`)).json()) as { keys: { public_key_pem: string }[] };
+  const genesis = `${chainIdFromPublicKeyPem(doc.keys[0]!.public_key_pem)}@2026-11-01T00:00:00.000Z`;
+  return { url, license: WORKER_DEV_LICENSE, genesis, stop: () => mf.dispose() };
 }

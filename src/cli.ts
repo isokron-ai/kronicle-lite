@@ -168,18 +168,21 @@ Usage:
                                                                  against the chain; exit 1 on any mismatch
   kronicle-lite rebuild      [--data-dir DIR]                     re-derive documents and blocks from a verified chain
   kronicle-lite checkpoint   [--data-dir DIR] [--from N] [--to N] sign a Merkle checkpoint
-                 [--push [--url U] [--insecure-http]]            …and anchor it off-box (hosted service countersigns);
+                 [--push [--url U] [--genesis PIN] [--insecure-http]] …and anchor it off-box (hosted service countersigns);
                                                                  license key from KRONICLE_ANCHOR_KEY or config.json
                                                                  (--key K works but warns: argv is visible to other users)
-  kronicle-lite verify       [--remote [--offline]] [--url U] [--json]
+  kronicle-lite verify       [--remote [--offline]] [--url U] [--genesis PIN] [--json]
                                                                  local: = verify-chain; --remote: recompute each anchored
-                                                                 range from its countersigned receipt (pinned service key),
-                                                                 exit 1 on "local chain diverges from anchor at [a,b]" or
-                                                                 an untrusted receipt
+                                                                 range from its countersigned receipt (the service's head
+                                                                 key, its list chained to the genesis pin and checked for
+                                                                 rollback), exit 1 on "local chain diverges from anchor at
+                                                                 [a,b]" or an untrusted receipt (a retired or revoked key's
+                                                                 receipt included: check those with their RFC 3161 times)
   kronicle-lite anchor status [--url U] [--json]                 last anchor, its status, events since (no network)
-  kronicle-lite anchor keys  [list | add PEM-FILE | remove KEY_ID | reset] [--json]
-                                                                 pinned anchor service keys (first use pins; rotation needs
-                                                                 a successor signature or \`anchor keys add\`)
+  kronicle-lite anchor keys  [list] [--url U] [--genesis PIN] [--json]
+                                                                 the genesis pin in force (compiled, or --genesis /
+                                                                 KRONICLE_ANCHOR_GENESIS / anchor_genesis in config.json,
+                                                                 <sha256>@<valid_from>) and the kept key list
   kronicle-lite export       [--data-dir DIR] [--out FILE]        JSONL of all events (stdout by default)
   kronicle-lite import       [--data-dir DIR] --in FILE [--allow-secrets]
                                                                  rebuild an EMPTY store from JSONL; refused when an event
@@ -290,6 +293,7 @@ function anchorOpts(flags: Record<string, string | true>): AnchorCallOptions {
     ...(str(flags['key']) !== undefined ? { licenseKey: str(flags['key'])! } : {}),
     ...(str(flags['url']) !== undefined ? { anchorUrl: str(flags['url'])! } : {}),
     ...(flags['insecure-http'] === true ? { insecureHttp: true } : {}),
+    ...(str(flags['genesis']) !== undefined ? { genesis: str(flags['genesis'])! } : {}),
   };
 }
 
@@ -297,80 +301,52 @@ function isAnchorIoError(err: unknown): boolean {
   return err instanceof Error && ['AnchorUnreachableError', 'AnchorApiError', 'AnchorConfigError', 'ServiceKeyTrustError', 'AnchorListingError', 'AnchorRateLimitedError'].includes(err.name);
 }
 
-/** `anchor keys`: the explicit operator path for service-key pins (A2-12). */
+/**
+ * `anchor keys`: the anchor service key list this data dir trusts (0.10.0): the genesis pin in force,
+ * the list kept for the service (anchor-keys.cache.json) and its chain verdict. Nothing to add or
+ * pin: trust comes from the service's signed key chain back to its genesis key.
+ */
 async function anchorKeysCommand(dataDir: string, args: string[], flags: Record<string, string | true>): Promise<number> {
-  const { readFileSync } = await import('node:fs');
   const trust = await import('./anchor/trust.js');
+  const { checkKeyChain, formatGenesisPin, keyListOf } = await import('./anchor/keychain.js');
+  const { readKeysCache, KEYS_CACHE_FILE } = await import('./anchor/keys-cache.js');
   const { loadConfig } = await import('./anchor/config.js');
+  const { existsSync } = await import('node:fs');
+  const { join } = await import('node:path');
   const store = new KronicleLite({ dataDir });
   try {
     const op = args[0] ?? 'list';
-    if (op === 'list') {
-      const url = loadConfig(store.dataDir, str(flags['url']) !== undefined ? { anchor_url: str(flags['url'])! } : {}).anchor_url;
-      const { keys, authoritative } = trust.trustedServiceKeys(store, url);
-      if (flags['json']) {
-        process.stdout.write(JSON.stringify({ anchor_url: url, authoritative, keys }, null, 2) + '\n');
-      } else if (keys.length === 0) {
-        process.stdout.write(`no anchor service key pinned for ${url}; the next online push or verify --remote pins the one it is served\n`);
-      } else {
-        const lines = [`${keys.length} pinned anchor service key(s)${authoritative ? ' (shipped/config pins: first-use pinning off)' : ''}:`];
-        for (const k of keys) {
-          lines.push(
-            `  ${k.key_id} ${k.status} source=${k.source}${k.signed_by ? ` signed_by=${k.signed_by}` : ''}${k.valid_from ? ` from ${k.valid_from}` : ''}${k.valid_to ? ` to ${k.valid_to}` : ''}${k.issuer ? ` via ${k.issuer}` : ''}`,
-          );
-        }
-        process.stdout.write(lines.join('\n') + '\n');
-      }
-      return 0;
+    if (op === 'add' || op === 'remove' || op === 'reset') {
+      process.stderr.write(
+        `error: anchor keys ${op} was removed in 0.10.0: trust comes from the anchor service's signed key chain back to its genesis key (the compiled pin, or --genesis / KRONICLE_ANCHOR_GENESIS / "anchor_genesis" in config.json for a self-hosted service). The kept list (${KEYS_CACHE_FILE}) is the rollback reference and is reset only by deleting that file.\n`,
+      );
+      return 2;
     }
-    if (op === 'add') {
-      const file = args[1];
-      if (!file) {
-        process.stderr.write('usage: kronicle-lite anchor keys add PEM-FILE\n');
-        return 2;
-      }
-      const pem = readFileSync(file, 'utf8');
-      let key_id: string;
-      try {
-        key_id = trust.serviceKeyIdFromPem(pem);
-      } catch {
-        process.stderr.write(`error: ${file} is not a public key PEM\n`);
-        return 2;
-      }
-      const { createPublicKey } = await import('node:crypto');
-      if (createPublicKey(pem).asymmetricKeyType !== 'ed25519') {
-        process.stderr.write(`error: ${file} is not an Ed25519 public key\n`);
-        return 2;
-      }
-      const pins = trust.readPinFile(store).filter((k) => k.key_id !== key_id);
-      pins.push({ key_id, public_key_pem: pem, status: 'active', valid_from: null, valid_to: null, source: 'operator', pinned_at: new Date().toISOString(), signed_by: null, issuer: null });
-      trust.writePinFile(store, pins);
-      process.stdout.write(`pinned ${key_id} (operator)\n`);
-      return 0;
+    if (op !== 'list') {
+      process.stderr.write('usage: kronicle-lite anchor keys [list] [--url URL] [--genesis SHA256@VALID_FROM] [--json]\n');
+      return 2;
     }
-    if (op === 'remove') {
-      const id = args[1];
-      if (!id) {
-        process.stderr.write('usage: kronicle-lite anchor keys remove KEY_ID\n');
-        return 2;
+    const url = loadConfig(store.dataDir, str(flags['url']) !== undefined ? { anchor_url: str(flags['url'])! } : {}).anchor_url;
+    const { pin, source } = trust.anchorGenesis(store.dataDir, str(flags['genesis']));
+    const kept = readKeysCache(store, url, pin);
+    const keys = kept ? keyListOf(kept) : null;
+    const chain = keys ? checkKeyChain(keys, pin) : null;
+    const legacy = store.dataDir !== null && existsSync(join(store.dataDir, trust.LEGACY_PINS_FILE));
+    if (flags['json']) {
+      process.stdout.write(
+        JSON.stringify({ anchor_url: url, genesis: formatGenesisPin(pin), genesis_source: source, kept: keys !== null, chain: chain ? { ok: chain.ok, usable: chain.usable, detail: chain.detail, entries: chain.entries.map((e) => ({ key_id: e.key_id, state: e.state, detail: e.detail })) } : null, legacy_pins_file: legacy }, null, 2) + '\n',
+      );
+    } else {
+      const lines = [`anchor service ${url}`, `genesis pin    ${formatGenesisPin(pin)} (${source === 'compiled' ? 'compiled' : source === 'option' ? '--genesis' : source === 'env' ? 'KRONICLE_ANCHOR_GENESIS' : 'config.json anchor_genesis'})`];
+      if (!chain) lines.push(`key list       none kept yet; the next online push or verify --remote fetches, checks and keeps it (${KEYS_CACHE_FILE})`);
+      else {
+        lines.push(`key list       ${chain.detail}`);
+        for (const e of chain.entries) lines.push(`  ${e.key_id} ${e.state}${e.state === 'broken' ? `: ${e.detail}` : ''}`);
       }
-      const pins = trust.readPinFile(store);
-      const rest = pins.filter((k) => k.key_id !== id);
-      if (rest.length === pins.length) {
-        process.stderr.write(`error: ${id} is not pinned in ${trust.PINS_FILE}\n`);
-        return 2;
-      }
-      trust.writePinFile(store, rest);
-      process.stdout.write(`removed pin ${id}\n`);
-      return 0;
+      if (legacy) lines.push(`note: ${trust.LEGACY_PINS_FILE} (the 0.9.x pin store) is no longer read; delete it when convenient`);
+      process.stdout.write(lines.join('\n') + '\n');
     }
-    if (op === 'reset') {
-      const removed = trust.resetPins(store);
-      process.stdout.write(removed ? `removed ${trust.PINS_FILE}; the next online push or verify --remote pins the key it is served\n` : 'nothing pinned\n');
-      return 0;
-    }
-    process.stderr.write('usage: kronicle-lite anchor keys [list | add PEM-FILE | remove KEY_ID | reset] [--json]\n');
-    return 2;
+    return 0;
   } catch (err) {
     if (!isAnchorIoError(err)) throw err;
     process.stderr.write(`error: ${(err as Error).message}\n`);
@@ -861,24 +837,26 @@ async function verifyAuditCommand(positional: string[], flags: Record<string, st
     process.stderr.write(`${usage}\n`);
     return 2;
   }
-  const { verifyAudit, renderVerifyAudit, VerifyAuditUsageError, CLAIMS, genesisFromCli, refuseInsidePack } = await import('./audit/verify-audit.js');
-  const { readBundleFile } = await import('./audit/verify-bundle.js');
-  const { readPemDir } = await import('./audit/package.js');
+  const { verifyAudit, renderVerifyAudit, VerifyAuditUsageError, CLAIMS, genesisFromCli, readTrustInput, refuseInsidePack } = await import('./audit/verify-audit.js');
+  const { pemFileNames, pemsFromText } = await import('./audit/package.js');
   let opts: VerifyAuditOptions;
   try {
     const key = str(flags['key']);
     const fingerprint = str(flags['key-fingerprint']);
     const genesis = genesisFromCli(str(flags['genesis']));
     const keys = str(flags['anchor-keys']);
-    // Trust inputs from inside the pack pin nothing: whoever made the pack wrote them.
-    if (key) refuseInsidePack(dir, key, '--key');
-    if (keys) refuseInsidePack(dir, keys, '--anchor-keys');
+    // Trust inputs from inside the pack pin nothing: whoever made the pack wrote them. Each is opened
+    // once, checked by the identity of the open file and read from it (T8: no check-then-reopen race).
+    const keyPem = key ? readTrustInput(dir, key, '--key', 64 * 1024).toString('utf8') : undefined;
+    const keysDoc = keys ? readTrustInput(dir, keys, '--anchor-keys', 1024 * 1024).toString('utf8') : undefined;
     const roots = str(flags['tsa-roots']);
+    let tsaRoots: { name: string; pem: string }[] | undefined;
     if (roots) {
       refuseInsidePack(dir, roots, '--tsa-roots');
-      const { readdirSync } = await import('node:fs');
       const { join } = await import('node:path');
-      for (const f of readdirSync(roots)) if (/\.(pem|crt)$/i.test(f)) refuseInsidePack(dir, join(roots, f), '--tsa-roots');
+      tsaRoots = [];
+      for (const f of pemFileNames(roots)) tsaRoots.push(...pemsFromText(f, readTrustInput(dir, join(roots, f), '--tsa-roots', 1024 * 1024).toString('utf8')));
+      if (tsaRoots.length === 0) throw new Error(`${roots} holds no PEM certificates (*.pem, *.crt)`);
     }
     const maxBytes = num(flags['max-bytes']);
     if (maxBytes !== undefined && maxBytes <= 0) throw new Error('--max-bytes must be a positive integer');
@@ -887,12 +865,12 @@ async function verifyAuditCommand(positional: string[], flags: Record<string, st
     const skip = list(flags['skip-claim']);
     if (flags['no-tsa'] === true && (roots !== undefined || flags['tsa-at-gentime'] === true)) throw new Error('--no-tsa cannot be combined with --tsa-roots or --tsa-at-gentime');
     opts = {
-      ...(key ? { key_pem: readBundleFile(key, 64 * 1024, { followLinks: true }).toString('utf8') } : {}),
+      ...(keyPem !== undefined ? { key_pem: keyPem } : {}),
       ...(fingerprint ? { key_fingerprint: fingerprint } : {}),
       ...genesis,
       seen_dir: dataDir,
-      ...(keys ? { anchor_keys: JSON.parse(readBundleFile(keys, 1024 * 1024, { followLinks: true }).toString('utf8')) as unknown } : {}),
-      ...(roots ? { tsa_roots: readPemDir(roots) } : {}),
+      ...(keysDoc !== undefined ? { anchor_keys: JSON.parse(keysDoc) as unknown } : {}),
+      ...(tsaRoots ? { tsa_roots: tsaRoots } : {}),
       ...(flags['no-tsa'] === true ? { no_tsa: true } : {}),
       ...(flags['tsa-at-gentime'] === true ? { tsa_at: 'gentime' as const } : {}),
       ...(maxBytes !== undefined ? { max_bytes: maxBytes } : {}),
