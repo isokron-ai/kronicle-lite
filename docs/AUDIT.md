@@ -93,8 +93,43 @@ is `{sha256, size, media_type?, redacted?: true}`.
 | `gate_result` | `finding_id`, `gate`, `verdict` (upheld \| refuted \| inconclusive) | `report` (ref), `evidence[]` |
 | `fix_applied` | `finding_id`, `ref` (PR / commit / rule id) | `fingerprint_before` / `_after`, `diff` (ref), `evidence[]` |
 | `regression_result` | `fingerprint_before`, `fingerprint_after`, `verdict` (improved \| regressed \| unchanged), `deltas{name: number}` | `finding_id`, `report` (ref), `evidence[]` |
+| `harness_frozen` (0.10.0) | `harness_id`, `fingerprint` (sha256 of the harness manifest), `manifest` (ref) | `hypotheses` (ref), `planned_runs`, `title` |
+| `run_completed` (0.10.0) | `run_id`, `run_seq` (1-based, no gaps), `fingerprint` (the harness it ran under), `status` | `nonce` (freeze nonce), `capture` (complete \| interrupted), `interruption`, `result` (ref), `evidence[]` |
+| `report_issued` (0.10.0) | `report_id`, `report` (ref) | `run_count`, `title`, `evidence[]` |
 
 The full JSON Schemas are served at `kronicle://schemas/audit`.
+
+**Audit milestones (0.10.0).** `harness_frozen`, `run_completed` and
+`report_issued` mark the stages an [evidence pack](EVIDENCE-BUNDLE.md#evidence-packs-0100)
+timestamps:
+
+- Record `harness_frozen` first, then `checkpoint --push` and `audit stamp`
+  before the first run. The freeze anchor is the starting point: nothing
+  before it is timestamped.
+- The **freeze nonce** is the sha256 of that freeze anchor's receipt file (the
+  digest the timestamp authorities stamped). A run that records it as `nonce`
+  (and, where it can, uses it in the names of objects it creates on the system
+  under test) could not have been recorded before the freeze. `verify-audit`
+  checks `harness_frozen_before_runs` on the nonce only: every run must carry
+  it. `measured_at` is the auditor's own record and never shows the order.
+- Each run names the harness digest it ran under (`fingerprint`); it must be
+  the frozen one.
+- `run_seq` numbers the runs 1..N. Declare N at freeze time (`planned_runs`)
+  and in the report (`run_count`); `verify-audit` checks that the sequence has
+  no gap or repeat and agrees with every declared count (`run_sequence`). A run
+  whose evidence capture was interrupted stays in the sequence with
+  `capture: "interrupted"` and an `interruption` note.
+
+A bundle holding a milestone kind is exported as
+`kronicle-lite-evidence-bundle/2`; 0.9.0's `verify-bundle` refuses it by format
+(use 0.10.0 or later). A bundle with only the six 0.9.0 kinds is still `/1`.
+
+**The 0.9.0 convention.** Before these kinds, a harness freeze was recorded as
+`finding` with `class: "protocol_freeze"` and `fingerprint`, and runs as
+`call_measured` with `measured_at`. `verify-audit` reads that convention too,
+but `harness_frozen_before_runs` needs the freeze nonce, which `call_measured`
+cannot carry: `audit package` does not declare it for such a bundle (and
+`run_sequence` needs `run_seq`).
 
 **0.8.x stores.** A store made by 0.8.x gains the tables on its first
 read-write open. Opened read-only (`verify-chain`, `verify`, `doctor`, a

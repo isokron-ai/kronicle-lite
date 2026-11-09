@@ -25,7 +25,7 @@ import { canonicalize, type JsonValue } from '../crypto/canonical.js';
 import { sha256Hex } from '../crypto/hash.js';
 import type { Signer } from '../crypto/keys.js';
 import { AuditError, type AuditLog } from './log.js';
-import { blobRefsOf, BUNDLE_FORMAT } from './schemas.js';
+import { blobRefsOf, BUNDLE_FORMAT, formatForKinds, kindOfEventType, type AuditKind, type BundleFormat } from './schemas.js';
 
 export { BUNDLE_FORMAT };
 
@@ -39,7 +39,8 @@ export interface BundleStub {
 export type BundleLine = ChainEvent | BundleStub;
 
 export interface BundleManifest {
-  format: typeof BUNDLE_FORMAT;
+  /** /1 when every event is a 0.9.0 kind (0.9.0 readers verify it), /2 when a milestone kind is present. */
+  format: BundleFormat;
   audit_id: string;
   range: { from_seq: number; to_seq: number; leaf_count: number; first_prev_hash: string };
   /** sha256 of events.jsonl's exact bytes. */
@@ -169,9 +170,12 @@ export function exportBundle(args: { chain: Chain; audit: AuditLog; signer: Sign
   const events: BundleManifest['events'] = [];
   const stubs: BundleManifest['stubs'] = [];
   const refs = new Map<string, { size: number; redacted: boolean; by: Set<string> }>();
+  const kinds = new Set<AuditKind>();
   for (const ev of args.chain.range(from, to)) {
     if (mine.has(ev.seq)) {
       lines.push(ev);
+      const k = kindOfEventType(ev.event_type);
+      if (k) kinds.add(k);
       events.push({ seq: ev.seq, event_id: ev.event_id, event_type: ev.event_type, this_hash: ev.this_hash });
       for (const { ref } of blobRefsOf(ev.payload)) {
         const r = refs.get(ref.sha256) ?? { size: ref.size, redacted: ref.redacted === true, by: new Set<string>() };
@@ -215,7 +219,7 @@ export function exportBundle(args: { chain: Chain; audit: AuditLog; signer: Sign
   }
   const eventsText = lines.map(canonicalLine).join('');
   const manifest: BundleManifest = signManifest({
-    format: BUNDLE_FORMAT,
+    format: formatForKinds(kinds),
     audit_id: args.audit_id,
     range: { from_seq: from, to_seq: to, leaf_count: cp.leaf_count, first_prev_hash: lines[0]!.prev_hash },
     events_sha256: sha256Hex(eventsText),

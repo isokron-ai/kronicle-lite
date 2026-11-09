@@ -42,7 +42,7 @@ audit was right, complete, or honest.
 
 | File | Content |
 |---|---|
-| `manifest.json` | Canonical JSON ([RFC 8785](https://www.rfc-editor.org/rfc/rfc8785)) plus `\n`: format, audit_id, range, index, blob lists, signed root |
+| `manifest.json` | Canonical JSON ([RFC 8785](https://www.rfc-editor.org/rfc/rfc8785)) plus `\n`: format (`kronicle-lite-evidence-bundle/1`, or `/2` when a milestone kind is present), audit_id, range, index, blob lists, signed root |
 | `manifest.json` signature | `signature: {key_id, signature}`: the store key over the canonical manifest (step 2) |
 | `events.jsonl` | One canonical JSON line per chain event in `[from_seq, to_seq]`. Audit events are in full (the stored chain event). Every other event in the range is a **stub**: `{seq, prev_hash, this_hash, stub: true}`, with no payload; `manifest.stubs` lists each stub's `{seq, this_hash}` |
 | `blobs/<sha256>` | Each referenced artifact the store holds, named by the sha256 of its bytes. Blobs pass the write-time secret guard when they are stored (AUDIT.md) |
@@ -122,7 +122,8 @@ Hostile input fails cleanly:
 For every full line (not a stub):
 1. Recompute `this_hash` with the FORMAT §1 recipe:
    `sha256(JCS({event_id, event_type, actor_id, occurred_at, payload}) | seq | prev_hash | nonce)`.
-2. `event_type` must be `audit.<kind>`.
+2. `event_type` must be `audit.<kind>`, a kind the bundle's format allows:
+   `/1` the six 0.9.0 kinds, `/2` also the milestone kinds (AUDIT.md).
 3. `payload.audit_id` must equal the manifest's `audit_id`.
 4. The payload must validate against that kind's schema (AUDIT.md).
 
@@ -185,3 +186,235 @@ missing count reported.
 
 A verifier should read both lists as part of the result. "Verifies, with 3
 redacted and 0 missing" is a different statement from "verifies, with 0 and 0".
+
+## Evidence packs (0.10.0)
+
+An **IsoKron Evidence Pack** is tamper-evident, independently timestamped audit
+evidence: one bundle plus everything needed to check, offline, when each stage
+of the audit was committed. Source: `src/audit/package.ts` (`audit stamp`,
+`audit package`), `src/audit/verify-audit.ts` (`verify-audit`),
+`src/audit/rfc3161.ts` (timestamp tokens).
+
+```
+# auditor, after each milestone (harness frozen, runs done, report issued)
+kronicle-lite checkpoint --push                       # anchor [1..head]
+kronicle-lite audit stamp --out stamps/               # RFC 3161 over sha256(receipt), Sectigo + DigiCert
+# at delivery
+kronicle-lite audit package --audit-id A --out pack/ --timestamps stamps/
+# client
+kronicle-lite verify-audit pack/ --key-fingerprint <SHA-256 of the auditor key, from the report or SOW>
+```
+
+Use one store per audit, so the bundle starts at seq 1 and every anchor's range
+`[1..k]` lies inside it: an anchor's root is recomputed from the bundle's own
+`events.jsonl`, which needs every leaf from the anchor's `from_seq`.
+`audit package` includes only anchors whose range lies inside the bundle's and
+lists the others as skipped. Take each stamp right after its anchor: a later
+stamp carries a later time.
+
+### Layout
+
+| File | Content |
+|---|---|
+| `bundle/` | the evidence bundle above |
+| `anchors/NN-<label>.receipt.json` | anchor receipt v1 (FORMAT §9), canonical JSON, no trailing newline: `sha256(file)` is the digest the TSAs stamped. `<label>` names the milestone the anchor closes on (`harness-frozen`, `run-completed`, `report-issued`, or the kind at its last seq) |
+| `anchors/NN-<label>.<tsa>.tsr` | RFC 3161 TimeStampResp over `sha256(receipt file)`, with the TSA's certificate chain embedded (`certReq`) |
+| `anchors/index.json` | summary of the anchors (informational; `verify-audit` does not read it) |
+| `auditor-key.pem` | the auditor (store) public key; trusted only when its SHA-256(SPKI) equals the `--key-fingerprint` the client takes from the report or SOW |
+| `anchor-keys.json` | the anchor service's published key list, as is (with its successor and status statements); trusted only as one chain from the genesis pin |
+| `tsa-roots/*.pem` | the pinned timestamping CAs: `sectigo.pem` = Sectigo Public Time Stamping Root R46 (self-signed and USERTrust cross-signed forms of one key), `digicert.pem` = DigiCert Trusted G4 TimeStamping RSA4096 SHA256 2025 CA1 and the 2022 G4 RSA4096 SHA256 TimeStamping CA; `custom-N.pem` for other TSAs |
+| `claims.json` | what the pack claims (below) and, with `run_sequence`, the run count, each `run_seq` and every capture interruption |
+| `COMPLETION.txt` | one page: manifest SHA-256, signing key fingerprint, final anchored root, timestamp times, claims |
+| `VERIFY.md` | the one-command check and the raw commands (`shasum`, `openssl`, `jq`) with this pack's file names |
+| `SHA256SUMS` | `<sha256>  <path>` for every other file, sorted (`shasum -a 256 -c` format) |
+| `SHA256SUMS.sig` | raw 64-byte Ed25519 signature of `SHA256SUMS` by the auditor key (`openssl pkeyutl -verify -rawin`) |
+
+### Claims
+
+`claims.json` (`isokron-evidence-pack-claims/1`) lists the claims the pack
+makes. `audit package` declares what the store's contents support:
+`integrity` and `chain` always, `receipts` with at least one anchor,
+`independent_timestamps` when every anchor has a token,
+`harness_frozen_before_runs` only when that check passes, and `run_sequence`
+when the runs carry `run_seq`. It prints why a claim is not declared.
+
+`verify-audit` fails closed, in this order:
+
+1. The auditor key is pinned out of band: `--key-fingerprint` (SHA-256 of its
+   SPKI, from the report, the SOW or isokron.ai/verify) checked against
+   `auditor-key.pem`, or `--key FILE` from outside the pack. A `--key`,
+   `--anchor-keys` or `--tsa-roots` path (or file in it) that is the pack
+   directory, under it, or the same file as one in it is refused, exit 2. This
+   is decided by filesystem identity (dev, ino), not by the path as typed, so
+   case and Unicode-normalization variants, symlinks and hard links are caught. An unpinned key is a FAIL: no
+   unpinned pack exits 0.
+2. `SHA256SUMS` and its signature are checked against that key **before**
+   `claims.json` is read. If they do not verify, or `claims.json` is missing or
+   invalid, every claim is checked (and the `claims.json` check fails).
+3. `integrity` and `chain` are always checked. Then the declared claims, any
+   `--require`d one, and what they depend on: `independent_timestamps` needs
+   `receipts`; `harness_frozen_before_runs` needs `receipts` and
+   `independent_timestamps`; `receipts` needs `independent_timestamps` when a
+   receipt is signed by a key that is not the active head (retired or revoked).
+   A `--require`d claim passes when it was checked and passed, whether the pack
+   declares it or not.
+
+It prints one line per claim: `PASS`, `FAIL`, `not declared`, `not checked`
+or `skipped`. A claim the pack declares (or a checked claim needs) that is not
+verified is `not checked`, for example the claims that need RFC 3161 tokens
+under `--no-tsa`, and it blocks exit 0: the result is `NOT VERIFIED`. To verify
+without a claim, opt out of it explicitly with `--skip-claim CLAIM[,…]`: it is
+reported as `skipped by user`, and exit 0 then needs every other checked claim
+to pass. A claim that depends on a skipped one is `not checked`. `integrity`
+and `chain` cannot be skipped; `--skip-claim` of a `--require`d claim, and
+`--require` of a token claim with `--no-tsa`, are usage errors (exit 2). Exit 0
+means every checked claim passed and none was left unchecked. If the verifier stops part way (an internal error), every claim it was
+checking is FAIL.
+
+| Claim | Checks |
+|---|---|
+| `integrity` | `bundle/` and `anchors/` are real directories; `SHA256SUMS.sig` verifies under the pinned auditor key and every file matches `SHA256SUMS` with none unlisted or missing; the bundle's canonical, signature, events (including every payload against its schema), artifacts, refs and missing steps |
+| `chain` | the bundle's chain and signed root steps |
+| `receipts` | the anchor key list is one intact chain from the genesis pin (below) and not a rollback of a list seen before; per receipt: readable and canonical; countersigned by a listed key that was active, retired or revoked at `received_at` (inside its validity window); a receipt of a key that is not the active head counts only with a verified RFC 3161 time no later than its `valid_to` + 5 min (revoked: before `compromised_since` − 5 min), never on `received_at`, and fails under `--no-tsa`; `chain_id`/`key_id` derive from the auditor key and the checkpoint signature verifies; the root equals the FORMAT §2 Merkle root of that range recomputed from `events.jsonl`; with timestamps checked, the earliest valid TSA time is no later than the signing key's `valid_to` + 5 min (a key that has ended cannot vouch for a receipt stamped afterwards). Then: each anchor extends the previous one on range and on every clock, and every audit event is committed by a verified anchor |
+| `independent_timestamps` | every receipt readable (an unreadable one fails the claim); per token: granted (`grantedWithMods` refused); CMS SignedData v3 over TSTInfo v1 with exactly one signer and no unexpected fields; messageImprint = hash of the receipt file; signed attributes (contentType, messageDigest, ESS signing-certificate, every certificate the ESS list names embedded unchanged) and signature verify; the signer is not a CA, has keyUsage digitalSignature or nonRepudiation (and not certificate signing), EKU critical and timeStamping only, and was valid at genTime; the path through embedded CAs ends at a pinned timestamping CA; intermediates have keyCertSign and timeStamping (or no) EKU; pathLenConstraint holds; no unknown critical extension; inner and outer certificate signature algorithms agree; every embedded certificate is on the path, pinned, or a known chain certificate; every certificate valid at the check time. `received_at` is no later than genTime + 5 min (not forward-dated) and no more than 24 h before it. Each receipt has valid tokens from at least two different pinned TSA CAs. The signer's subject DN is reported |
+| `harness_frozen_before_runs` | the freeze event (`harness_frozen`, or the 0.9.0 `finding` with `class: protocol_freeze`) records a harness digest; every run names that digest; the freeze is first committed by a timestamped anchor that covers no run; every run is committed by a later timestamped anchor; every run carries the freeze nonce (the freeze receipt's digest). The nonce is the only basis, in every bundle format: `measured_at` is the auditor's own record. A `/1` bundle (whose `call_measured` runs cannot carry a nonce) is not declared by `audit package` and fails if it declares the claim |
+| `run_sequence` | `run_seq` over the `run_completed` events is integers ≥ 1, 1..N with no gap or repeat; N equals `planned_runs`, the report's `run_count` and `claims.json` `runs.count` where present; `claims.json` lists exactly the runs recorded as `capture: "interrupted"` |
+
+The output ends with the values to compare against the report and
+`COMPLETION.txt`: manifest SHA-256, auditor key, final root and its timestamp
+times. Files in the pack never carry trust values: `COMPLETION.txt` and
+`VERIFY.md` print `--key-fingerprint <auditor key fingerprint from your report
+or SOW>` (and, for a self-hosted anchor service, a `--genesis` placeholder),
+never the values; `audit package` prints the fingerprint on the operator's
+terminal for the report. `--json` (`kronicle-lite-verify-audit/1`) has `claims[]`,
+`checks[]` (each with `claim`, `status` pass \| fail \| not_applicable and
+`evidence`), `anchors[]`, `ordering`, `run_sequence`, `timeline[]` and `final`;
+`VerifyAuditJsonSchema` in `src/audit/verify-audit.ts` is its schema.
+
+**Scope.** The claims establish integrity (the files are the ones the auditor
+key signed and anchored), ordering (the hash chain and the anchored prefixes,
+and the harness freeze when declared) and independent time (each anchor existed
+no later than its RFC 3161 time). The depth, method and correctness of the audit
+are described in the report. Anything recorded before the first anchor carries
+no timestamp; `measured_at` and payload values are recorded by the auditor.
+
+### Trust
+
+- **Auditor key:** `--key-fingerprint` from the report, the SOW or
+  isokron.ai/verify (never from the pack), or `--key FILE` from outside the pack.
+- **Anchor service keys:** the same key-list model as the anchor service
+  (isokron-anchor `src/core/genesis.ts` and `src/core/servicekeys.ts` at PR #3
+  e28daa3, vendored byte for byte in `src/anchor/service-core/` behind a small
+  adapter; `test/keychain.test.ts` checks their SHA-256 and holds lists built
+  by the service's `scripts/rotate-key.mjs` and judged by the service).
+  Receipts are checked as the verification page does (`checkServiceKey` with
+  `revoked: 'tsa'`, `nonHead: 'tsa'`):
+  - one linear chain from a genesis key pinned by SHA-256(SPKI): compiled in
+    (`anchor-ed25519-3dca1ecf66c2993e`,
+    `3dca1ecf66c2993e534ff08fe350dc9368ca52042e38b20a9d58cd7c2b7b3367`, valid
+    from 2026-11-01T02:29:25.705Z, for `https://anchor.isokron.ai`; its
+    `valid_from` comes from the compiled pin, never from a pack), or
+    `--genesis <sha256>@<valid_from>` / `KRONICLE_ANCHOR_GENESIS` for a
+    self-hosted service, as the anchor client takes it (the old
+    `KRONICLE_ANCHOR_GENESIS_SHA256` is refused: the pin includes `valid_from`);
+  - signed statements, byte for byte as the service's README "Signed key
+    statements (byte-exact)" specifies (and `test/keychain.test.ts` checks its
+    test vectors): the UTF-8 bytes of the RFC 8785 canonical JSON of exactly
+    these members, pure Ed25519, standard base64 (88 characters):
+
+    | Statement | Field | Signed by | Members |
+    |---|---|---|---|
+    | successor | `successor_signature` | the predecessor (`signed_by`) | `key_id`, `public_key_pem`, `valid_from` |
+    | retirement | `retirement_signature` | the successor (`retirement_signed_by`) | `key_id`, `status: "retired"`, `valid_to` |
+    | revocation | `retirement_signature` | the key itself or an earlier key on its chain | `compromised_since`, `key_id`, `status: "revoked"`, `valid_to` |
+
+  - no forks; a retired key's `valid_to` is no later than its successor's
+    `valid_from`; the newest key is `active` with no `valid_to`, or `revoked`;
+  - a revocation without `compromised_since`, or signed by a later key, is
+    BROKEN;
+  - keys after a revoked key are not trusted (the revoked key signed their
+    successor statements, and nothing timestamps those before
+    `compromised_since`): their receipts fail; keys before it are unaffected.
+  Anything else is BROKEN and no receipt verifies. The list comes from the
+  pack's `anchor-keys.json` (or `--anchor-keys FILE`, checked the same way).
+  The genesis key's validity, and a new genesis after a revocation, ship in
+  kronicle-lite releases.
+- **Revoked key:** a receipt signed by a revoked key passes only when its
+  earliest verified RFC 3161 genTime is before `compromised_since` minus 5
+  minutes. Its `received_at` never counts (the leaked key signs it), and with
+  tokens not checked (`--no-tsa`, or `independent_timestamps` not claimed) the
+  receipt fails. (The anchor client, which checks no tokens, rejects every such
+  receipt.)
+- **Rollback:** `verify-audit` keeps the newest usable list it has seen per
+  genesis pin in `<data-dir>/anchor-keys.seen.json`, one slot per canonical pin
+  (lowercase SHA-256, `valid_from` as `Date#toISOString`, so spellings of one
+  pin share a slot). A pack whose list drops a kept key, or changes one other
+  than by the allowed status progression (active → retired → revoked, an
+  earlier `valid_to` or `compromised_since`, each with its new statement), fails
+  with the date of the list it contradicts; `valid_from`,
+  `successor_signature`, `signed_by` and a changed status statement are
+  compared too (`keyListRegression`, isokron-anchor e28daa3). A damaged cache
+  file (wrong shape anywhere) fails the check and is never overwritten; it is
+  reset only by deleting it. With no list kept for the pin, the output says
+  `key list  first seen for this genesis; recorded in <path>` (not a PASS).
+  Library callers pass `seen_dir`, or `rollback: 'off'` to skip the check
+  explicitly (reported).
+- **Receipt times:** the service's `received_at` must be no later than each
+  TSA genTime + 5 min and no more than 24 h before it, and a token issued more
+  than 5 min after the signing key's `valid_to` invalidates the receipt (the
+  service's rule).
+- **TSA CAs:** pinned to the timestamping-specific CAs, not the general
+  public roots above them (`src/audit/tsa-roots.ts`): Sectigo Public Time
+  Stamping Root R46 (both forms of its key) and the DigiCert Trusted G4
+  TimeStamping CAs; or `--tsa-roots DIR` (each file one TSA). Each receipt
+  needs valid tokens from two different TSAs (`sectigo` and `digicert` by
+  default). A token may embed only path certificates, pinned ones, or the
+  known chain certificates in `SHIPPED_TSA_EXTRAS` (DigiCert's G4 cross-signed
+  by its retired Assured ID root). A certificate from another branch of
+  USERTrust or DigiCert G4 cannot sign a timestamp that verifies. A TSA moving
+  to a new issuing CA needs a kronicle-lite release (or `--tsa-roots`). The
+  pack's `tsa-roots/` holds the same certificates for the openssl route and is
+  never trusted by `verify-audit`. Path building asks the pinned certificates
+  first, so embedded cross-certificates are never needed.
+- **No openssl needed.** RFC 3161 tokens are verified in-process with
+  `node:crypto` (a small DER reader in `src/audit/der.ts` and the CMS checks above). It runs the
+  same on Linux, macOS and Windows, and a missing or old openssl cannot turn a
+  check into a skip. Revocation (CRL / OCSP) is not checked: verification is
+  offline.
+
+### Without kronicle-lite
+
+Each pack's `VERIFY.md` lists the commands with its own file names. In short,
+with OpenSSL 3 and `jq`:
+
+```sh
+openssl pkeyutl -verify -pubin -inkey auditor-key.pem -rawin -in SHA256SUMS -sigfile SHA256SUMS.sig
+shasum -a 256 -c SHA256SUMS                 # or sha256sum -c, or openssl dgst -sha256 FILE
+D=$(shasum -a 256 anchors/01-harness-frozen.receipt.json | cut -c1-64)
+openssl ts -verify -digest $D -in anchors/01-harness-frozen.sectigo.tsr -CAfile tsa-roots/sectigo.pem -partial_chain
+# anchor service countersignature: canonical receipt minus signature (jq -cjS sorts keys, no newline)
+R=anchors/01-harness-frozen.receipt.json
+jq -r --arg k "$(jq -r .service_key_id $R)" '.keys[] | select(.key_id == $k) | .public_key_pem' anchor-keys.json > service-key.pem
+jq -cjS 'del(.signature)' $R > body.bin && jq -r .signature $R | openssl base64 -d -A > sig.bin
+openssl pkeyutl -verify -pubin -inkey service-key.pem -rawin -in body.bin -sigfile sig.bin
+```
+
+`-partial_chain` lets openssl stop at a pinned CA that is not self-signed (the
+DigiCert TimeStamping CAs, the cross-signed R46). `jq -cjS` output equals RFC
+8785 for these objects (ASCII strings, integers).
+Compare `service-key.pem` with the key published at isokron.ai/verify (or the
+shipped pin above). LibreSSL (macOS's default `openssl`) lacks raw Ed25519
+verification; use OpenSSL 3 (`brew install openssl@3`).
+
+### Re-verifying in later years
+
+TSA certificates expire, and `openssl ts -verify` checks them at the current
+time by default. After expiry:
+
+- verify each token at its own genTime against the same pinned roots:
+  `openssl ts -verify … -partial_chain -attime <genTime as Unix seconds>` (`VERIFY.md` prints
+  the value per token), or `kronicle-lite verify-audit PACK --tsa-at-gentime`;
+- keep the pack whole: each token carries its TSA chain and `tsa-roots/` the
+  roots, so nothing has to be fetched again;
+- before the signing certificates expire, re-stamp the final receipt (an
+  archive timestamp) and keep both tokens.

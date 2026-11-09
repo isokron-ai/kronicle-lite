@@ -314,8 +314,11 @@ kronicle-lite anchor keys              # pinned anchor service keys (add PEM-FIL
   `get_system_state` adds one banner line: `anchored N events ago
   (status)`; before that it says nothing about anchoring, and `doctor`
   only probes the service when a license key or URL is configured.
-- **The service.** The default, `https://anchor.isokron.ai`, is deployed
-  with a Free tier. When it cannot be reached, `--push` stores the
+- **The service.** The default, `https://anchor.isokron.ai`, is IsoKron's
+  audit-verification service, operated for IsoKron's own audits. Anchoring is
+  optional, and you can self-host the service
+  ([isokron-anchor](https://github.com/rafe-walker/isokron-anchor)) and point
+  `--url` / `KRONICLE_ANCHOR_URL` at your deployment. When it cannot be reached, `--push` stores the
   checkpoint locally and exits 2 with `anchor service unreachable at …`;
   `verify --remote` exits 2 the same way; every local command, the MCP
   server and `orient` behave exactly as without anchoring.
@@ -323,9 +326,11 @@ kronicle-lite anchor keys              # pinned anchor service keys (add PEM-FIL
   comparison uses the root and range inside a receipt whose countersignature
   verifies against a *pinned* service key and whose checkpoint signature
   verifies against your own chain key — never the unsigned fields of the
-  service's listing or the local `anchors.root` column. The first online
-  push or `verify --remote` pins the service key it is served
-  (`<data-dir>/anchor-keys.pinned.json`, 0600); later keys are accepted only
+  service's listing or the local `anchors.root` column. The production key
+  (`anchor-ed25519-3dca1ecf66c2993e`) ships pinned in the package (0.10.0), so
+  `https://anchor.isokron.ai` is never trusted on first use; for any other URL
+  the first online push or `verify --remote` pins the service key it is served
+  (`<data-dir>/anchor-keys.pinned.json`, 0600). Later keys are accepted only
   with a successor signature from a pinned key or by `anchor keys add`.
   Receipts you hold are checked even when the service stops listing them.
   `http://` URLs are refused unless the host is loopback or you pass
@@ -333,6 +338,71 @@ kronicle-lite anchor keys              # pinned anchor service keys (add PEM-FIL
   `--key` (which warns: argv is visible to other users).
 - Exit codes: 0 ok, 1 divergence, conflict or an untrusted receipt, 2 usage
   or I/O (incl. unreachable and a refused `http://` URL).
+
+## Evidence packs (0.10.0)
+
+An **IsoKron Evidence Pack** is tamper-evident, independently timestamped audit
+evidence: the audit's evidence bundle, the anchor receipts that commit each
+stage (harness frozen, runs, report), an RFC 3161 timestamp from independent
+timestamp authorities (Sectigo, DigiCert) on every receipt, and the keys and
+roots to check them. A client checks it offline with one command:
+
+```sh
+npx -y kronicle-lite verify-audit pack/ --key-fingerprint <SHA-256 of the auditor key, from the report or SOW>
+```
+
+```sh
+# auditor: after each milestone event
+kronicle-lite checkpoint --push              # anchor [1..head]
+kronicle-lite audit stamp --out stamps/      # RFC 3161 tokens over sha256(receipt), right away
+# at delivery
+kronicle-lite audit package --audit-id A --out pack/ --timestamps stamps/
+```
+
+- **Claims.** `claims.json` lists what the pack claims: `integrity`, `chain`,
+  `receipts`, `independent_timestamps`, `harness_frozen_before_runs`,
+  `run_sequence`. `audit package` declares only what the store's contents
+  support. `verify-audit` pins the auditor key by fingerprint, verifies
+  `SHA256SUMS` before it reads `claims.json`, always checks `integrity` and
+  `chain`, then the declared claims and what they depend on (every claim when
+  `claims.json` is missing or unauthenticated), and prints `PASS` / `FAIL` per
+  claim with the evidence for every check (hashes, roots, keys, TSA names and
+  signed times); the rest show as `not declared` (`--require CLAIM` checks one
+  and needs it to pass). A declared claim that is not checked (for example
+  under `--no-tsa`) gives `NOT VERIFIED`, unless the user opts out of it with
+  `--skip-claim CLAIM` (`skipped by user`). Exit 0 means every checked claim
+  passed and none was left unchecked; an unpinned auditor key never exits 0;
+  `--json` follows `VerifyAuditJsonSchema`.
+- **Scope.** The claims establish integrity, ordering and independent time.
+  The depth and method of the audit are described in its report.
+- **Trust.** The production anchor service key (a genesis key pinned by its
+  SPKI SHA-256; later keys only through the service's signed key chain back to
+  it, checked by the same rules as the service, with a rollback cache in the
+  data dir; a revoked key's receipt only with a verified TSA time before its
+  `compromised_since` − 5 min; `--genesis <sha256>@<valid_from>` for a
+  self-hosted service)
+  and the timestamping CAs of Sectigo (Root R46) and DigiCert (G4 TimeStamping
+  CAs) ship in the package; nothing in the pack is trusted on its own say-so
+  (`--anchor-keys` / `--tsa-roots` for a self-hosted anchor or other TSAs).
+  RFC 3161 is verified in-process (no openssl needed).
+- **Without kronicle-lite.** Every pack has a `VERIFY.md` with the raw
+  commands: `shasum -a 256 -c SHA256SUMS` and `openssl pkeyutl -verify` for the
+  files and their signature, `openssl ts -verify` for each token, `jq` +
+  `openssl pkeyutl` for the anchor receipts' Ed25519 signatures.
+- **Later years.** TSA certificates expire: re-verify with
+  `openssl ts -verify -partial_chain -attime <genTime>` (or `verify-audit --tsa-at-gentime`)
+  against the same pinned CAs, and keep the pack whole (the tokens carry
+  their TSA chains). `COMPLETION.txt` holds the values for the report's first
+  page: manifest SHA-256, signing key, final anchored root and its timestamp
+  times. It never carries the auditor fingerprint or a genesis pin (a forger
+  would write their own); `audit package` prints the fingerprint on the
+  operator's terminal for the report.
+- **Milestone events.** `harness_frozen`, `run_completed` (numbered by
+  `run_seq`, with the freeze nonce) and `report_issued` ([AUDIT.md](docs/AUDIT.md));
+  a bundle that uses them is format `/2`, which needs kronicle-lite 0.10.0 to
+  verify.
+
+Details: [EVIDENCE-BUNDLE.md](docs/EVIDENCE-BUNDLE.md#evidence-packs-0100).
 
 ## Chained instructions (0.4.0)
 
