@@ -62,6 +62,36 @@ uses semantic versioning once past 0.x.
   0.9.0 binary's `rebuild` on a store that holds milestone events drops them
   from its projection (it does not know the kinds); the chain is unaffected.
 
+### Added — `kronicle-lite/core`
+
+- **A slim entry for short-lived embedders**: `import { KronicleLite } from
+  'kronicle-lite/core'` exports the store, the chain (`Chain`,
+  `ChainConflictError`, event types), `canonicalize` / `sha256Hex` /
+  `blake3Hex`, the key helpers, `openDatabase` / `defaultDataDir`, the
+  schema constants and the secret guard, without loading the MCP SDK, the
+  tool schemas, the server, the HTTP transport, doctor, anchor or the shim.
+  Importing it takes ~46 ms against ~94 ms for the main entry (macOS arm64,
+  Node 25). Every name is the same object as in the main entry, which is
+  unchanged. A hook that opens the store once per call (sea-lite
+  `scope-check` under cc-anchor) pays the difference on every call.
+  `test/read-path.test.ts` walks the built import graph and fails if the
+  core entry reaches `@modelcontextprotocol/*`.
+
+### Fixed
+
+- **open: a pending data migration is no longer skipped.** The 0.8.1 (C2-08)
+  fast path opens a current store with plain WAL reads and runs the
+  schema-setup write transaction only when something is missing. "Missing"
+  covered schema objects, added columns, the generation marker, the chain
+  head and the signing-key row, but not the `DATA_MIGRATIONS` markers: a
+  release that adds a data migration without a new table or column would
+  have opened older stores as current and never run it. `schemaCurrent`
+  now requires every migration marker; a store without one goes through
+  setup (and waits for the write lock to do so). Tests: open on a current
+  store succeeds and reads while another connection holds `BEGIN
+  IMMEDIATE`; a missing migration marker or signing-key row is restored;
+  a store needing setup queues behind a holder instead of skipping it.
+
 ## [Unreleased] — 0.9.0
 
 ### Added — audit events, batch verify, evidence bundles (MCP audit toolkit)

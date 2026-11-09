@@ -731,6 +731,16 @@ told.
   never claims "not found" from a stale or cold index; a briefing that hid a
   scope says it is partial.
 
+## Embedding the store
+
+`import { KronicleLite } from 'kronicle-lite'` loads the whole package,
+MCP server and SDK included. A process that only opens the store and exits
+(a hook, a one-shot CLI) can import `kronicle-lite/core` instead: the store,
+the chain, the crypto helpers and `openDatabase`, without the MCP SDK and
+the server code (about half the import time). Opening a store whose schema
+is current takes no write lock, so such a process never waits for another
+process's writer.
+
 ## Development
 
 ```sh
