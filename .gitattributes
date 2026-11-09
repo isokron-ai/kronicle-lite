@@ -2,3 +2,4 @@
 # catalog snapshot are byte-identical across platforms.
 * text=auto eol=lf
 *.png binary
+*.tsr binary

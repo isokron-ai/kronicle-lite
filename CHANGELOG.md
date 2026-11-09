@@ -4,6 +4,58 @@ All notable changes to kronicle-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
+## [Unreleased] — next (0.10.0)
+
+### Added — IsoKron Evidence Packs (verifiable audits)
+
+- **`verify-audit PACK`**: offline verification of an IsoKron Evidence Pack,
+  tamper-evident, independently timestamped audit evidence. Checks exactly the
+  claims the pack declares in `claims.json` (`integrity`, `chain`, `receipts`,
+  `independent_timestamps`, `harness_frozen_before_runs`, `run_sequence`) and
+  prints PASS / FAIL per claim with the evidence of every check, then the
+  values to compare with the report. Undeclared claims show as `not declared`;
+  `--require CLAIM` makes one mandatory. `--json` (`kronicle-lite-verify-audit/1`,
+  schema `VerifyAuditJsonSchema`). Exit 0 every declared claim passed, 1 a
+  check failed, 2 usage or an unreadable pack.
+- **RFC 3161 in-process** (`src/audit/rfc3161.ts`, `src/audit/der.ts`):
+  timestamp tokens are verified with `node:crypto` only (CMS SignedData,
+  signed attributes, ESS signing-certificate, RSA / RSA-PSS / ECDSA / Ed25519,
+  path to a trusted root), so no openssl is needed and none can be missing.
+  Shipped roots: USERTrust RSA (Sectigo) and DigiCert Trusted Root G4; path
+  building asks trusted roots first, so DigiCert's embedded cross-certificate
+  to the retired Assured ID root is never followed. `--tsa-at-gentime` for
+  certificates that expired since the stamp.
+- **`audit stamp`**: RFC 3161 tokens over an anchor receipt's sha256 from
+  Sectigo and DigiCert (or `--tsa name=url`), checked against the request
+  (imprint, nonce) and kept once written.
+- **`audit package`**: writes the pack (bundle, anchors inside its range,
+  their tokens, auditor key, anchor keys, TSA roots, `claims.json` with the
+  claims the store supports, `COMPLETION.txt`, `VERIFY.md` with the raw
+  `shasum` / `openssl` / `jq` commands and the `-attime` re-verification
+  commands, `SHA256SUMS` + raw Ed25519 `SHA256SUMS.sig`) and runs
+  `verify-audit` on it.
+- **Milestone kinds** `harness_frozen` (`planned_runs`), `run_completed`
+  (`run_seq`, freeze `nonce`, `capture` / `interruption`) and `report_issued`
+  (`run_count`). A bundle that uses them is exported as
+  `kronicle-lite-evidence-bundle/2`; bundles with only the 0.9.0 kinds stay
+  `/1` and still verify with 0.9.0. `verify-bundle` accepts both and refuses a
+  milestone kind in a `/1` bundle. The 0.9.0 convention (`finding` with
+  `class: protocol_freeze`, `call_measured` with `measured_at`) is still read.
+
+### Changed
+
+- **The production anchor service key is pinned in the package**
+  (`anchor-ed25519-3dca1ecf66c2993e`, valid from 2026-11-01T02:29:25.705Z):
+  `https://anchor.isokron.ai` is no longer trusted on first use. Rotation
+  still works through successor signatures.
+- Docs: the anchor service is described as IsoKron's audit-verification
+  service (optional, self-hostable), not as a tier; the receipt caveat says
+  the license key "only authorizes".
+- MCP catalog: `audit_record` / `audit_query` list the three new kinds
+  (`.mcp-catalog` re-snapshotted, `CATALOG_FINGERPRINT` updated). Running a
+  0.9.0 binary's `rebuild` on a store that holds milestone events drops them
+  from its projection (it does not know the kinds); the chain is unaffected.
+
 ## [Unreleased] — 0.9.0
 
 ### Added — audit events, batch verify, evidence bundles (MCP audit toolkit)

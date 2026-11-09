@@ -46,15 +46,30 @@ export const SERVICE_KEY_PREFIX = 'anchor-ed25519-';
 export const PINS_FILE = 'anchor-keys.pinned.json';
 
 /**
+ * Service keys shipped with the package, by anchor origin, with the validity
+ * the service publishes. IsoKron's audit-verification service
+ * (https://anchor.isokron.ai) signs with anchor-ed25519-3dca1ecf66c2993e
+ * from 2026-11-01T02:29:25.705Z. Rotation: a later key is trusted only with a
+ * successor signature from this one (see reconcileServiceKeys).
+ */
+export const SHIPPED_SERVICE_KEYS: Readonly<Record<string, readonly { key_id: string; public_key_pem: string; valid_from: string }[]>> = {
+  'https://anchor.isokron.ai': [
+    {
+      key_id: 'anchor-ed25519-3dca1ecf66c2993e',
+      public_key_pem: '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAvJAsc6UvXIKrZXFNO6jjSKKnkUKZvh2crVOyvrQqJm4=\n-----END PUBLIC KEY-----\n',
+      valid_from: '2026-11-01T02:29:25.705Z',
+    },
+  ],
+};
+
+/**
  * Service keys shipped with the package, by anchor origin. A non-empty list
  * for an origin is authoritative: first-use pinning is off for it and only
- * these keys (and successors they sign) are trusted. Empty until the
- * production key is published through a channel other than the service
- * itself; until then the production origin uses first-use pinning.
+ * these keys (and successors they sign) are trusted.
  */
-export const SHIPPED_SERVICE_KEY_PINS: Readonly<Record<string, readonly string[]>> = {
-  'https://anchor.isokron.ai': [],
-};
+export const SHIPPED_SERVICE_KEY_PINS: Readonly<Record<string, readonly string[]>> = Object.fromEntries(
+  Object.entries(SHIPPED_SERVICE_KEYS).map(([origin, keys]) => [origin, keys.map((k) => k.public_key_pem)]),
+);
 
 /** Statuses a service key may have and still vouch for a receipt (inside its validity window). */
 export const ACCEPTED_SERVICE_KEY_STATUSES = ['active', 'retired'] as const;
@@ -210,7 +225,7 @@ function anchorPin(pem: string, source: PinSource, issuer: string | null): Pinne
 export function trustedServiceKeys(scope: PinScope, anchorUrl: string): { keys: PinnedServiceKey[]; authoritative: boolean } {
   const file = readPinFile(scope);
   const fixed: PinnedServiceKey[] = [
-    ...(SHIPPED_SERVICE_KEY_PINS[originOf(anchorUrl)] ?? []).map((pem) => anchorPin(pem, 'shipped', originOf(anchorUrl))),
+    ...(SHIPPED_SERVICE_KEYS[originOf(anchorUrl)] ?? []).map((k) => ({ ...anchorPin(k.public_key_pem, 'shipped', originOf(anchorUrl)), valid_from: k.valid_from })),
     ...readConfigPins(scope.dataDir).map((pem) => anchorPin(pem, 'config', null)),
   ];
   const byId = new Map<string, PinnedServiceKey>();

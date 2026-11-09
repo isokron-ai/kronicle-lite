@@ -34,7 +34,7 @@ export const VERIFIED_CLAIMS = ['chain_id', 'key_id', 'signature', 'range'] as c
 export const UNVERIFIED_CLAIMS = [
   'that root covers real events (the server never sees leaves)',
   'that [1..N+k] extends an earlier [1..N] (no consistency proof in v1)',
-  'who holds the signing key (signature = possession; the license key only pays)',
+  'who holds the signing key (signature = possession; the license key only authorizes)',
 ] as const;
 
 export interface AnchorReceiptBody {

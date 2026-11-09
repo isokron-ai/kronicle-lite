@@ -13,7 +13,8 @@ import { AUDIT_KINDS, type AuditEventInput, type AuditKind } from './schemas.js'
 type Flags = Record<string, string | true>;
 const str = (v: string | true | undefined): string | undefined => (typeof v === 'string' ? v : undefined);
 
-const USAGE = 'usage: kronicle-lite audit put-blob FILE [--media-type T] | record --audit-id A [--in FILE|-] | query --audit-id A|--fingerprint F [--kind K] [--finding ID] [--findings] [--json] | export --audit-id A --out DIR\n';
+const USAGE =
+  'usage: kronicle-lite audit put-blob FILE [--media-type T] | record --audit-id A [--in FILE|-] | query --audit-id A|--fingerprint F [--kind K] [--finding ID] [--findings] [--json] | export --audit-id A --out DIR | stamp [--anchor-id ID] --out DIR [--tsa name=url,…] [--json] | package --audit-id A --out DIR [--timestamps DIR] [--tsa-roots DIR] [--json]\n';
 
 export async function runAuditCli(positional: string[], flags: Flags, dataDir: string): Promise<number> {
   const [op, ...rest] = positional;
@@ -74,6 +75,35 @@ export async function runAuditCli(positional: string[], flags: Flags, dataDir: s
           `exported ${m.events.length} event(s) (${m.stubs.length} stub(s)), ${m.blobs.length} blob(s), ${m.redacted.length} redacted, ${m.missing.length} missing to ${out}\nroot ${m.root.root} (seq ${m.range.from_seq}..${m.range.to_seq}, ${m.root.key_id})\nmanifest sha256 ${r.manifest_sha256}\n`,
         );
         return m.missing.length === 0 ? 0 : 1;
+      }
+      case 'stamp': {
+        const out = str(flags['out']);
+        if (!out) break;
+        const { stampAnchor, parseTsaList } = await import('./package.js');
+        const tsas = str(flags['tsa']) !== undefined ? parseTsaList(str(flags['tsa'])!) : undefined;
+        const anchorId = str(flags['anchor-id']);
+        const r = await stampAnchor(store, { out_dir: out, ...(anchorId ? { anchor_id: anchorId } : {}), ...(tsas ? { tsas } : {}) });
+        if (flags['json'] === true) process.stdout.write(JSON.stringify(r, null, 2) + '\n');
+        else {
+          process.stdout.write(`anchor         ${r.anchor_id}\nreceipt sha256 ${r.receipt_sha256}\n`);
+          for (const x of r.results) {
+            process.stdout.write(`  ${x.ok ? 'PASS' : 'FAIL'}  RFC 3161 ${x.tsa.padEnd(10)} ${x.ok ? `${x.gen_time}  ${x.file}${x.existing ? ' (already present)' : ''}` : x.problem}\n`);
+          }
+        }
+        // Network or TSA trouble is I/O (2); a token file that does not match is a conflict (1).
+        if (r.results.every((x) => x.ok)) return 0;
+        return r.results.some((x) => !x.ok && x.existing) ? 1 : 2;
+      }
+      case 'package': {
+        const audit_id = str(flags['audit-id']);
+        const out = str(flags['out']);
+        if (!audit_id || !out) break;
+        const { buildAuditPackage, readPemDir, renderPackage } = await import('./package.js');
+        const ts = str(flags['timestamps']);
+        const roots = str(flags['tsa-roots']);
+        const r = buildAuditPackage(store, { audit_id, out, ...(ts ? { timestamps_dir: ts } : {}), ...(roots ? { tsa_roots: readPemDir(roots) } : {}) });
+        process.stdout.write(flags['json'] === true ? JSON.stringify(r, null, 2) + '\n' : renderPackage(r));
+        return r.check.ok ? 0 : 1;
       }
     }
     process.stderr.write(USAGE);
