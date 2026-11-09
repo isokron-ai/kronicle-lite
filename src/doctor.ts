@@ -15,7 +15,7 @@ import { join, resolve } from 'node:path';
 import { AnchorClient } from './anchor/client.js';
 import { AuditLog } from './audit/log.js';
 import { CONFIG_KEYS, DEFAULT_ANCHOR_URL, KEYS_CACHE_FILE } from './anchor/config.js';
-import { PINS_FILE, receiptChainRefusal, trustedServiceKeys, verifyReceiptWithPins } from './anchor/trust.js';
+import { anchorGenesis, keptServiceKeys, LEGACY_PINS_FILE, receiptChainRefusal, verifyReceiptWithKeys } from './anchor/trust.js';
 import { CATALOG_FINGERPRINT, CATALOG_VERSION, liveCatalogFingerprint } from './catalog.js';
 import { Chain, type AnchorRecord, type Checkpoint } from './chain/chain.js';
 import type { Signer } from './crypto/keys.js';
@@ -124,7 +124,7 @@ function checkPermissions(dataDir: string, platform: NodeJS.Platform, licenseInC
     ...SECRET_FILES.map((name) => ({ name, secret: true })),
     { name: 'config.json', secret: licenseInConfig },
     { name: KEYS_CACHE_FILE, secret: false },
-    { name: PINS_FILE, secret: false },
+    { name: LEGACY_PINS_FILE, secret: false },
     { name: 'kronicle-lite.db', secret: false },
   ];
   const seen: Record<string, string> = {};
@@ -347,9 +347,9 @@ async function checkAnchorLocal(db: Database.Database, dataDir: string, anchorUr
   let to = last.to_seq;
   let root: string | null = null;
   try {
-    const { keys } = trustedServiceKeys({ dataDir }, anchorUrl);
-    if (keys.length > 0) {
-      const v = verifyReceiptWithPins(JSON.parse(last.receipt_json), keys);
+    const kept = keptServiceKeys({ dataDir }, last.anchor_url || anchorUrl, anchorGenesis(dataDir).pin);
+    if (kept.set) {
+      const v = verifyReceiptWithKeys(JSON.parse(last.receipt_json), kept.set);
       const refusal = v.ok ? receiptChainRefusal(db, v.receipt, null) : v.reason;
       if (v.ok && refusal === null) {
         countersig = 'ok';
@@ -359,7 +359,7 @@ async function checkAnchorLocal(db: Database.Database, dataDir: string, anchorUr
         why = refusal ?? '';
       }
     } else {
-      why = 'no anchor service key pinned yet';
+      why = kept.violations.join('; ');
     }
   } catch (e) {
     countersig = 'failed';

@@ -30,7 +30,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { anchorStatus, pushCheckpoint, tryPushCheckpoint, verifyLastAnchor, verifyRemote } from '../src/anchor/anchor.js';
 import { AnchorApiError, AnchorClient, AnchorUnreachableError } from '../src/anchor/client.js';
 import { DEFAULT_ANCHOR_URL, KEYS_CACHE_FILE, loadConfig } from '../src/anchor/config.js';
-import { PINS_FILE } from '../src/anchor/trust.js';
+import { LEGACY_PINS_FILE } from '../src/anchor/trust.js';
 import { anchorReceiptSigningPayload, type AnchorReceipt } from '../src/anchor/receipt.js';
 import { GENESIS_HASH } from '../src/chain/genesis.js';
 import { verifyEd25519 } from '../src/crypto/keys.js';
@@ -155,7 +155,7 @@ describe.each(backends)('anchoring against the $name backend', { timeout: 60_000
   afterAll(async () => {
     await b?.stop();
   });
-  const opts = () => ({ anchorUrl: b.url, licenseKey: b.license });
+  const opts = () => ({ anchorUrl: b.url, licenseKey: b.license, genesis: b.genesis });
 
   it('push stores the countersigned receipt in `anchors`; the countersignature verifies; chain tables untouched', async () => {
     const { dataDir, store } = makeStore(2);
@@ -176,8 +176,9 @@ describe.each(backends)('anchoring against the $name backend', { timeout: 60_000
     expect(store.chain.head()).toEqual(headBefore);
     expect(store.chain.listCheckpoints()).toHaveLength(1);
     expect(store.chain.verify().ok).toBe(true);
-    expect(existsSync(join(dataDir, PINS_FILE))).toBe(true);
-    expect(existsSync(join(dataDir, KEYS_CACHE_FILE))).toBe(false); // 0.8.1: the unpinned cache is no longer written
+    // 0.10.0: the key list that chained to the genesis pin is kept (the rollback reference); no pin store
+    expect(existsSync(join(dataDir, KEYS_CACHE_FILE))).toBe(true);
+    expect(existsSync(join(dataDir, LEGACY_PINS_FILE))).toBe(false);
     store.close();
   });
 
@@ -288,7 +289,7 @@ describe.each(backends)('anchoring against the $name backend', { timeout: 60_000
     two.store.close();
   });
 
-  it('--offline re-verifies stored receipts against the pinned service keys; a tampered stored receipt fails its countersignature', async () => {
+  it('--offline re-verifies stored receipts against the key list kept for the service they were pushed to; a tampered stored receipt fails its countersignature', async () => {
     const { store } = makeStore(1);
     await pushCheckpoint(store, opts());
     const dead = await closedPortUrl();
@@ -333,7 +334,7 @@ describe.each(backends)('anchoring against the $name backend', { timeout: 60_000
   it('CLI: checkpoint --push → verify --remote → anchor status, exit codes and --json', async () => {
     const { dataDir, store } = makeStore(1);
     store.close();
-    const env = { KRONICLE_ANCHOR_URL: b.url, KRONICLE_ANCHOR_KEY: b.license };
+    const env = { KRONICLE_ANCHOR_URL: b.url, KRONICLE_ANCHOR_KEY: b.license, KRONICLE_ANCHOR_GENESIS: b.genesis };
     const push = await cli(['checkpoint', '--push', '--data-dir', dataDir], env);
     expect(push.status, push.stderr).toBe(0);
     expect(JSON.parse(push.stdout).anchor).toMatchObject({ ok: true, error: null });
@@ -352,9 +353,13 @@ describe.each(backends)('anchoring against the $name backend', { timeout: 60_000
       p['title'] = 'x';
     });
     db.close();
-    const bad = await cli(['verify', '--remote', '--data-dir', dataDir, '--url', b.url]);
+    const bad = await cli(['verify', '--remote', '--data-dir', dataDir, '--url', b.url, '--genesis', b.genesis]);
     expect(bad.status).toBe(1);
     expect(bad.stdout).toMatch(/local chain diverges from anchor at \[1,\d+\]/);
+    // without the service's genesis pin the compiled production pin applies: the stub's list does not chain to it
+    const prod = await cli(['verify', '--remote', '--data-dir', dataDir, '--url', b.url]);
+    expect(prod.status).toBe(1);
+    expect(prod.stdout + prod.stderr).toMatch(/does not chain to the genesis pin 3dca1ecf66c2993e/);
     expect((await cli(['anchor', '--data-dir', dataDir])).status).toBe(2);
   });
 

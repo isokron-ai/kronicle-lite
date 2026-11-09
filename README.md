@@ -299,9 +299,9 @@ export KRONICLE_ANCHOR_KEY=KLA_…                 # or {"license_key": "KLA_…
 kronicle-lite checkpoint --push        # sign a checkpoint, anchor it, store the countersigned receipt
 kronicle-lite verify --remote          # recompute every anchored range; exit 1 on
                                        #   "local chain diverges from anchor at [a,b]"
-kronicle-lite verify --remote --offline   # same, from stored receipts + the pinned service keys
+kronicle-lite verify --remote --offline   # same, from stored receipts + the kept service key list
 kronicle-lite anchor status            # last anchor, status, events since (no network)
-kronicle-lite anchor keys              # pinned anchor service keys (add PEM-FILE | remove KEY_ID | reset)
+kronicle-lite anchor keys              # the genesis pin in force and the kept service key list
 ```
 
 - **What leaves the box:** the root, range, signature and your public key.
@@ -318,20 +318,26 @@ kronicle-lite anchor keys              # pinned anchor service keys (add PEM-FIL
   audit-verification service, operated for IsoKron's own audits. Anchoring is
   optional, and you can self-host the service
   ([isokron-anchor](https://github.com/rafe-walker/isokron-anchor)) and point
-  `--url` / `KRONICLE_ANCHOR_URL` at your deployment. When it cannot be reached, `--push` stores the
+  `--url` / `KRONICLE_ANCHOR_URL` at your deployment, with its genesis pin
+  (`--genesis` / `KRONICLE_ANCHOR_GENESIS` / `"anchor_genesis"` in
+  `config.json`, as `<sha256>@<valid_from>`). When it cannot be reached, `--push` stores the
   checkpoint locally and exits 2 with `anchor service unreachable at …`;
   `verify --remote` exits 2 the same way; every local command, the MCP
   server and `orient` behave exactly as without anchoring.
-- **What the client trusts (0.9.0).** Only countersigned receipts: every
+- **What the client trusts (0.10.0).** Only countersigned receipts: every
   comparison uses the root and range inside a receipt whose countersignature
-  verifies against a *pinned* service key and whose checkpoint signature
-  verifies against your own chain key — never the unsigned fields of the
-  service's listing or the local `anchors.root` column. The production key
-  (`anchor-ed25519-3dca1ecf66c2993e`) ships pinned in the package (0.10.0), so
-  `https://anchor.isokron.ai` is never trusted on first use; for any other URL
-  the first online push or `verify --remote` pins the service key it is served
-  (`<data-dir>/anchor-keys.pinned.json`, 0600). Later keys are accepted only
-  with a successor signature from a pinned key or by `anchor keys add`.
+  verifies against the service's *current head key* and whose checkpoint
+  signature verifies against your own chain key — never the unsigned fields
+  of the service's listing or the local `anchors.root` column. The service's
+  key list must be one signed chain from its genesis pin, the same model the
+  service and its own client enforce: the production pin
+  (`anchor-ed25519-3dca1ecf66c2993e`) is compiled in, so
+  `https://anchor.isokron.ai` is never trusted on first use. Each list is
+  checked for rollback against the one kept in
+  `<data-dir>/anchor-keys.cache.json` (0600) before it is used. A retired or
+  revoked key's receipt is refused here: its `received_at` is signed by that
+  same key, and only an independent RFC 3161 time inside the key's window can
+  vouch for it (the verification page, or `verify-audit` on an Evidence Pack).
   Receipts you hold are checked even when the service stops listing them.
   `http://` URLs are refused unless the host is loopback or you pass
   `--insecure-http`; prefer `KRONICLE_ANCHOR_KEY` / `config.json` over
@@ -348,7 +354,7 @@ timestamp authorities (Sectigo, DigiCert) on every receipt, and the keys and
 roots to check them. A client checks it offline with one command:
 
 ```sh
-npx -y kronicle-lite verify-audit pack/ --key-fingerprint <SHA-256 of the auditor key, from the report or SOW>
+npx -y kronicle-lite@0.10.0 verify-audit pack/ --key-fingerprint <SHA-256 of the auditor key, from the report or SOW>
 ```
 
 ```sh

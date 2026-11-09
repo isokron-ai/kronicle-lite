@@ -5,7 +5,7 @@
  */
 
 const GLOBAL = ['data-dir'];
-const ANCHOR = ['url', 'key', 'insecure-http'];
+const ANCHOR = ['url', 'key', 'insecure-http', 'genesis'];
 const RANGE = ['from', 'to', 'full'];
 
 export const COMMAND_OPTIONS: Readonly<Record<string, readonly string[]>> = {
@@ -24,7 +24,7 @@ export const COMMAND_OPTIONS: Readonly<Record<string, readonly string[]>> = {
   checkpoint: ['from', 'to', 'push', ...ANCHOR],
   verify: ['json', 'offline', 'remote', ...ANCHOR, ...RANGE],
   'anchor status': ['json', ...ANCHOR],
-  'anchor keys': ['json', 'url'],
+  'anchor keys': ['json', 'url', 'genesis'],
   export: ['out'],
   import: ['allow-secrets', 'in'],
   keys: [],

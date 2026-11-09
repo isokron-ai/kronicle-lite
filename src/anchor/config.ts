@@ -1,11 +1,11 @@
 /**
  * Anchor configuration and the service-key cache.
  *
- *   <data-dir>/config.json              {"anchor_url": "...", "license_key": "KLA_..."}   mode 0600
- *   <data-dir>/anchor-keys.pinned.json  pinned anchor service keys (trust.ts)          mode 0600
- *   <data-dir>/anchor-keys.cache.json   0.4.0–0.8.0 only: last fetched key document; no longer
- *                                       written or trusted (it came over the same channel as
- *                                       the receipts — hardening A2-12)
+ *   <data-dir>/config.json              {"anchor_url", "license_key", "anchor_genesis"}   mode 0600
+ *   <data-dir>/anchor-keys.cache.json   0.10.0: the service key list kept per service and genesis
+ *                                       pin, the rollback reference (keys-cache.ts; the format of
+ *                                       isokron-anchor's own client)
+ *   <data-dir>/anchor-keys.pinned.json  0.8.1–0.9.x pin store; no longer read (trust.ts)
  *
  * Precedence: explicit arguments (CLI flags) > KRONICLE_ANCHOR_URL /
  * KRONICLE_ANCHOR_KEY > config.json > defaults. A store opened in memory
@@ -22,7 +22,7 @@ export const DEFAULT_ANCHOR_URL = 'https://anchor.isokron.ai';
 export const CONFIG_FILE = 'config.json';
 export const KEYS_CACHE_FILE = 'anchor-keys.cache.json';
 /** Keys config.json may carry. Anything else is reported by `doctor`. */
-export const CONFIG_KEYS = ['anchor_url', 'license_key', 'service_key_pins'] as const;
+export const CONFIG_KEYS = ['anchor_url', 'license_key', 'anchor_genesis'] as const;
 
 export interface AnchorConfig {
   anchor_url: string;

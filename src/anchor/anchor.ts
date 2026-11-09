@@ -18,15 +18,7 @@ import type { KronicleLite } from '../store.js';
 import { AnchorApiError, AnchorClient, AnchorListingError, AnchorRateLimitedError, AnchorUnreachableError, type RemoteAnchor, type RemoteChain } from './client.js';
 import { AnchorConfigError, assertAnchorTransport, loadConfig, type AnchorConfig } from './config.js';
 import { anchorReceiptJcs, type AnchorReceipt } from './receipt.js';
-import {
-  receiptChainRefusal,
-  reconcileServiceKeys,
-  ServiceKeyTrustError,
-  trustedServiceKeys,
-  verifyReceiptWithPins,
-  type KeyReconciliation,
-  type PinnedServiceKey,
-} from './trust.js';
+import { acceptServiceKeys, anchorGenesis, keptServiceKeys, receiptChainRefusal, ServiceKeyTrustError, verifyReceiptWithKeys, type KeyListCheck, type ServiceKeySet } from './trust.js';
 import { parseWireCheckpoint, type WireCheckpoint } from './wire.js';
 
 export interface AnchorCallOptions {
@@ -40,6 +32,8 @@ export interface AnchorCallOptions {
   timeoutMs?: number;
   /** Waits between 429 retries (tests inject a fake clock). */
   sleep?: (ms: number) => Promise<void>;
+  /** The service's genesis pin, `<sha256>@<valid_from>` (CLI `--genesis`); else KRONICLE_ANCHOR_GENESIS, config.json anchor_genesis, the compiled pin. */
+  genesis?: string;
 }
 
 function configFor(store: KronicleLite, opts: AnchorCallOptions): AnchorConfig {
@@ -59,33 +53,35 @@ function clientFor(cfg: AnchorConfig, opts: AnchorCallOptions): AnchorClient {
   });
 }
 
-/** Fetch the service key document and merge it into the pins (TOFU / successor / tighten-only). */
-async function refreshPins(store: KronicleLite, cfg: AnchorConfig, api: AnchorClient): Promise<KeyReconciliation> {
-  return reconcileServiceKeys(store, cfg.anchor_url, await api.serviceKeys());
+/** Fetch the service key list: rollback check against the kept one, then the chain check against the genesis pin. */
+async function fetchKeys(store: KronicleLite, cfg: AnchorConfig, api: AnchorClient, opts: AnchorCallOptions): Promise<KeyListCheck> {
+  const { pin } = anchorGenesis(store.dataDir, opts.genesis);
+  return acceptServiceKeys(store, cfg.anchor_url, pin, await api.serviceKeys());
 }
 
-/** Local pins only (no network). A corrupt pin file is reported, not trusted. */
-function localPins(store: KronicleLite, cfg: AnchorConfig): { keys: PinnedServiceKey[]; problem: string | null } {
+/** The key list kept in the data dir (no network). A damaged cache or a bad pin is a violation, not trusted. */
+function keptKeys(store: KronicleLite, cfg: AnchorConfig, opts: AnchorCallOptions): KeyListCheck {
   try {
-    return { keys: trustedServiceKeys(store, cfg.anchor_url).keys, problem: null };
+    const { pin } = anchorGenesis(store.dataDir, opts.genesis);
+    return keptServiceKeys(store, cfg.anchor_url, pin);
   } catch (e) {
-    if (e instanceof ServiceKeyTrustError || e instanceof AnchorConfigError) return { keys: [], problem: e.message };
+    if (e instanceof ServiceKeyTrustError || e instanceof AnchorConfigError) return { set: null, notes: [], violations: [e.message] };
     throw e;
   }
 }
 
 /**
- * Verify a receipt against the pinned service keys AND tie it to this chain
- * (chain_id, checkpoint key, checkpoint signature). Only a receipt that
- * passes both may supply a root or range to compare.
+ * Verify a receipt against the service key list (head key only) AND tie it to
+ * this chain (chain_id, checkpoint key, checkpoint signature). Only a receipt
+ * that passes both may supply a root or range to compare.
  */
 export function checkHeldReceipt(
   store: KronicleLite,
   input: unknown,
-  keys: readonly PinnedServiceKey[],
+  keys: ServiceKeySet | null,
   expectedChainId: string | null,
 ): { ok: true; receipt: AnchorReceipt } | { ok: false; reason: string; claimed: AnchorReceipt | null } {
-  const v = verifyReceiptWithPins(input, keys);
+  const v = verifyReceiptWithKeys(input, keys);
   if (!v.ok) return v;
   const refusal = receiptChainRefusal(store.db, v.receipt, expectedChainId);
   return refusal ? { ok: false, reason: refusal, claimed: v.receipt } : v;
@@ -168,10 +164,11 @@ export async function pushCheckpoint(store: KronicleLite, opts: AnchorCallOption
   const cp = toWireCheckpoint(local);
 
   const api = clientFor(cfg, opts);
+  // The key list (rollback and chain checks) before anything is sent, as the service's own client does.
+  const pins = await fetchKeys(store, cfg, api, opts);
+  if (pins.violations.length > 0 || !pins.set) throw new ServiceKeyTrustError(`${pins.violations.join('; ')}; nothing sent`);
   const resp = await api.push(cfg.license_key, { chain_id, pubkey: pem, checkpoint: cp });
-  const pins = await refreshPins(store, cfg, api);
-  if (pins.violations.length > 0) throw new Error(`${pins.violations.join('; ')}; nothing stored`);
-  const checked = checkHeldReceipt(store, resp.receipt, pins.keys, chain_id);
+  const checked = checkHeldReceipt(store, resp.receipt, pins.set, chain_id);
   if (!checked.ok) throw new Error(`anchor receipt rejected: ${checked.reason}; nothing stored`);
   const receipt = checked.receipt;
   if (
@@ -195,7 +192,7 @@ export async function pushCheckpoint(store: KronicleLite, opts: AnchorCallOption
     } catch {
       throw new Error('anchor response receipt_jcs is not JSON; nothing stored');
     }
-    const again = checkHeldReceipt(store, parsedJcs, pins.keys, chain_id);
+    const again = checkHeldReceipt(store, parsedJcs, pins.set, chain_id);
     if (!again.ok) throw new Error(`anchor response receipt_jcs rejected: ${again.reason}; nothing stored`);
     if (resp.receipt_jcs !== jcs) throw new Error('anchor response receipt_jcs is not the JCS of the countersigned receipt; nothing stored');
   }
@@ -297,6 +294,8 @@ interface Candidate {
   /** Unsigned values shown next to the receipt, cross-checked only. */
   unsigned: { anchor_id?: string; from_seq?: number; to_seq?: number; root?: string; received_at?: string };
   unsignedLabel: string;
+  /** Offline: the service this receipt was pushed to (its kept key list is the one that counts). */
+  anchorUrl?: string;
 }
 
 /**
@@ -319,14 +318,24 @@ export async function verifyRemote(store: KronicleLite, opts: AnchorCallOptions 
   const notes: string[] = [];
   const held = store.chain.listAnchors();
   const candidates: Candidate[] = [];
-  let keys: PinnedServiceKey[];
+  let keys: ServiceKeySet | null;
 
+  // Offline: each stored receipt is checked against the key list kept for the service it was pushed to.
+  const keptByUrl = new Map<string, ServiceKeySet | null>();
+  const keptFor = (url: string): ServiceKeySet | null => {
+    if (!keptByUrl.has(url)) {
+      const lp = keptKeys(store, { ...cfg, anchor_url: url }, opts);
+      keptByUrl.set(url, lp.set);
+      problems.push(...lp.violations);
+      notes.push(...lp.notes);
+    }
+    return keptByUrl.get(url)!;
+  };
   if (opts.offline) {
-    const lp = localPins(store, cfg);
-    keys = lp.keys;
-    if (lp.problem) problems.push(lp.problem);
+    keys = null;
     for (const a of held) {
       candidates.push({
+        anchorUrl: a.anchor_url,
         anchor_id: a.anchor_id,
         receipt: safeJson(a.receipt_json),
         source: 'local',
@@ -346,8 +355,8 @@ export async function verifyRemote(store: KronicleLite, opts: AnchorCallOptions 
       if (!(e instanceof AnchorListingError)) throw e;
       problems.push(e.message);
     }
-    const rec = await refreshPins(store, cfg, api);
-    keys = rec.keys;
+    const rec = await fetchKeys(store, cfg, api, opts);
+    keys = rec.set;
     problems.push(...rec.violations);
     notes.push(...rec.notes);
     const listed = remote?.anchors ?? [];
@@ -408,7 +417,7 @@ export async function verifyRemote(store: KronicleLite, opts: AnchorCallOptions 
   for (const c of candidates) {
     // Listed anchors must be for the chain we asked about; a held receipt
     // must derive from one of our own signing keys (checked either way).
-    const v = checkHeldReceipt(store, c.receipt, keys, c.source === 'remote' ? chain_id : null);
+    const v = checkHeldReceipt(store, c.receipt, c.anchorUrl !== undefined ? keptFor(c.anchorUrl) : keys, c.source === 'remote' ? chain_id : null);
     if (!v.ok) {
       const claimed = v.claimed;
       problems.push(`anchor ${c.anchor_id} (${c.source}): ${v.reason}; range not compared`);
@@ -545,15 +554,15 @@ export async function verifyLastAnchor(store: KronicleLite, opts: AnchorCallOpti
   const extra: string[] = [];
   let remoteState: LastAnchorVerification['remote'] = 'skipped';
   let remoteConflict: boolean | null = null;
-  let keys: PinnedServiceKey[] = [];
+  let keys: ServiceKeySet | null = null;
   let violations = false;
   let fromNetwork = false;
   if (opts.remote) {
     try {
       const api = clientFor(cfg, opts);
       const remote = await api.chain(chain_id);
-      const rec = await refreshPins(store, cfg, api);
-      keys = rec.keys;
+      const rec = await fetchKeys(store, cfg, api, opts);
+      keys = rec.set;
       fromNetwork = true;
       extra.push(...rec.violations);
       violations = rec.violations.length > 0;
@@ -562,7 +571,7 @@ export async function verifyLastAnchor(store: KronicleLite, opts: AnchorCallOpti
       const entry = remote?.anchors.find((a) => a.anchor_id === last.anchor_id) ?? null;
       if (!entry) extra.push(`anchor ${last.anchor_id} not listed by ${cfg.anchor_url}`);
     } catch (err) {
-      if (err instanceof ServiceKeyTrustError) {
+      if (err instanceof ServiceKeyTrustError || err instanceof AnchorConfigError) {
         extra.push(err.message);
         violations = true;
         remoteState = 'checked';
@@ -576,10 +585,10 @@ export async function verifyLastAnchor(store: KronicleLite, opts: AnchorCallOpti
     }
   }
   if (!fromNetwork) {
-    const lp = localPins(store, cfg);
-    keys = lp.keys;
-    if (lp.problem) {
-      extra.push(lp.problem);
+    const lp = keptKeys(store, { ...cfg, anchor_url: last.anchor_url }, opts);
+    keys = lp.set;
+    if (lp.violations.length) {
+      extra.push(...lp.violations);
       violations = true;
     }
   }

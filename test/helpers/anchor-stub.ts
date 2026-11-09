@@ -13,7 +13,7 @@
  * which includes CI. No quotas, no rate limits, no R2/D1.
  */
 
-import { createPublicKey, generateKeyPairSync, randomUUID, sign } from 'node:crypto';
+import { createPrivateKey, createPublicKey, randomUUID, sign } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 
 import { checkpointPayloadHash, parseWireCheckpoint, type WireCheckpoint } from '../../src/anchor/wire.js';
@@ -28,8 +28,21 @@ export const STUB_LICENSE = 'KLA_stub-free-0001';
 export interface AnchorBackend {
   url: string;
   license: string;
+  /** The service's genesis pin, `<sha256>@<valid_from>` (its only key, listed as the genesis). */
+  genesis: string;
   stop(): Promise<void>;
 }
+
+/**
+ * The stub signs with one fixed Ed25519 key (seed 32 × 0x5a), so every stub in a test run has the
+ * same genesis pin: test/helpers/anchor-genesis.ts sets KRONICLE_ANCHOR_GENESIS to it for in-process
+ * calls; CLI calls pass it in their env.
+ */
+const STUB_SEED = Buffer.alloc(32, 0x5a);
+export const STUB_PRIVATE = createPrivateKey({ key: Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), STUB_SEED]), format: 'der', type: 'pkcs8' });
+const STUB_PEM = createPublicKey(STUB_PRIVATE).export({ type: 'spki', format: 'pem' }) as string;
+export const STUB_KEY_VALID_FROM = '2026-11-01T00:00:00.000Z';
+export const STUB_GENESIS = `${chainIdFromPublicKeyPem(STUB_PEM)}@${STUB_KEY_VALID_FROM}`;
 
 interface Row {
   anchor_id: string;
@@ -43,8 +56,8 @@ interface Row {
 }
 
 export async function startAnchorStub(): Promise<AnchorBackend> {
-  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
-  const servicePem = publicKey.export({ type: 'spki', format: 'pem' }) as string;
+  const privateKey = STUB_PRIVATE;
+  const servicePem = STUB_PEM;
   const service_key_id = `anchor-ed25519-${chainIdFromPublicKeyPem(servicePem).slice(0, 16)}`;
   const rows: Row[] = [];
   const chains = new Map<string, { key_id: string; pubkey: string; conflict: boolean }>();
@@ -88,7 +101,7 @@ export async function startAnchorStub(): Promise<AnchorBackend> {
       return send(res, 200, {
         v: 1,
         issuer: base,
-        keys: [{ key_id: service_key_id, alg: 'Ed25519', public_key_pem: servicePem, valid_from: '2026-11-01T00:00:00.000Z', valid_to: null, status: 'active' }],
+        keys: [{ key_id: service_key_id, alg: 'Ed25519', public_key_pem: servicePem, valid_from: STUB_KEY_VALID_FROM, valid_to: null, status: 'active' }],
       });
     }
     const chainMatch = /^\/v1\/chains\/([^/]+)$/.exec(url.pathname);
@@ -208,6 +221,7 @@ export async function startAnchorStub(): Promise<AnchorBackend> {
   return {
     url: base,
     license: STUB_LICENSE,
+    genesis: STUB_GENESIS,
     stop: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }
