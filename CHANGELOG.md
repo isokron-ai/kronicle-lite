@@ -59,13 +59,21 @@ uses semantic versioning once past 0.x.
     by 0.8.0 no `doc_lineage_gaps`. Opened without migrating (`verify-chain`,
     `verify`, `doctor`, a read-only medium), they failed with "no such table"
     and exit 1, the divergence code; on a read-only medium `orient` reported
-    an integrity failure and `get` / `pending` failed. Every table an older
-    store lacks is now served as an empty TEMP table on that connection (the
-    file is never written), with the data migrations it has not run derived
-    into it, so reads answer as on a migrated store; a tampered 0.7.0 / 0.8.0
-    store still exits 1, and a gaps table the store migrated and then lost
-    is still a divergence (`test/upgrade-old-stores.test.ts`, new fixture
-    `store-0.7.0.db.gz` made by the published 0.7.0).
+    an integrity failure and `get` / `pending` failed. A table the store's
+    release never had is now served as an empty TEMP table on that connection,
+    with the data migrations the store has not run derived into it, so reads
+    answer as on a migrated store. `kronicle-lite.db` itself is not written
+    (on a writable directory SQLite may create the `-wal` / `-shm` sidecars of
+    a WAL database, and doctor's handle checkpoints them on close); commands
+    that open read-write (`orient`, `export`, `get`, `pending`) migrate the
+    store first, as before. The release is a new `schema_generation` meta key
+    (written on migration), else inferred from what the store holds. A table
+    missing from a store whose release had it is damage, not an older store:
+    `verify-chain` and `doctor` report it and exit 1, as do edited events,
+    hashes and a deleted head. A connection that stays open while another
+    process migrates the store drops its TEMP tables as the real ones appear
+    (`test/upgrade-old-stores.test.ts`, fixture `store-0.7.0.db.gz` made by
+    the published 0.7.0).
   - **Truncated exports are refused.** `import` read an export to its last
     line and ignored the head its header names, so a file cut short (an
     interrupted `export --out`, a full disk, a partial copy) imported as a
@@ -73,20 +81,24 @@ uses semantic versioning once past 0.x.
     at the header's head seq and hash, else nothing is imported. `export`
     stops at the head it wrote in the header, so a writer appending
     mid-export no longer adds events past it.
-  - **verify-bundle reads only small regular files.** `manifest.json` or
-    `events.jsonl` linked to `/dev/zero` aborted the verifier (out of
-    memory), a FIFO in their place blocked it forever, a link to any file
-    outside the bundle was read, a sparse 3 GB file was read in full, and so
-    was a 3 GB blob; `--key /dev/zero` aborted too. Bundle files must now be
-    regular files (no links) under the V8 string limit, a blob whose size
-    differs from the manifest is reported without being read, and `--key`
-    must be a regular file of at most 64 KB. A `blobs/` directory linked
-    outside the bundle is refused too. No blob is read until the manifest
-    signature verifies (an edited 16 KB bundle listing sparse multi-GB blobs
-    made the verifier use 1.6 GB and seconds per blob, even with a broken
-    signature); a blob listed above 64 MiB is refused unread, and the rest
-    are hashed as a stream. Each case is `ok: false` with a reason, in
-    milliseconds.
+  - **verify-bundle reads only what a trusted manifest lists, as regular
+    files.** `manifest.json` or `events.jsonl` linked to `/dev/zero` aborted
+    the verifier (out of memory), a FIFO in their place blocked it forever, a
+    link to any file outside the bundle was read, sparse multi-GB files were
+    read in full, and `--key /dev/zero` aborted too. Now: the manifest (at
+    most 64 MiB) and its signature are checked first, and when the signature
+    does not verify nothing it lists is read (every later step reports `not
+    checked`); `events.jsonl` is stream-hashed against the signed digest
+    before it is loaded; blobs are listed once each, at most 64 MiB, and
+    stream-hashed once; all reads share a 1 GiB budget (`--max-bytes`);
+    bundle files must be regular files with one link (no symlinks, a linked
+    `blobs/` directory included; hard links need `--allow-hardlinks`); `--key`
+    must be a regular file of at most 64 KB. Without `--key` the CLI warns
+    that the signer is not verified (tamper-evidence, not authenticity) and
+    `--strict` refuses to run. Measured: an edited bundle listing sparse
+    multi-GB blobs, or one blob 50 times, fails in about 10 ms; a sparse
+    500 MB `events.jsonl` in about 0.6 s with flat memory; a re-signed
+    bundle with 16 sparse 64 MiB blobs in about 1.3 s, flat memory.
   - **Identifiers and object keys get the secret guard.** It scanned
     content only, so a token as an `actor_id` (every write tool), a
     `put_document` `idempotency_key`, `slug` or `source_path`, an `apply` op

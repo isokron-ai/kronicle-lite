@@ -572,7 +572,11 @@ bundle that `kronicle-lite verify-bundle DIR` checks offline: canonical
 bytes, event hashes, chain continuity, the signed Merkle root, artifact
 hashes, refs and the redacted / missing lists. A pass proves the record is
 intact, not that the audit is right; an anchor of its root proves existence
-at a time. Procedure: [docs/EVIDENCE-BUNDLE.md](docs/EVIDENCE-BUNDLE.md).
+at a time. **Without `--key STORE.pem` the signer is not verified**: the bundle
+is checked under the key it names, so the check is tamper-evidence, not
+authenticity (anyone can make a bundle that passes; the CLI warns on stderr,
+and `--strict` refuses to run without `--key`). Procedure:
+[docs/EVIDENCE-BUNDLE.md](docs/EVIDENCE-BUNDLE.md).
 
 ### Honest labels (0.6.0)
 
