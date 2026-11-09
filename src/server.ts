@@ -295,7 +295,7 @@ function blockTarget(store: KronicleLite, block_id: string): { doc_id: string; s
 export function createServer(store: KronicleLite, opts: ServerOptions = {}): McpServer {
   const defaultActor = opts.defaultActorId ?? process.env['KRONICLE_LITE_ACTOR'] ?? 'local-agent';
   const server = new McpServer(
-    { name: 'kronicle-lite', title: 'kronicle-lite', version: opts.version ?? VERSION, websiteUrl: 'https://github.com/rafe-walker/kronicle-lite' },
+    { name: 'kronicle-lite', title: 'kronicle-lite', version: opts.version ?? VERSION, websiteUrl: 'https://github.com/isokron-ai/kronicle-lite' },
     {
       instructions: INSTRUCTIONS,
       cacheHints: CACHE_HINTS,

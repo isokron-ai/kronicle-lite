@@ -137,7 +137,7 @@ chain from that point: the result imports and `verify-chain` passes. Ship
 evidence as a signed bundle (`audit export`, checked with `verify-bundle
 --key STORE.pem`; it covers `audit.*` events, not documents yet) or anchor a
 checkpoint off-box. Signed exports:
-[#34](https://github.com/rafe-walker/kronicle-lite/issues/34).
+[#34](https://github.com/isokron-ai/kronicle-lite/issues/34).
 
 **It is not notarization.** The signing key lives next to the database and
 is readable by the same user. Anyone (or any process) who can write the
