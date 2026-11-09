@@ -1572,7 +1572,7 @@
   "server": {
     "name": "kronicle-lite",
     "title": "kronicle-lite",
-    "version": "0.10.1"
+    "version": "0.10.2"
   },
   "sha256": "e637c91cb88459555de409fdd3b52b1055faef81f116d91c0ecb20e627a276fd"
 }

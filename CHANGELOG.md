@@ -6,6 +6,20 @@ uses semantic versioning once past 0.x.
 
 ## [Unreleased]
 
+## [0.10.2] — 2026-11-09
+
+### Changed
+
+- **The auditor key fingerprint comes from the statement of work.** Packs
+  written by `audit package` (`COMPLETION.txt`, `VERIFY.md`), the
+  `verify-audit` usage and error text, the README and
+  `docs/EVIDENCE-BUNDLE.md` now say to take `--key-fingerprint` from the
+  statement of work, never from the pack. They no longer offer the report as a
+  source: the report is one of the files in the pack, so a fingerprint printed
+  in it vouches for nothing. `VERIFY.md` now says to compare the output with
+  the completion letter sent separately from the pack. Verification itself is
+  unchanged, and packs from 0.10.0 and 0.10.1 verify as before.
+
 ## [0.10.1] — 2026-11-09
 
 ### Fixed

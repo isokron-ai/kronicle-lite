@@ -246,7 +246,7 @@ Usage:
   kronicle-lite verify-audit PACK --key-fingerprint SHA256 | --key PEM-FILE [--anchor-keys FILE] [--genesis SHA256@VALID_FROM]
                  [--tsa-roots DIR] [--no-tsa] [--tsa-at-gentime] [--require CLAIM,…] [--skip-claim CLAIM,…] [--max-bytes N] [--allow-hardlinks] [--json]
                                                                  verify an IsoKron Evidence Pack offline. The auditor key is
-                                                                 pinned by its SHA-256 from the report or SOW (--key-fingerprint;
+                                                                 pinned by its SHA-256 from the statement of work (--key-fingerprint;
                                                                  --key, --anchor-keys, --tsa-roots must not resolve into the
                                                                  pack). SHA256SUMS is
                                                                  verified first; integrity and chain are always checked, then
