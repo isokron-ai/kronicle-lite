@@ -89,8 +89,11 @@ uses semantic versioning once past 0.x.
   (`valid_to` + 5 min; revoked: before `compromised_since` − 5 min), so
   `receipts` pulls in `independent_timestamps` for it, and `--no-tsa` fails it.
 - **Trust inputs outside the pack:** `--key`, `--anchor-keys` and `--tsa-roots`
-  paths that resolve into the pack (symlinks followed, `..`-prefixed names
-  handled, hard links to pack files) are refused, exit 2. `COMPLETION.txt` and
+  paths that resolve into the pack are refused, exit 2. "Inside" is decided by
+  filesystem identity (each directory's dev/ino up to the root, and every
+  file's dev/ino in the pack), never by comparing path strings, so case and
+  Unicode-normalization variants on APFS/NTFS, `..`-prefixed names, symlinks
+  and hard links are all caught. `COMPLETION.txt` and
   `VERIFY.md` carry placeholders, never the auditor fingerprint or a genesis
   pin.
 - **Rollback cache:** one slot per canonical genesis pin (`…00Z` and

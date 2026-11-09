@@ -53,7 +53,7 @@
 
 import { createPublicKey, X509Certificate } from 'node:crypto';
 import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { isAbsolute, join, relative, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 
 import { z } from 'zod';
 
@@ -433,19 +433,37 @@ export function genesisFromCli(flag: string | undefined, env: NodeJS.ProcessEnv 
  * anything under it, or is a hard link to a file in the pack.
  */
 export function refuseInsidePack(packDir: string, p: string, flag: string): void {
+  // Decided by filesystem identity (dev, ino), not by comparing path strings: on a case- or
+  // normalization-insensitive filesystem (APFS, NTFS) `…/PACKAGE/x` and `…/package/x` are one file.
   let pack: string;
   let real: string;
   try {
-    pack = realpathSync(packDir);
-    real = realpathSync(p);
+    pack = realpathSync.native(packDir);
+    real = realpathSync.native(p);
   } catch (err) {
     throw new VerifyAuditUsageError(`${flag} ${p}: ${(err as Error).message}`);
   }
+  const id = (x: string) => {
+    const st = statSync(x, { bigint: true });
+    return `${st.dev}:${st.ino}`;
+  };
+  const packId = id(pack);
+  const inside = () => new VerifyAuditUsageError(`${flag} ${p} is inside the pack; trust inputs must come from outside it (the auditor key fingerprint from the report or SOW)`);
+  // the input itself, then every directory above it, up to the root
+  for (let d = real; ; ) {
+    if (id(d) === packId) throw inside();
+    const up = dirname(d);
+    if (up === d) break;
+    d = up;
+  }
+  // belt and braces: the path strings too
   const rel = relative(pack, real);
-  const outside = rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel);
-  if (!outside) throw new VerifyAuditUsageError(`${flag} ${p} is inside the pack; trust inputs must come from outside it (the auditor key fingerprint from the report or SOW)`);
-  const st = statSync(real);
-  if (st.isFile() && st.nlink > 1 && packInodes(pack).has(`${st.dev}:${st.ino}`)) throw new VerifyAuditUsageError(`${flag} ${p} is a hard link to a file inside the pack; trust inputs must come from outside it`);
+  if (!(rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel))) throw inside();
+  // the same file as one inside the pack (a hard link, or any other route to it)
+  const st = statSync(real, { bigint: true });
+  if (st.isFile() && packInodes(pack).has(`${st.dev}:${st.ino}`)) {
+    throw new VerifyAuditUsageError(`${flag} ${p} is ${st.nlink > 1n ? 'a hard link to ' : ''}a file inside the pack; trust inputs must come from outside it`);
+  }
 }
 function packInodes(pack: string): Set<string> {
   const out = new Set<string>();
@@ -455,7 +473,7 @@ function packInodes(pack: string): Set<string> {
       const f = join(d, e.name);
       if (e.isDirectory()) walk(f, depth + 1);
       else if (e.isFile()) {
-        const st = lstatSync(f);
+        const st = lstatSync(f, { bigint: true });
         out.add(`${st.dev}:${st.ino}`);
       }
     }

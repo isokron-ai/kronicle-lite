@@ -243,8 +243,10 @@ when the runs carry `run_seq`. It prints why a claim is not declared.
 1. The auditor key is pinned out of band: `--key-fingerprint` (SHA-256 of its
    SPKI, from the report, the SOW or isokron.ai/verify) checked against
    `auditor-key.pem`, or `--key FILE` from outside the pack. A `--key`,
-   `--anchor-keys` or `--tsa-roots` path that resolves into the pack (symlinks
-   followed, a hard link to a pack file included) is refused, exit 2. An unpinned key is a FAIL: no
+   `--anchor-keys` or `--tsa-roots` path (or file in it) that is the pack
+   directory, under it, or the same file as one in it is refused, exit 2. This
+   is decided by filesystem identity (dev, ino), not by the path as typed, so
+   case and Unicode-normalization variants, symlinks and hard links are caught. An unpinned key is a FAIL: no
    unpinned pack exits 0.
 2. `SHA256SUMS` and its signature are checked against that key **before**
    `claims.json` is read. If they do not verify, or `claims.json` is missing or

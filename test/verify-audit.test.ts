@@ -13,7 +13,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { createHash, generateKeyPairSync, sign as edSign, X509Certificate, type KeyObject } from 'node:crypto';
-import { copyFileSync, cpSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -28,7 +28,7 @@ import { inspectTimestamp, OID, timestampRequest, checkTimestampReply, verifyTim
 import { BUNDLE_FORMAT_V1, BUNDLE_FORMAT_V2 } from '../src/audit/schemas.js';
 import { readTime, TAG } from '../src/audit/der.js';
 import { SHIPPED_TSA_ROOTS } from '../src/audit/tsa-roots.js';
-import { listPackFiles, renderVerifyAudit, SEEN_KEYS_FILE, sha256sums, SUMS_FILES, verifyAudit, VerifyAuditJsonSchema, VerifyAuditUsageError, type VerifyAuditOptions } from '../src/audit/verify-audit.js';
+import { listPackFiles, refuseInsidePack, renderVerifyAudit, SEEN_KEYS_FILE, sha256sums, SUMS_FILES, verifyAudit, VerifyAuditJsonSchema, VerifyAuditUsageError, type VerifyAuditOptions } from '../src/audit/verify-audit.js';
 import { verifyBundle } from '../src/audit/verify-bundle.js';
 import { canonicalize } from '../src/crypto/canonical.js';
 import { chainIdFromPublicKeyPem } from '../src/crypto/keys.js';
@@ -1356,6 +1356,76 @@ describe('review round 2 (N1–N9): every R-case fails closed', () => {
       expect(sl.code).toBe(2);
       expect(sl.err).toMatch(/--tsa-roots .*z-from-pack\.pem is inside the pack/);
     });
+    describe('T6: inside the pack is decided by filesystem identity (dev, ino), not by the path as typed', () => {
+      // A pack under a directory whose name has a letter that changes with case and with Unicode normalization.
+      const NFC = 'pack-\u00e9'; // é, one code point
+      const NFD = 'pack-e\u0301'; // e + combining acute
+      const mk = () => {
+        const root = tempDir('kl-va-t6-');
+        const d = join(root, NFC);
+        cpSync(f.pkg, d, { recursive: true });
+        return { root, d };
+      };
+      const same = (a: string, b: string) => {
+        if (!existsSync(a) || !existsSync(b)) return false;
+        const x = statSync(a, { bigint: true });
+        const y = statSync(b, { bigint: true });
+        return x.dev === y.dev && x.ino === y.ino;
+      };
+      // Probed at collection time on an empty directory of the same name (the fixture is built later).
+      const probe = { root: tempDir('kl-va-t6-probe-'), d: '' };
+      probe.d = join(probe.root, NFC);
+      mkdirSync(probe.d);
+      const caseInsensitive = same(probe.d, join(probe.root, NFC.toUpperCase()));
+      const normInsensitive = same(probe.d, join(probe.root, NFD));
+      const refused = (pack: string, input: string) => () => refuseInsidePack(pack, input, '--key');
+
+      it.skipIf(!caseInsensitive)('a case variant of the pack path, and the pack given in the other case: refused (skipped on a case-sensitive filesystem)', () => {
+        const { root, d } = mk();
+        const upper = join(root, NFC.toUpperCase());
+        expect(refused(d, join(upper, 'auditor-key.pem'))).toThrow(/--key .* is inside the pack/);
+        expect(refused(upper, join(d, 'auditor-key.pem'))).toThrow(/--key .* is inside the pack/);
+        expect(refused(d, join(upper, 'tsa-roots'))).toThrow(/is inside the pack/);
+        // the CLI too: exit 2, never "pinned by --key"
+        const r = cli(['verify-audit', d, '--key', join(upper, 'auditor-key.pem'), '--genesis', f.genesis, '--tsa-roots', f.rootsDir]);
+        expect(r.code).toBe(2);
+        expect(r.out).not.toMatch(/pinned by --key/);
+        for (const extra of [['--anchor-keys', join(upper, 'anchor-keys.json')], ['--tsa-roots', join(upper, 'tsa-roots')]]) {
+          expect(cli(['verify-audit', d, '--key-fingerprint', f.fp, '--genesis', f.genesis, ...extra]).code, extra[0]).toBe(2);
+        }
+      });
+
+      it.skipIf(!normInsensitive)('NFC vs NFD spellings of the pack path: refused both ways (skipped on a normalization-sensitive filesystem)', () => {
+        const { root, d } = mk();
+        const nfd = join(root, NFD);
+        expect(refused(d, join(nfd, 'auditor-key.pem'))).toThrow(/is inside the pack/);
+        expect(refused(nfd, join(d, 'auditor-key.pem'))).toThrow(/is inside the pack/);
+        expect(cli(['verify-audit', d, '--key', join(nfd, 'auditor-key.pem'), '--genesis', f.genesis, '--tsa-roots', f.rootsDir]).code).toBe(2);
+      });
+
+      it('on a filesystem that tells the spellings apart they are other paths: they do not resolve, and nothing inside the pack is accepted', () => {
+        const { root, d } = mk();
+        for (const v of [join(root, NFC.toUpperCase(), 'auditor-key.pem'), join(root, NFD, 'auditor-key.pem')]) {
+          if (existsSync(v)) expect(refused(d, v)).toThrow(/is inside the pack/);
+          else expect(refused(d, v)).toThrow(/--key .*(ENOENT|no such file)/i);
+        }
+      });
+
+      it('the symlink and hard-link cases, decided by identity: a symlinked directory into the pack, a symlinked file, a hard link', () => {
+        const { d } = mk();
+        const out = tempDir('kl-va-t6-out-');
+        symlinkSync(d, join(out, 'pack-link'), 'junction'); // a junction on Windows (no privilege needed); a symlink elsewhere
+        expect(refused(d, join(out, 'pack-link', 'auditor-key.pem'))).toThrow(/is inside the pack/);
+        expect(refused(d, join(out, 'pack-link'))).toThrow(/is inside the pack/);
+        symlinkSync(join(d, 'auditor-key.pem'), join(out, 'key.pem'));
+        expect(refused(d, join(out, 'key.pem'))).toThrow(/is inside the pack/);
+        linkSync(join(d, 'auditor-key.pem'), join(out, 'hard.pem'));
+        expect(refused(d, join(out, 'hard.pem'))).toThrow(/is a hard link to a file inside the pack/);
+        // a file genuinely outside is accepted
+        expect(refused(d, f.keyFile)).not.toThrow();
+      });
+    });
+
     it('R5c: COMPLETION.txt and VERIFY.md name where the fingerprint comes from and never carry it', () => {
       const completion = readFileSync(join(f.pkg, 'COMPLETION.txt'), 'utf8');
       expect(completion).not.toContain(f.fp);
