@@ -5,7 +5,7 @@
  * regular file.
  */
 import { spawnSync } from 'node:child_process';
-import { readdirSync, readFileSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
+import { linkSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, truncateSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
@@ -190,5 +190,77 @@ describe.skipIf(!POSIX)('verify-bundle: no blob is read before the manifest is t
     const r = verifyBundle(dir, { public_key_pem: pem });
     expect(r.checks.find((c) => c.check === 'signature')!.ok).toBe(false);
     expect(r.checks.find((c) => c.check === 'artifacts')!.problem).toMatch(/not checked/);
+  });
+});
+
+describe.skipIf(!POSIX)('verify-bundle: duplicates, read budget, hard links, unknown signer', () => {
+  it('a manifest listing the same blob 50 times (re-signed) is refused at once, nothing hashed', () => {
+    const dir = bundle();
+    const m = JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8')) as BundleManifest;
+    const sha = m.blobs[0]!.sha256;
+    (m.blobs[0] as { size: number }).size = 64 * 1024 * 1024;
+    for (let i = 0; i < 50; i++) (m.blobs as unknown[]).push({ ...m.blobs[0]! });
+    const id = ephemeralIdentity();
+    const signed = signManifest({ ...m, root: { ...m.root, key_id: id.signer.key_id, public_key_pem: id.signer.public_key_pem } }, id.signer);
+    writeFileSync(join(dir, 'manifest.json'), canonicalize(signed as unknown as JsonValue) + '\n');
+    truncateSync(join(dir, 'blobs', sha), 64 * 1024 * 1024);
+    const t0 = Date.now();
+    const r = verifyBundle(dir);
+    expect(Date.now() - t0).toBeLessThan(500);
+    expect(r.ok).toBe(false);
+    expect(r.checks.find((c) => c.check === 'canonical')!.problem).toMatch(/more than once/);
+  });
+
+  it('a read budget (max_bytes) stops before a blob that would exceed it, with a clear reason; raising it passes', () => {
+    const dir = bundle();
+    const small = readFileSync(join(dir, 'manifest.json')).byteLength + readFileSync(join(dir, 'events.jsonl')).byteLength;
+    const r = verifyBundle(dir, { max_bytes: small + 5 });
+    expect(r.ok).toBe(false);
+    expect(r.checks.find((c) => c.check === 'artifacts')!.problem).toMatch(/budget of \d+ bytes.*--max-bytes/);
+    expect(verifyBundle(dir, { max_bytes: small + 1000 }).ok).toBe(true);
+  });
+
+  it('events.jsonl replaced by a sparse 500 MB file: stream-hashed against the signed digest, never loaded', () => {
+    const dir = bundle();
+    truncateSync(join(dir, 'events.jsonl'), 500 * 1024 * 1024);
+    let r!: ReturnType<typeof verifyBundle>;
+    const cost = rssAfter(() => (r = verifyBundle(dir)));
+    expect(r.checks.find((c) => c.check === 'canonical')!.problem).toMatch(/does not hash/);
+    expect(r.checks.find((c) => c.check === 'events')!.problem).toMatch(/not checked/);
+    expect(cost.mb).toBeLessThan(64);
+  });
+
+  it('a blob hard-linked from outside the bundle is refused unless allow_hardlinks', () => {
+    const dir = bundle();
+    const [blob] = readdirSync(join(dir, 'blobs'));
+    const outside = join(tempDir('kl-vbf-hl-'), blob!);
+    renameSync(join(dir, 'blobs', blob!), outside);
+    linkSync(outside, join(dir, 'blobs', blob!));
+    const r = verifyBundle(dir);
+    expect(r.ok).toBe(false);
+    expect(r.checks.find((c) => c.check === 'artifacts')!.problem).toMatch(/hard links/);
+    expect(verifyBundle(dir, { allow_hardlinks: true }).ok).toBe(true);
+  });
+
+  it('manifest.json hard-linked is refused too', () => {
+    const dir = bundle();
+    linkSync(join(dir, 'manifest.json'), join(tempDir('kl-vbf-hl2-'), 'm.json'));
+    expect(problems(dir)).toMatch(/hard links/);
+  });
+
+  it('CLI: without --key the signer is reported unverified on stderr; --strict refuses; --key --strict passes', () => {
+    const dir = bundle();
+    const home = tempDir('kl-vbf-h-');
+    const env = cleanEnv({ HOME: home, USERPROFILE: home });
+    const plain = spawnSync(process.execPath, [CLI, 'verify-bundle', dir], { env, encoding: 'utf8' });
+    expect(plain.status).toBe(0);
+    expect(plain.stderr).toMatch(/signer NOT verified/);
+    const strict = spawnSync(process.execPath, [CLI, 'verify-bundle', dir, '--strict'], { env, encoding: 'utf8' });
+    expect(strict.status).toBe(1);
+    const pem = join(tempDir('kl-vbf-k-'), 'store.pem');
+    writeFileSync(pem, (JSON.parse(readFileSync(join(dir, 'manifest.json'), 'utf8')) as BundleManifest).root.public_key_pem);
+    const pinned = spawnSync(process.execPath, [CLI, 'verify-bundle', dir, '--key', pem, '--strict'], { env, encoding: 'utf8' });
+    expect(pinned.status, pinned.stdout + pinned.stderr).toBe(0);
+    expect(pinned.stderr).not.toMatch(/NOT verified/);
   });
 });

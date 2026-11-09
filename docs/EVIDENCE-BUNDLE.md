@@ -18,7 +18,9 @@ kronicle-lite verify-bundle bundle/ [--key store.pem]     # anywhere; exit 0 = v
   (which seqs are full audit events and which are stubs, with each stub's hash),
   the blob lists and every digest, not just the root. Pin the key with `--key`.
   Without it, the check only proves the bundle is self-consistent under
-  *some* key, and anyone can produce such a bundle.
+  *some* key, and anyone can produce such a bundle: it is tamper-evidence,
+  not authenticity. The CLI says so on stderr (`signer NOT verified`), and
+  `--strict` exits 1 without `--key`.
 - **The files are exactly what the manifest describes.**
 - **The events form one chain segment.** The audit's events hash correctly and,
   together with the stubs, form one contiguous segment of a single hash chain.
@@ -61,26 +63,33 @@ audit was right, complete, or honest.
 
 ## Verification procedure
 
-`verify-bundle` reports the first failure in each of the eight steps below.
+`verify-bundle` reports the first failure in each of the eight steps below
+(step 2 runs before `events.jsonl` is read; see the order above).
 
 Hostile input fails cleanly:
 - Any manifest shape, any nesting depth (more than 64 levels is refused before
   parsing) and any file name yields `ok: false` with a reason, never a crash.
-- Blob names must be 64 lowercase hex characters and regular files, so nothing
-  outside `DIR/blobs/` is ever read.
-- `manifest.json`, `events.jsonl` and every blob must be regular files, not
-  symlinks, devices, FIFOs or directories, and `blobs/` must be a real
-  directory, not a link: no path component below `DIR` may be a link, so
-  nothing outside `DIR` is read and nothing blocks (`DIR` itself is resolved
-  once). `manifest.json` and `events.jsonl` are refused above about 512 MB
-  (the longest string Node can hold). `--key` must be a regular file of at
-  most 64 KB (a link to one is fine).
-- **No blob is read before the manifest is trusted.** When the manifest
-  signature does not verify (or not under `--key`), step 6 is not run and
-  reports `not checked`: the sizes it lists could be an attacker's. A blob
+- **Order: nothing a manifest lists is read before its signature verifies.**
+  `manifest.json` is read and checked first (at most 64 MiB). When its
+  signature does not verify (or not under `--key`), every later step reports
+  `not checked` and fails: the digests, sizes and names it lists could be an
+  attacker's. Then `events.jsonl` is stream-hashed (constant memory) against
+  the signed `events_sha256`; only a file that matches is loaded and parsed
+  (steps 3 to 5), so a large or sparse impostor costs one streamed read.
+- **Files.** `manifest.json`, `events.jsonl` and every blob must be regular
+  files with one link, not symlinks, hard links (which may be files outside
+  `DIR`; `--allow-hardlinks` accepts them), devices, FIFOs or directories, and
+  `blobs/` must be a real directory, not a link: no path component below
+  `DIR` may be a link (`DIR` itself is resolved once). Blob names must be 64
+  lowercase hex characters, each listed once. `--key` must be a regular file
+  of at most 64 KB (a link to one is fine).
+- **Blobs** are hashed as a stream in 1 MiB chunks, each file once. A blob
   listed above 64 MiB (the store's limit) or whose size differs from the
-  manifest is reported without being read; the rest are hashed as a stream
-  in 1 MiB chunks.
+  manifest is reported without being read.
+- **Read budget.** At most 1 GiB is read per bundle (manifest, events and
+  blobs together; `events.jsonl` at most about 512 MB, the longest string
+  Node can hold). A bundle that needs more fails with the budget named;
+  raise it with `--max-bytes N` (API `max_bytes`).
 
 ### 1. `canonical`
 1. `manifest.json` must equal `JCS(manifest) + "\n"`.

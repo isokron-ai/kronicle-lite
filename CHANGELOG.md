@@ -81,20 +81,24 @@ uses semantic versioning once past 0.x.
     at the header's head seq and hash, else nothing is imported. `export`
     stops at the head it wrote in the header, so a writer appending
     mid-export no longer adds events past it.
-  - **verify-bundle reads only small regular files.** `manifest.json` or
-    `events.jsonl` linked to `/dev/zero` aborted the verifier (out of
-    memory), a FIFO in their place blocked it forever, a link to any file
-    outside the bundle was read, a sparse 3 GB file was read in full, and so
-    was a 3 GB blob; `--key /dev/zero` aborted too. Bundle files must now be
-    regular files (no links) under the V8 string limit, a blob whose size
-    differs from the manifest is reported without being read, and `--key`
-    must be a regular file of at most 64 KB. A `blobs/` directory linked
-    outside the bundle is refused too. No blob is read until the manifest
-    signature verifies (an edited 16 KB bundle listing sparse multi-GB blobs
-    made the verifier use 1.6 GB and seconds per blob, even with a broken
-    signature); a blob listed above 64 MiB is refused unread, and the rest
-    are hashed as a stream. Each case is `ok: false` with a reason, in
-    milliseconds.
+  - **verify-bundle reads only what a trusted manifest lists, as regular
+    files.** `manifest.json` or `events.jsonl` linked to `/dev/zero` aborted
+    the verifier (out of memory), a FIFO in their place blocked it forever, a
+    link to any file outside the bundle was read, sparse multi-GB files were
+    read in full, and `--key /dev/zero` aborted too. Now: the manifest (at
+    most 64 MiB) and its signature are checked first, and when the signature
+    does not verify nothing it lists is read (every later step reports `not
+    checked`); `events.jsonl` is stream-hashed against the signed digest
+    before it is loaded; blobs are listed once each, at most 64 MiB, and
+    stream-hashed once; all reads share a 1 GiB budget (`--max-bytes`);
+    bundle files must be regular files with one link (no symlinks, a linked
+    `blobs/` directory included; hard links need `--allow-hardlinks`); `--key`
+    must be a regular file of at most 64 KB. Without `--key` the CLI warns
+    that the signer is not verified (tamper-evidence, not authenticity) and
+    `--strict` refuses to run. Measured: an edited bundle listing sparse
+    multi-GB blobs, or one blob 50 times, fails in about 10 ms; a sparse
+    500 MB `events.jsonl` in about 0.6 s with flat memory; a re-signed
+    bundle with 16 sparse 64 MiB blobs in about 1.3 s, flat memory.
   - **Safe export:** `--out` must be new or empty and free of symlinks, and
     every file is created with `O_EXCL|O_NOFOLLOW`, so no symlink planted in
     `--out` is written through.
