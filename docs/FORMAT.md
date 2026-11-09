@@ -155,7 +155,7 @@ trailing whitespace per line, and splits into blocks:
 
 - an ATX heading line (`#`..`######`) is a `heading` block and pushes/pops the
   heading path; a closing sequence of `#`s is stripped only when a space or
-  tab precedes it (0.8.1: `## Use C#` is "Use C#", `## Title ##` is "Title");
+  tab precedes it (0.9.0: `## Use C#` is "Use C#", `## Title ##` is "Title");
 - a fenced code block (``` or ~~~, fence included) is a `code` block;
 - any other run of non-blank lines is a `paragraph` block.
 
@@ -175,7 +175,7 @@ text, because "Allowed › X" and "Forbidden › X" mean different things.
 
 | event_type | payload fields |
 |---|---|
-| `document.put` | `doc_id, slug, title, revision, markdown, markdown_hash (BLAKE3), block_ids[], carried[{block_id, ordinal, heading_path}]`, optional `source` (0.4.0, §3.4), optional `project` (0.7.0, §3.7), optional `derived_from[]` / `derived_from_inferred[]` / `derived_from_inferred_truncated` (0.8.0, §3.10), optional `derived_from_released[]` (0.8.1, §3.10) |
+| `document.put` | `doc_id, slug, title, revision, markdown, markdown_hash (BLAKE3), block_ids[], carried[{block_id, ordinal, heading_path}]`, optional `source` (0.4.0, §3.4), optional `project` (0.7.0, §3.7), optional `derived_from[]` / `derived_from_inferred[]` / `derived_from_inferred_truncated` (0.8.0, §3.10), optional `derived_from_released[]` (0.9.0, §3.10) |
 | `document.revised` | `doc_id, slug, title, revision, markdown, markdown_hash, cause` |
 | `block.created` | `block_id, doc_id, doc_slug, revision, ordinal, kind, level, heading_path[], content, content_hash`; from `supersede_block`, optional `derived_from[]` / `derived_from_inferred[]` / `derived_from_inferred_truncated` (0.8.0, §3.10) |
 | `block.superseded` | `block_id, successor_block_id, doc_id, doc_slug, revision, reason` |
@@ -193,7 +193,7 @@ On a re-put, live blocks are compared to the freshly parsed set:
 
 1. same `(kind, content_hash, heading_path)` → **carried** (block id kept,
    position updated); a reorder of whole sections carries;
-1a. (0.8.1) inside one section (same `heading_path`) carried blocks must keep
+1a. (0.9.0) inside one section (same `heading_path`) carried blocks must keep
    their relative order: the fewest blocks that changed order (those outside
    a longest increasing run of old positions) are **superseded** by an
    identical-text block with reason `reordered in revision N` (orient: "MOVED
@@ -207,7 +207,7 @@ On a re-put, live blocks are compared to the freshly parsed set:
    old is **superseded** by new;
 3. leftover old → **tombstoned** (`removed in revision N`); leftover new →
    **created**, except:
-3b. (0.8.1) a leftover non-heading old block that closely matches a leftover
+3b. (0.9.0) a leftover non-heading old block that closely matches a leftover
    new block of the same kind under another heading path (word-multiset
    Dice ≥ 0.6, best match first) is **superseded** by it: moved and edited,
    reported with `new_heading_path`, the new text and a diff, not "REMOVED".
@@ -349,10 +349,10 @@ counted in `scope.hidden_retractions`). Documents with no project (every
 put made before this field existed) stay visible from every project.
 `all_projects: true` / `--all-projects` turns scoping off.
 
-### 3.8 Format-only edits (0.7.0; raw-text rule since 0.8.1)
+### 3.8 Format-only edits (0.7.0; raw-text rule since 0.9.0)
 
 Orient classifies each supersession whose old and new block text it still
-has (`src/orient/cosmetic.ts`). Since 0.8.1 an edit is **format-only** only
+has (`src/orient/cosmetic.ts`). Since 0.9.0 an edit is **format-only** only
 when the two RAW texts are byte-identical after exactly these steps:
 
 1. line endings: CRLF / CR → LF;
@@ -386,7 +386,7 @@ is text, because agents copy commands out of unfenced prose, where a double
 space or a tab can matter (the founding rule: a false format-only is far
 worse than a false alarm).
 
-Why raw text (0.8.1, agent-memory-bench hardening round 2, R2-01..03): an
+Why raw text (0.9.0, agent-memory-bench hardening round 2, R2-01..03): an
 agent copies the raw Markdown into commands. 0.7.0–0.8.0 compared a narrow
 Markdown tree and so filed as format-only `*` ↔ `_` in unfenced globs and
 identifiers (`/tmp/*/cache/*` → `/tmp/_/cache/_`, `__init__.py` →
@@ -397,7 +397,7 @@ style edits are retractions now.
 
 Format-only supersessions are listed under `format_only_edits` (alias
 `cosmetic_edits`; entries `seq, doc_slug, block_id, successor_block_id,
-rules[] (`whitespace`; `markup` is no longer produced since 0.8.1), diff`) instead of `retractions`; with
+rules[] (`whitespace`; `markup` is no longer produced since 0.9.0), diff`) instead of `retractions`; with
 `include_format_only` (alias `include_cosmetic`) they are also retractions
 with `format_only: true` and severity `informational`. This label is
 presentation only: it is the single thing orient may move out of
@@ -433,7 +433,7 @@ A note written from other blocks records which exact versions it rests on:
   no longer live is accepted (the note is stale from the start).
 - `derived_from_inferred` — the blocks the writing actor read (recall hits,
   document reads; its own writes excluded) outside the document being
-  written, within a bound that is the union of (0.8.1):
+  written, within a bound that is the union of (0.9.0):
   - its **session**: every read made at or after the chain position of the
     cursor it passes, else of its latest briefing. Reads are placed by the
     chain head they were made at (`reads.head_seq`, `receipts.chain_seq`),
@@ -450,16 +450,16 @@ A note written from other blocks records which exact versions it rests on:
   write's reply says the same in `lineage`) when the bound left reads out:
   the 200 cap cut a read of the window, or the actor read blocks that
   neither bound covers while there was no session or nothing was read in
-  it. The note's sources are then undetermined (0.8.1: recall never labels
+  it. The note's sources are then undetermined (0.9.0: recall never labels
   it `can_act`, docs/HONESTY.md `lineage_unknown`) until an explicit
   `derived_from` states them.
-- `derived_from_released` (0.8.1, `document.put` only) — earlier inferred
+- `derived_from_released` (0.9.0, `document.put` only) — earlier inferred
   edges of this note to sources that were REMOVED (the source's lineage
   ends in a tombstone: deleted, or moved to another document), which this
   put re-derives past: the author read the source's document after the
   removal, or rewrote the note (new markdown) from current material it read
   after the removal. A removed source has no current version to re-derive
-  from, so before 0.8.1 such a note stayed stale until an explicit
+  from, so before 0.9.0 such a note stayed stale until an explicit
   `derived_from` replaced its lineage.
 
 Both fields are present only when non-empty, except that an explicit
@@ -471,9 +471,9 @@ chain_seq)`, compared by the projection check like every other table):
 - `document.put` with `derived_from` present (even `[]`): the document's
   rows are replaced by it plus `derived_from_inferred`;
 - any other `document.put`, and `block.created` with lineage fields: rows are
-  added (`INSERT OR IGNORE`; the first recording seq is kept); 0.8.1: the
+  added (`INSERT OR IGNORE`; the first recording seq is kept); 0.9.0: the
   inferred rows named by `derived_from_released` are deleted first.
-- 0.8.1: `doc_lineage_gaps(doc_id, chain_seq)` holds the latest
+- 0.9.0: `doc_lineage_gaps(doc_id, chain_seq)` holds the latest
   `derived_from_inferred_truncated` write of a document without an explicit
   statement (a `derived_from`, even `[]`, clears it). Backfilled from the
   chain once on upgrade (meta `migration.lineage_gaps`). Both tables are
@@ -488,7 +488,7 @@ also has an edge to a block of that current version. Otherwise it is
 or `missing`. A note derived from a stale note is stale (`via`, depth ≤ 4).
 A reorder within the source's section (§3.2 1a) is a real change. A result
 cut short by the depth bound or a cycle is never reused for another note in
-the same read (0.8.1).
+the same read (0.9.0).
 Recall labels a stale note's hits `never_act` / `stale_derived`
 (docs/HONESTY.md row 3); orient lists a retraction of kind `derived`
 (docs/PUSH.md).
@@ -604,8 +604,8 @@ holds the public half so a copied database verifies on its own. Setting
 
 ```
 <data-dir>/config.json               {"anchor_url", "license_key"}, mode 0600 (0.4.0; created with anchor_url only)
-<data-dir>/anchor-keys.pinned.json   pinned anchor service keys, mode 0600 (0.8.1; §9)
-<data-dir>/anchor-keys.cache.json    0.4.0–0.8.0: last fetched service key document; no longer written or trusted (0.8.1)
+<data-dir>/anchor-keys.pinned.json   pinned anchor service keys, mode 0600 (0.9.0; §9)
+<data-dir>/anchor-keys.cache.json    0.4.0–0.8.0: last fetched service key document; no longer written or trusted (0.9.0)
 ```
 
 ## 7. Export
@@ -655,7 +655,7 @@ leaf      = sha256( canonicalize(receipt) )          // the receipt's public-log
 Service public keys are published at `/.well-known/anchor-keys.json`
 (`service_key_id = "anchor-ed25519-" + hex(sha256(SPKI DER))[0..16]`). The
 client verifies the countersignature and that `receipt.checkpoint` equals
-what it sent before storing anything, and since 0.8.1 that `receipt_jcs` in
+what it sent before storing anything, and since 0.9.0 that `receipt_jcs` in
 the response is exactly `canonicalize(receipt)`:
 
 | `anchors` column | meaning |
@@ -671,10 +671,10 @@ the response is exactly `canonicalize(receipt)`:
 
 `verify --remote` recomputes §2 over the local rows for every anchored range:
 `match`, `diverged` (local root differs: the chain was rewritten after it was
-anchored), `beyond_head` (the range is gone: truncation), `gap`, or (0.8.1)
+anchored), `beyond_head` (the range is gone: truncation), `gap`, or (0.9.0)
 `unverified` (no trusted receipt, so nothing was compared).
 
-**Receipt trust (0.8.1).** The range and root compared come only from a
+**Receipt trust (0.9.0).** The range and root compared come only from a
 receipt that passes all of: countersignature against a pinned service key;
 that key's `status` is `active` or `retired` and `received_at` lies within
 its `valid_from`/`valid_to`; `receipt.chain_id` derives from the local

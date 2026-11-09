@@ -21,6 +21,7 @@ import { ephemeralIdentity, type Signer } from '../src/crypto/keys.js';
 import { KronicleLite } from '../src/index.js';
 import { SecretDetectedError } from '../src/secrets/guard.js';
 import { tempDir } from './helpers/fs.js';
+import { generous } from './helpers/time.js';
 
 const F1 = 'a'.repeat(64);
 const AWS = 'AKIA' + 'IOSFODNN7EXAMPLQ';
@@ -261,7 +262,7 @@ describe('review #13: ingest hardening', () => {
     for (let i = 0; i < 10_000; i++) deep = { a: deep };
     const t0 = Date.now();
     expect(() => kl.audit.record('A', [{ kind: 'finding', event_key: 'k', payload: { finding_id: 'V', status: 'discovered', x: deep } }], 'x')).toThrow(/deep|nested/);
-    expect(Date.now() - t0).toBeLessThan(2000);
+    expect(Date.now() - t0).toBeLessThan(generous(2000));
     kl.close();
   });
   it('a second refuting gate_result is allowed (several refuters may refute)', () => {

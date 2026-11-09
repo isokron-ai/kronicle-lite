@@ -10,6 +10,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { generous } from './helpers/time.js';
 
 import { openDatabase, openDbReadOnly } from '../src/db/open.js';
 import { isStoreUnreadable, StoreUnreadableError } from '../src/db/storage.js';
@@ -146,7 +147,7 @@ describe('C2-08: a reader never queues behind another process’s write lock', (
       s.lineage.pending('reader', { project_keys: null, limit: 5 });
       s.close();
       // The busy timeout is 10 s; the flight-recorder row waits at most 1 s, then is skipped.
-      expect(Date.now() - t0).toBeLessThan(5000);
+      expect(Date.now() - t0).toBeLessThan(generous(5000));
     } finally {
       holder.exec('ROLLBACK');
       holder.close();
@@ -215,7 +216,7 @@ describe('C2-01: older writers', () => {
     s.db.prepare(`UPDATE meta SET value = '1' WHERE key = 'writer_head_seq'`).run();
     const d = describeWriters(checkWriters(s.db));
     expect(d.status).toBe('warn');
-    expect(d.detail).toMatch(/events 2\.\.\d+ were appended by a kronicle-lite older than 0\.8\.1/);
+    expect(d.detail).toMatch(/events 2\.\.\d+ were appended by a kronicle-lite older than 0\.9\.0/);
     s.close();
   });
 

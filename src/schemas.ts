@@ -686,7 +686,7 @@ export const PutDocumentResultSchema = z.object({
   head: ChainHeadSchema,
   blocks: z
     .array(BlockSummarySchema)
-    .describe('0.8.1: the first block_counts.listed entries (at most 100), in ordinal order; blocks_next pages the rest.'),
+    .describe('0.9.0: the first block_counts.listed entries (at most 100), in ordinal order; blocks_next pages the rest.'),
   block_counts: z
     .object({
       total: z.number().int().nonnegative().describe('Entries in the full list (added + kept + tombstoned).'),
@@ -695,9 +695,9 @@ export const PutDocumentResultSchema = z.object({
       kept: z.number().int().nonnegative().describe('Unchanged blocks (same id).'),
       retired: z.number().int().nonnegative().describe('Old blocks replaced or tombstoned by this put.'),
     })
-    .describe('0.8.1: counts over every block of the put.'),
-  blocks_truncated: z.boolean().describe('0.8.1: true when `blocks` is not the whole list.'),
-  blocks_next: z.string().nullable().describe('0.8.1: resource URI (kronicle://docs/{slug}/blocks/{revision}/{offset}) of the rest of the list; null when blocks is complete.'),
+    .describe('0.9.0: counts over every block of the put.'),
+  blocks_truncated: z.boolean().describe('0.9.0: true when `blocks` is not the whole list.'),
+  blocks_next: z.string().nullable().describe('0.9.0: resource URI (kronicle://docs/{slug}/blocks/{revision}/{offset}) of the rest of the list; null when blocks is complete.'),
   events: z.number().int().nonnegative().describe('Events appended by this call (0 on idempotent replay).'),
   source: DocumentSourceSchema.optional(),
   warnings: z.array(z.string()).optional().describe('Non-fatal notes, e.g. bind_git outside a git repository.'),

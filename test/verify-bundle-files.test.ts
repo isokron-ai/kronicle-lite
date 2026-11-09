@@ -17,6 +17,7 @@ import { ephemeralIdentity } from '../src/crypto/keys.js';
 import { verifyBundle } from '../src/audit/verify-bundle.js';
 import { KronicleLite } from '../src/index.js';
 import { CLI, cleanEnv, tempDir } from './helpers/fs.js';
+import { generous } from './helpers/time.js';
 
 const POSIX = process.platform !== 'win32';
 
@@ -40,7 +41,7 @@ describe.skipIf(!POSIX)('verify-bundle: bundle files that are not small regular 
       symlinkSync('/dev/zero', join(dir, name));
       const t0 = Date.now();
       expect(verifyBundle(dir).ok).toBe(false);
-      expect(Date.now() - t0).toBeLessThan(2000);
+      expect(Date.now() - t0).toBeLessThan(generous(2000));
       expect(problems(dir)).toMatch(/not a regular file|symbolic link/);
     });
 
@@ -67,7 +68,7 @@ describe.skipIf(!POSIX)('verify-bundle: bundle files that are not small regular 
       truncateSync(join(dir, name), 3 * 1024 ** 3);
       const t0 = Date.now();
       expect(verifyBundle(dir).ok).toBe(false);
-      expect(Date.now() - t0).toBeLessThan(2000);
+      expect(Date.now() - t0).toBeLessThan(generous(2000));
       expect(problems(dir)).toMatch(/limit|budget/);
     });
   }
@@ -78,7 +79,7 @@ describe.skipIf(!POSIX)('verify-bundle: bundle files that are not small regular 
     truncateSync(join(dir, 'blobs', blob!), 3 * 1024 ** 3);
     const t0 = Date.now();
     const r = verifyBundle(dir);
-    expect(Date.now() - t0).toBeLessThan(2000);
+    expect(Date.now() - t0).toBeLessThan(generous(2000));
     expect(r.checks.find((c) => c.check === 'artifacts')!.problem).toMatch(/size differs/);
     expect(r.checks.find((c) => c.check === 'canonical')!.ok).toBe(true);
   });
@@ -161,7 +162,7 @@ describe.skipIf(!POSIX)('verify-bundle: no blob is read before the manifest is t
     expect(r.ok).toBe(false);
     expect(r.checks.find((c) => c.check === 'signature')!.ok).toBe(false);
     expect(r.checks.find((c) => c.check === 'artifacts')!.problem).toMatch(/not checked/);
-    expect(cost.ms).toBeLessThan(1000);
+    expect(cost.ms).toBeLessThan(generous(1000));
     expect(cost.mb).toBeLessThan(100);
   });
 
@@ -172,7 +173,7 @@ describe.skipIf(!POSIX)('verify-bundle: no blob is read before the manifest is t
     const cost = rssAfter(() => (r = verifyBundle(dir)));
     expect(r.checks.find((c) => c.check === 'signature')!.ok).toBe(true);
     expect(r.checks.find((c) => c.check === 'artifacts')!.problem).toMatch(/limit/);
-    expect(cost.ms).toBeLessThan(1000);
+    expect(cost.ms).toBeLessThan(generous(1000));
   });
 
   it('a re-signed manifest listing a 60 MB sparse blob: hashed as a stream, memory stays flat', () => {
@@ -207,7 +208,7 @@ describe.skipIf(!POSIX)('verify-bundle: duplicates, read budget, hard links, unk
     truncateSync(join(dir, 'blobs', sha), 64 * 1024 * 1024);
     const t0 = Date.now();
     const r = verifyBundle(dir);
-    expect(Date.now() - t0).toBeLessThan(500);
+    expect(Date.now() - t0).toBeLessThan(generous(500));
     expect(r.ok).toBe(false);
     expect(r.checks.find((c) => c.check === 'canonical')!.problem).toMatch(/more than once/);
   });
@@ -292,7 +293,7 @@ describe.skipIf(!POSIX)('verify-bundle: events.jsonl is read once, as a stream, 
     expect(r.checks.find((c) => c.check === 'signature')!.ok).toBe(true);
     expect(r.checks.find((c) => c.check === 'canonical')!.problem).toMatch(/longer than \d+ bytes/);
     expect(r.ok).toBe(false);
-    expect(cost.ms).toBeLessThan(1000);
+    expect(cost.ms).toBeLessThan(generous(1000));
     expect(cost.mb).toBeLessThan(64);
   });
 

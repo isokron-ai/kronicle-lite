@@ -23,7 +23,7 @@ import { AUDIT_KINDS, AuditEventInputSchema, PAYLOAD_SCHEMAS } from './audit/sch
 import { ChainConflictError } from './chain/index.js';
 import { bindGit } from './git/binding.js';
 import type { BlockSummary, DocumentSource } from './docs/documents.js';
-import { DocumentError } from './docs/documents.js';
+import { DocumentError, isInstructionSlug, SLUG_PATTERN } from './docs/documents.js';
 import { revisionBlocks } from './docs/put-blocks.js';
 import { checkRevisionRow } from './docs/integrity.js';
 import { FOCUSES, type ProjectScope } from './orient/orient.js';
@@ -283,6 +283,13 @@ function derivedFrom(args: object): { block_id: string; content_hash: string }[]
 /** Factory form for the SDK serving entries: one fresh McpServer per connection (stdio) or request (HTTP). */
 export function createServerFactory(store: KronicleLite, opts: ServerOptions = {}): McpServerFactory {
   return () => createServer(store, opts);
+}
+
+/** The document a block belongs to, for the stale-write advisory (null: unknown block; the write reports it). */
+function blockTarget(store: KronicleLite, block_id: string): { doc_id: string; slug: string } | null {
+  const b = store.docs.getBlock(block_id);
+  const d = b ? store.docs.getDocumentById(b.doc_id) : null;
+  return d ? { doc_id: d.doc_id, slug: d.slug } : null;
 }
 
 export function createServer(store: KronicleLite, opts: ServerOptions = {}): McpServer {
@@ -550,7 +557,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
         'token, private key, connection string): the chain cannot forget it.',
       inputSchema: lean(
         z.object({
-          slug: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,127}$/),
+          slug: z.string().max(128).regex(new RegExp(SLUG_PATTERN)).describe('name or namespace/Path (finding/G-2); max 128'),
           title: z.string().min(1).max(300),
           markdown: z.string().max(2_000_000),
           idempotency_key: z.string().min(1).max(200).optional(),
@@ -569,10 +576,13 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     (args) => {
       try {
         const actor_id = actorOf(args.actor_id);
-        const stale_write_advisory = store.orient.staleWriteAdvisory(actor_id, args.cursor);
+        const existing = store.docs.getDocument(args.slug);
+        const stale_write_advisory = store.orient.staleWriteAdvisory(actor_id, args.cursor, new Date(), existing ? { doc_id: existing.doc_id, slug: existing.slug } : null);
         if (args.bind_git && !args.source_path) {
           return errorResult(new DocumentError('invalid_source', 'bind_git requires source_path'));
         }
+        // The instructions/ and memory/ namespaces belong to instruction import (as in apply).
+        if (isInstructionSlug(args.slug)) return errorResult(new DocumentError('invalid_slug', `${args.slug} is in a namespace reserved for instruction files (instructions/, memory/); use kronicle-lite watch or put --from-instructions`));
         // 0.8.1 (P2-05): bounded in wire bytes, not only characters (resources/read must fit a 10 MiB client buffer).
         const wireBytes = Buffer.byteLength(JSON.stringify(args.markdown));
         if (wireBytes > MAX_DOCUMENT_BYTES) {
@@ -641,7 +651,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     (args) => {
       try {
         const actor_id = actorOf(args.actor_id);
-        const stale_write_advisory = store.orient.staleWriteAdvisory(actor_id, args.cursor);
+        const stale_write_advisory = store.orient.staleWriteAdvisory(actor_id, args.cursor, new Date(), blockTarget(store, args.block_id));
         const result = store.docs.supersedeBlock({
           block_id: args.block_id,
           new_content: args.new_content,
@@ -670,7 +680,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     (args) => {
       try {
         const actor_id = actorOf(args.actor_id);
-        const stale_write_advisory = store.orient.staleWriteAdvisory(actor_id, args.cursor);
+        const stale_write_advisory = store.orient.staleWriteAdvisory(actor_id, args.cursor, new Date(), blockTarget(store, args.block_id));
         const result = store.docs.tombstoneBlock({ block_id: args.block_id, reason: args.reason, actor_id });
         return json({ ...result, stale_write_advisory });
       } catch (err) {

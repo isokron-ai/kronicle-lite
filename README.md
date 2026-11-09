@@ -141,7 +141,7 @@ This uses the default store (`~/.kronicle-lite`, shared with your other
 clients; documents are scoped per project since 0.5.0), which is also the
 one the [exec-time shims](#exec-time-pulse-shims) check. To keep a store per
 workspace instead, add `"--data-dir", "${workspaceFolder}/.kronicle-lite"`:
-the shims (0.8.1) find a project-local `.kronicle-lite/` by walking up from
+the shims (0.9.0) find a project-local `.kronicle-lite/` by walking up from
 the repository a command acts on, but when `~/.kronicle-lite` holds a store
 too they cannot tell which one the agent uses and refuse world-changing
 commands until you pin one (`kronicle-lite shim install --data-dir DIR`).
@@ -199,7 +199,7 @@ Copilot code review:
 
 The store lives in the checkout (`./.kronicle-lite`): exec-time shims
 installed in the same environment find it by walking up from the
-repository (0.8.1), or pin it with `kronicle-lite shim install --data-dir
+repository (0.9.0), or pin it with `kronicle-lite shim install --data-dir
 "$PWD/.kronicle-lite"`.
 
 `tools` is required; GitHub recommends allowlisting read-only tools because
@@ -270,6 +270,14 @@ kronicle-lite export --out events.jsonl
 kronicle-lite import --data-dir ./copy --in events.jsonl
 ```
 
+`export` is **not signed**: `import` re-hashes and re-links every event, so
+damage and truncation are caught, but someone who edits an event and
+re-hashes the chain from there produces a file that imports and verifies.
+For evidence another party must trust, use the signed bundle
+(`audit export` + `verify-bundle --key`; audit events only for now) or
+anchor a checkpoint off-box. Signed exports are planned
+([#34](https://github.com/rafe-walker/kronicle-lite/issues/34)).
+
 In an agent session the loop is: `get_system_state` → work → `recall` (keep
 the receipts) → `verify` before building on an old receipt → write with your
 `cursor` → `get_system_state` again next turn with the new cursor.
@@ -311,7 +319,7 @@ kronicle-lite anchor keys              # pinned anchor service keys (add PEM-FIL
   checkpoint locally and exits 2 with `anchor service unreachable at …`;
   `verify --remote` exits 2 the same way; every local command, the MCP
   server and `orient` behave exactly as without anchoring.
-- **What the client trusts (0.8.1).** Only countersigned receipts: every
+- **What the client trusts (0.9.0).** Only countersigned receipts: every
   comparison uses the root and range inside a receipt whose countersignature
   verifies against a *pinned* service key and whose checkpoint signature
   verifies against your own chain key — never the unsigned fields of the
@@ -515,10 +523,10 @@ The PATH shim only sees commands found through PATH; `shim install
 paths, `sudo`, aliases, hooks, `rebase -x`; `--no-verify` aside).
 `--mode warn` prints the same and runs the command. A store that fails its
 integrity check refuses world-changing commands in both modes (fail
-closed), and so does a store file that is damaged (0.8.1). The shims check
+closed), and so does a store file that is damaged (0.9.0). The shims check
 the store the server uses: `shim install --data-dir DIR` pins it; else
 `$KRONICLE_LITE_DATA_DIR` or `~/.kronicle-lite`, plus a project-local
-`.kronicle-lite/` above the repository (0.8.1). No store, or two different
+`.kronicle-lite/` above the repository (0.9.0). No store, or two different
 ones, refuses world-changing commands in deny mode; a missing kronicle-lite
 CLI or a crash lets them run (fail open, noted once on stderr, logged in
 `.kronicle-shim/shim.log`). A check that times out
@@ -540,7 +548,7 @@ recursion guard, reconciliation, per-project acknowledgement and client snippets
 | `verify_chain` | Recompute every hash and link in a range; first mismatch; checkpoint results; over the whole chain also the projection (every stored document and block re-derived and re-hashed). | no |
 | `checkpoint_chain` | Sign a Merkle root over a seq range with the local key; `push: true` also anchors it off-box. | no (checkpoints, anchors tables) |
 | `anchor_status` | Last off-box anchor, events since, and whether the local chain still matches it (`remote: true` asks the service). | no |
-| `put_document` | Create or re-put a Markdown document by slug. Unchanged blocks keep their ids; changed ones are superseded; removed ones tombstoned. `bind_git` + `source_path` bind it to a file's git blob. Refuses a detected secret (`secret_detected`); `redact_secrets: true` stores a redacted copy. | yes |
+| `put_document` | Create or re-put a Markdown document by slug (a plain slug such as `deploy-runbook`, or a namespaced one such as `finding/G-2`: lowercase letters, digits, `. _ -`, a lowercase namespace before the first `/`, at most 128 characters; the same rule as `kronicle-lite put`; `instructions/` and `memory/` belong to instruction import). Unchanged blocks keep their ids; changed ones are superseded; removed ones tombstoned. `bind_git` + `source_path` bind it to a file's git blob. Refuses a detected secret (`secret_detected`); `redact_secrets: true` stores a redacted copy. | yes |
 | `supersede_block` | Replace one live block with new content and a reason (secret guard as for `put_document`). | yes |
 | `tombstone_block` | Retire one live block with a reason. | yes |
 | `apply` | 0.9.0: up to 50 put / supersede / tombstone ops in one SQLite transaction (`all_or_nothing`) or `best_effort`; `expect_version` per op; `dry_run` previews exact diffs and returns a single-use, expiring `confirm_token` bound to the plan and the versions it saw (state changed → `stale_plan`); `idempotency_key` replays; one `apply.committed` event ([docs/APPLY.md](docs/APPLY.md)). | yes |

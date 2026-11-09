@@ -50,9 +50,10 @@ uses semantic versioning once past 0.x.
   - **Reserved keys:** the `audit:` and `apply:` idempotency-key prefixes are
     reserved, and `put_document` refuses them (`reserved_key`).
   - **0.8.x stores:** verification works on a 0.8.x store without migrating
-    it. Before this fix, `verify-chain` / `verify` on a 0.8.1 store failed
+    it. Before this fix, `verify-chain` / `verify` on a store made by the
+    unpublished 0.8.1 development line failed
     with "no such table: audit_events" and exit 1, the divergence code. The
-    test uses a real 0.8.1 store (`test/fixtures/store-0.8.1.db.gz`) and a
+    test uses a real such store (`test/fixtures/store-0.8.1.db.gz`) and a
     read-only medium.
   - **0.7.0 and 0.8.0 stores verify too.** A store made by the published
     0.7.0 has no `doc_lineage`, `doc_lineage_gaps` or `reads` table, one made
@@ -113,6 +114,36 @@ uses semantic versioning once past 0.x.
     every byte. `--max-bytes` without a value was ignored and is now an
     error, and the over-budget message for `events.jsonl` is accurate (the
     budget is the only limit; the fixed 512 MB cap is gone).
+  - **Dogfood follow-ups (pre-release audit run).**
+    - **One slug rule (KL-5).** The CLI accepted `finding/G-2`, MCP
+      `put_document` refused it: each path had its own regex. One pattern
+      (`SLUG_PATTERN`: a plain slug, or a lowercase namespace then
+      `/`-separated segments, at most 128 characters) now drives the MCP
+      schema, the CLI and the store; MCP `put_document` refuses the reserved
+      `instructions/` and `memory/` namespaces, as `apply` does. The full and
+      core catalogs are re-pinned (put_document's `slug` schema).
+    - **Lost updates surface (KL-6).** The stale-write advisory only
+      measured drift volume, so agent-a overwriting agent-b's change with a
+      four-event-old cursor got `advisory: false`. Another actor's change to
+      the very document (or block's document) being written, after the
+      writer's cursor or latest briefing, now raises it with who and which
+      seq; CLI `put --cursor` prints it on stderr (and in `--json`).
+    - **Version references (KL-9).** 0.8.1 was never published. Docs, doctor
+      and messages now say 0.9.0 for everything first shipped in it; the
+      `[0.8.1]` section below says so, and that a rebuild by any earlier
+      release (published 0.8.0 included) fails with "no such function:
+      kl_writer_guard".
+    - **Plain export is unsigned (KL-2).** Documented in the README tour and
+      THREAT-MODEL: an edited and re-hashed export imports and verifies; use
+      the signed bundle or an anchor. Signed exports are #34 (0.10).
+    - **Strict CLI options (KL-11).** Unknown or misspelt options, a
+      single-value option given twice, a boolean given a value, and stray
+      positionals exit 2 with a reason (and a did-you-mean) instead of being
+      ignored (`orient --bogus` exited 0). `--allow-host` / `--allow-origin`
+      may repeat (values accumulate; before, all but the last were dropped).
+    - **Tests under load.** Wall-clock bounds are scaled
+      (`KL_TEST_TIME_FACTOR`, default 5) and the default test timeout is
+      60 s; resource bounds (RSS, work counters) carry the precise checks.
   - **Identifiers and object keys get the secret guard.** It scanned
     content only, so a token as an `actor_id` (every write tool), a
     `put_document` `idempotency_key`, `slug` or `source_path`, an `apply` op
@@ -276,7 +307,13 @@ uses semantic versioning once past 0.x.
   hashes, receipts and cursors are unchanged; stores from 0.8.x open and
   gain the new tables on first open.
 
-## [0.8.1] — 2026-11-01
+## [0.8.1] — never published (ships in 0.9.0)
+
+0.8.1 was prepared on 2026-11-01 but never published to npm or tagged: npm
+goes from 0.8.0 to 0.9.0, and every change below first ships in 0.9.0. The
+docs and messages say 0.9.0 for these features; "0.8.1" below and in test
+names refers to that development line (the `store-0.8.1.db.gz` fixture was
+made by it).
 
 Safety patch from agent-memory-bench hardening round 2. Every item was
 reproduced on 0.8.0 before it was fixed and has a regression test.
@@ -716,8 +753,9 @@ the PR for the upstream issue text.
     project keys the chain does not derive (fail; `kronicle-lite rebuild`
     repairs) and events appended after the last 0.8.1+ append (warn: an older
     version wrote since);
-  - a guard trigger makes the rebuild of 0.7.0 and older fail with "no such
-    function: kl_writer_guard" and roll back (only rebuild deletes document
+  - a guard trigger makes a rebuild by any earlier release (the published
+    0.8.0 included) fail with the raw SQLite error "no such function:
+    kl_writer_guard" and roll back (only rebuild deletes document
     revisions; normal puts by older versions, e.g. sea-lite 0.6.0's bundled
     kronicle-lite 0.7.0, are unaffected);
   - `meta.min_writer_generation` (now 1): a future version that bumps it

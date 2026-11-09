@@ -152,8 +152,18 @@ export const SLUG_RE = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 export const PATH_SLUG_RE = /^[a-z0-9][a-z0-9._-]{0,63}(?:\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}){1,16}$/;
 export const INSTRUCTION_NAMESPACES = ['instructions/', 'memory/'] as const;
 
+/**
+ * 0.9.0: THE slug rule, one pattern for every path (MCP put_document's schema, the CLI, the store):
+ * a plain slug (`deploy-runbook`) or a namespaced one (`finding/G-2`, `notes/Team/Q3`), at most 128
+ * characters. MCP put_document and apply additionally refuse the reserved `instructions/` and
+ * `memory/` namespaces (instruction import owns them).
+ */
+export const SLUG_PATTERN = `^(?=.{1,128}$)(?:${SLUG_RE.source.slice(1, -1)}|${PATH_SLUG_RE.source.slice(1, -1)})$`;
+const SLUG_ANY_RE = new RegExp(SLUG_PATTERN);
+export const SLUG_RULE = 'a slug is lowercase letters, digits, . _ - (starting with a letter or digit), or a namespaced path such as finding/G-2 (a lowercase namespace, then /-separated segments that may use upper case), at most 128 characters';
+
 export function isValidSlug(slug: string): boolean {
-  return slug.length <= 128 && (SLUG_RE.test(slug) || PATH_SLUG_RE.test(slug));
+  return SLUG_ANY_RE.test(slug);
 }
 
 export function isInstructionSlug(slug: string | null | undefined): boolean {
@@ -523,7 +533,7 @@ export class DocumentStore {
     const guarded = guardFields({ title: args.title, markdown: args.markdown }, args.secrets ?? 'refuse', `document ${args.slug}`);
     args = { ...args, ...guarded.fields };
     if (!isValidSlug(args.slug)) {
-      throw new DocumentError('invalid_slug', `slug must match ${SLUG_RE} or the namespaced form ${PATH_SLUG_RE}`);
+      throw new DocumentError('invalid_slug', `invalid slug "${args.slug}": ${SLUG_RULE}`);
     }
     // 0.9.0: idempotency keys under these prefixes belong to audit_record and apply; a document put
     // holding one would squat a future audit event or apply commit (its retry would replay the put).

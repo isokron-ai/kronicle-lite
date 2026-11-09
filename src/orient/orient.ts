@@ -273,7 +273,7 @@ export class Orient {
   }
 
   /** For write tools: advisory only, never blocks. */
-  staleWriteAdvisory(actor_id: string, cursor?: string | undefined, now = new Date()): StaleWriteAdvisory {
+  staleWriteAdvisory(actor_id: string, cursor?: string | undefined, now = new Date(), target?: { doc_id: string; slug: string } | null): StaleWriteAdvisory {
     let pos: { chain_seq: number; issued_at: string | null } | undefined;
     if (cursor) {
       try {
@@ -286,7 +286,26 @@ export class Orient {
         pos = undefined;
       }
     }
-    return composeStaleWriteAdvisory(this.driftSignals(actor_id, now, pos), this.rules);
+    const advisory = composeStaleWriteAdvisory(this.driftSignals(actor_id, now, pos), this.rules);
+    // 0.9.0 (dogfood KL-6): drift volume alone missed a lost update. Another actor changing the very
+    // document this write replaces, after the position the writer last saw (its cursor, else its latest
+    // briefing), is surfaced whatever the drift thresholds say. Still advisory: the write goes ahead.
+    if (target) {
+      const since = pos?.chain_seq ?? this.recorder.latestForActor(actor_id)?.to_seq ?? null;
+      if (since !== null) {
+        const other = this.chain.latestDocEventByOthers(target.doc_id, since, actor_id);
+        if (other) {
+          return {
+            ...advisory,
+            advisory: true,
+            line:
+              `Write accepted, but ${target.slug} was changed by ${other.actor_id} at seq ${other.seq} (${other.event_type}), after the position you last saw (seq ${since}): ` +
+              'this write may overwrite that change. Re-read the document (recall or get_system_state with your cursor) and reconcile.',
+          };
+        }
+      }
+    }
+    return advisory;
   }
 
   /**

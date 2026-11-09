@@ -34,7 +34,8 @@ import { basename, join } from 'node:path';
 import type { AnchorCallOptions } from './anchor/anchor.js';
 import { DB_FILE, defaultDataDir } from './db/open.js';
 import { checkWriters, describeWriters } from './db/writers.js';
-import { isValidSlug, type DocumentSource } from './docs/documents.js';
+import { REPEATABLE, validateFlags } from './cli-flags.js';
+import { isValidSlug, SLUG_RULE, type DocumentSource } from './docs/documents.js';
 import { describeProjection } from './docs/integrity.js';
 import type { LineageRef } from './docs/documents.js';
 import { bindGit } from './git/binding.js';
@@ -57,6 +58,8 @@ interface Args {
   cmd: string;
   positional: string[];
   flags: Record<string, string | true>;
+  /** Single-value options given more than once. */
+  repeated: string[];
 }
 
 /** Flags that never take a value, so `put --from-instructions CLAUDE.md` keeps CLAUDE.md positional. */
@@ -92,28 +95,40 @@ const BOOLEAN_FLAGS = new Set([
 function parseArgs(argv: string[]): Args {
   const [cmd = 'help', ...rest] = argv;
   const positional: string[] = [];
-  const flags: Record<string, string | true> = {};
+  // null prototype: option names are user input (`--__proto__` stays a key, and is reported as unknown)
+  const flags: Record<string, string | true> = Object.create(null) as Record<string, string | true>;
+  const repeated: string[] = [];
+  const set = (key: string, value: string | true) => {
+    if (Object.hasOwn(flags, key)) {
+      if (REPEATABLE.has(key) && typeof value === 'string' && typeof flags[key] === 'string') {
+        flags[key] = `${flags[key] as string},${value}`;
+        return;
+      }
+      if (!repeated.includes(key)) repeated.push(key);
+    }
+    flags[key] = value;
+  };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i]!;
     if (a.startsWith('--')) {
       const eq = a.indexOf('=');
       if (eq > 2) {
-        flags[a.slice(2, eq)] = a.slice(eq + 1);
+        set(a.slice(2, eq), a.slice(eq + 1));
         continue;
       }
       const key = a.slice(2);
       const next = rest[i + 1];
       if (!BOOLEAN_FLAGS.has(key) && next !== undefined && !next.startsWith('--')) {
-        flags[key] = next;
+        set(key, next);
         i++;
       } else {
-        flags[key] = true;
+        set(key, true);
       }
     } else {
       positional.push(a);
     }
   }
-  return { cmd, positional, flags };
+  return { cmd, positional, flags, repeated };
 }
 
 function str(v: string | true | undefined): string | undefined {
@@ -332,7 +347,7 @@ async function main(argv: string[]): Promise<number> {
     const { runShimCli } = await import('./shim/cli.js');
     return runShimCli(argv[0], argv.slice(1));
   }
-  const { cmd, positional, flags } = parseArgs(argv);
+  const { cmd, positional, flags, repeated } = parseArgs(argv);
   if (cmd === 'help' || cmd === '--help' || cmd === '-h') {
     process.stdout.write(HELP);
     return 0;
@@ -340,6 +355,17 @@ async function main(argv: string[]): Promise<number> {
   if (cmd === '--version' || cmd === 'version') {
     process.stdout.write(VERSION + '\n');
     return 0;
+  }
+  // 0.9.0: an option the command does not take is an error (exit 2), not a silent no-op.
+  try {
+    validateFlags(cmd, flags, positional, repeated, BOOLEAN_FLAGS);
+  } catch (err) {
+    process.stderr.write(`error: ${(err as Error).message}\n`);
+    return 2;
+  }
+  if (flags['data-dir'] === true) {
+    process.stderr.write('error: --data-dir needs a value\n');
+    return 2;
   }
   const dataDir = str(flags['data-dir']) ?? defaultDataDir();
 
@@ -620,7 +646,7 @@ async function main(argv: string[]): Promise<number> {
       } catch (err) {
         throw new Error(`cannot read ${file}: ${(err as NodeJS.ErrnoException).code ?? (err as Error).message}`);
       }
-      if (!isValidSlug(slug)) throw new Error(`invalid slug "${slug}": lowercase letters, digits, . _ - (start with a letter or digit)`);
+      if (!isValidSlug(slug)) throw new Error(`invalid slug "${slug}": ${SLUG_RULE}`);
       const store = new KronicleLite({ dataDir });
       const warnings: string[] = [];
       let source: DocumentSource | undefined;
@@ -630,11 +656,15 @@ async function main(argv: string[]): Promise<number> {
         if (b.warning) warnings.push(b.warning);
       }
       const derived = lineageFlag(flags);
+      const actor = str(flags['actor']) ?? 'cli';
+      // The same stale-write advisory as MCP put_document (computed before the write): printed when it fires.
+      const existing = store.docs.getDocument(slug);
+      const advisory = store.orient.staleWriteAdvisory(actor, str(flags['cursor']), new Date(), existing ? { doc_id: existing.doc_id, slug: existing.slug } : null);
       const r = store.docs.putDocument({
         slug,
         title: str(flags['title']) ?? basename(file).replace(/\.md$/i, ''),
         markdown,
-        actor_id: str(flags['actor']) ?? 'cli',
+        actor_id: actor,
         ...(derived !== undefined ? { derived_from: derived } : {}),
         ...(str(flags['cursor']) !== undefined ? { cursor: str(flags['cursor'])! } : {}),
         ...(source !== undefined ? { source } : {}),
@@ -643,9 +673,10 @@ async function main(argv: string[]): Promise<number> {
         ...(flags['all-projects'] === true ? {} : { project: primaryProject(instructionCtx(flags)) }),
       });
       for (const w of warnings) process.stderr.write(`warning: ${w}\n`);
+      if (str(flags['cursor']) !== undefined && advisory.advisory && advisory.line) process.stderr.write(`advisory: ${advisory.line}\n`);
       if (r.redactions) process.stderr.write(`warning: redacted ${r.redactions.length} secret(s) before chaining: ${r.redactions.map((f) => `${f.detector} (line ${f.line})`).join(', ')}\n`);
       if (flags['json'] === true) {
-        process.stdout.write(JSON.stringify({ ...r, ...(source !== undefined ? { source } : {}), ...(warnings.length > 0 ? { warnings } : {}) }, null, 2) + '\n');
+        process.stdout.write(JSON.stringify({ ...r, stale_write_advisory: advisory, ...(source !== undefined ? { source } : {}), ...(warnings.length > 0 ? { warnings } : {}) }, null, 2) + '\n');
       } else {
         const n = (st: string) => r.blocks.filter((b) => b.status === st && (st !== 'created' || !b.supersedes)).length;
         const superseded = r.blocks.filter((b) => b.supersedes).length;

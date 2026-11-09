@@ -78,13 +78,13 @@ export function describeWriters(r: WriterReport): { status: 'ok' | 'warn' | 'fai
       status: 'fail',
       detail:
         `${r.project_key_mismatch_count} document(s) carry a project key the chain does not derive — an older kronicle-lite rebuilt or wrote this store, ` +
-        `so project scoping (recall, orient) is wrong: ${ex}; run kronicle-lite rebuild (0.8.1 or later)`,
+        `so project scoping (recall, orient) is wrong: ${ex}; run kronicle-lite rebuild (0.9.0 or later)`,
     };
   }
   if (r.unrecorded_events) {
     return {
       status: 'warn',
-      detail: `events ${r.unrecorded_events.from_seq}..${r.unrecorded_events.to_seq} were appended by a kronicle-lite older than 0.8.1 (last 0.8.1+ write: ${r.writer_version} at seq ${r.writer_head_seq}); keep every client on 0.8.1 or later`,
+      detail: `events ${r.unrecorded_events.from_seq}..${r.unrecorded_events.to_seq} were appended by a kronicle-lite older than 0.9.0 (last 0.9.0+ write: ${r.writer_version} at seq ${r.writer_head_seq}); keep every client on 0.9.0 or later`,
     };
   }
   return { status: 'ok', detail: r.writer_version ? `last written by ${r.writer_version} (seq ${r.writer_head_seq}); project keys match the chain` : 'project keys match the chain' };

@@ -246,7 +246,7 @@ function metaValue(db: Db, key: string): string | null {
 const GUARD_DDL = `
 CREATE TRIGGER IF NOT EXISTS kl_rebuild_guard BEFORE DELETE ON document_revisions
 WHEN kl_writer_guard() IS NULL
-BEGIN SELECT RAISE(ABORT, 'this store needs kronicle-lite >= 0.8.1 to rebuild'); END;
+BEGIN SELECT RAISE(ABORT, 'this store needs kronicle-lite >= 0.9.0 to rebuild'); END;
 `;
 
 /** Objects the setup creates; a store missing any of them goes through setUp. */
