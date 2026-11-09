@@ -1363,7 +1363,9 @@ describe('review round 2 (N1–N9): every R-case fails closed', () => {
       const mk = () => {
         const root = tempDir('kl-va-t6-');
         const d = join(root, NFC);
-        cpSync(f.pkg, d, { recursive: true });
+        // copied under an ASCII name, then renamed: Node 22's native cpSync mangles non-ASCII destinations on Windows
+        cpSync(f.pkg, join(root, 'ascii'), { recursive: true });
+        renameSync(join(root, 'ascii'), d);
         return { root, d };
       };
       const same = (a: string, b: string) => {
