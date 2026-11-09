@@ -138,13 +138,15 @@ function judge(anchorUrl: string, genesis: GenesisPin, doc: unknown, source: Ser
  * then the chain check against `genesis`. A usable list becomes the kept one.
  */
 export function acceptServiceKeys(scope: KeysCacheScope, anchorUrl: string, genesis: GenesisPin, doc: unknown): KeyListCheck {
+  let cacheNotes: string[];
   try {
-    guardKeyList(scope, anchorUrl, doc, genesis);
+    cacheNotes = guardKeyList(scope, anchorUrl, doc, genesis);
   } catch (e) {
     if (e instanceof KeyListRollbackError) return { set: null, notes: [], violations: [e.message] };
     throw e;
   }
   const r = judge(anchorUrl, genesis, doc, 'fetched');
+  r.notes.unshift(...cacheNotes);
   if (!scope.dataDir) r.notes.push('key list rollback check: in-memory store, nothing kept between runs');
   return r;
 }

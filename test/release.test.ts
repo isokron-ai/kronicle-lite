@@ -35,7 +35,7 @@ describe('release 0.10.0', () => {
     expect(log).toMatch(/^## \[0\.10\.0\] — \d{4}-\d{2}-\d{2}$/m);
     expect(log).not.toMatch(/^## \[Unreleased\] — next \(0\.10\.0\)/m);
     const entry = log.slice(log.indexOf('## [0.10.0]'), log.indexOf('\n## ', log.indexOf('## [0.10.0]') + 1));
-    for (const s of ['(#37)', '(#38)', "the anchor client on the service's key model", '(T8)']) expect(entry).toContain(s);
+    for (const s of ['(#37)', '(#38)', "the anchor client on the service's key model", '(T8)', '(C3c)', '(C2a, C2b)', '### Known limitations']) expect(entry).toContain(s);
   });
 
   it('README and docs name npx kronicle-lite@0.10.0 for verify-audit', () => {

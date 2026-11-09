@@ -9,14 +9,12 @@
  *
  * Precedence: explicit arguments (CLI flags) > KRONICLE_ANCHOR_URL /
  * KRONICLE_ANCHOR_KEY > config.json > defaults. A store opened in memory
- * (tests, embedding) has no data dir; it reads env + defaults and keeps the
- * key cache in process.
+ * (tests, embedding) has no data dir; it reads env + defaults (keys-cache.ts
+ * keeps its records in process).
  */
 
 import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-
-import type { ServiceKeys } from './client.js';
 
 export const DEFAULT_ANCHOR_URL = 'https://anchor.isokron.ai';
 export const CONFIG_FILE = 'config.json';
@@ -107,32 +105,3 @@ export function assertAnchorTransport(anchorUrl: string, insecureHttp = false): 
   throw new AnchorConfigError(`anchor_url ${u.origin} must be https://`);
 }
 
-const memoryKeys = new Map<string, ServiceKeys>();
-
-/** @deprecated 0.8.1: the key cache is no longer trusted or written; see trust.ts (pins). */
-export function readKeysCache(dataDir: string | null): ServiceKeys | null {
-  if (!dataDir) return memoryKeys.get('memory') ?? null;
-  const p = join(dataDir, KEYS_CACHE_FILE);
-  if (!existsSync(p)) return null;
-  try {
-    const j = JSON.parse(readFileSync(p, 'utf8')) as ServiceKeys;
-    return Array.isArray(j?.keys) ? j : null;
-  } catch {
-    return null;
-  }
-}
-
-/** @deprecated 0.8.1: the key cache is no longer trusted or written; see trust.ts (pins). */
-export function writeKeysCache(dataDir: string | null, keys: ServiceKeys): void {
-  if (!dataDir) {
-    memoryKeys.set('memory', keys);
-    return;
-  }
-  try {
-    const p = join(dataDir, KEYS_CACHE_FILE);
-    writeFileSync(p, JSON.stringify(keys, null, 2) + '\n', { mode: 0o600 });
-    chmodSync(p, 0o600);
-  } catch {
-    // best effort: the cache only serves `verify --remote --offline`
-  }
-}

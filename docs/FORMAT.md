@@ -699,7 +699,17 @@ this client does not check. Every list fetched is first checked for
 rollback against the one kept for that service and pin in
 `anchor-keys.cache.json` (`{v:2, records:{"<url>|<pin>": {anchor_url,
 genesis, keys}}}`, the service client's format): a dropped key, or any
-change to a kept key other than the status progression, refuses it.
+change to a kept key other than the status progression, refuses it. The
+read, check and write run under `anchor-keys.cache.json.lock`, the protocol
+of isokron-anchor's client (its README "Safe writes"): O_EXCL, 0600,
+`{"pid", "created_at"}`; stale only when the pid is not running or after 10
+minutes (by `created_at`, or mtime when it does not parse or lies over 1
+minute ahead); retried every 25 ms, refused after 10 s; not written in a
+read-only data dir. Just before the rename the writer re-checks the lock
+("cache lock lost" otherwise), re-reads the cache and merges every record
+(the stronger list wins, a contradiction refuses). A pre-v2 single-document file is adopted only
+when it chains to the pin and names this service (if it names one), and is
+never the offline kept list until a fetch confirms it.
 `--offline` uses the list kept for the service each receipt was pushed to. Ed25519 checks on these paths are strict:
 small-order or non-canonical public keys and R, and S ≥ L, never verify.
 

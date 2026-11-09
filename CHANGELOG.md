@@ -145,6 +145,30 @@ uses semantic versioning once past 0.x.
   to a kept key other than the status progression is refused; a damaged file
   refuses). `verify --remote --offline` checks each stored receipt against
   the list kept for the service it was pushed to.
+- **Concurrent writers (C3c):** the kept list is written under
+  `anchor-keys.cache.json.lock`, exactly the protocol of isokron-anchor's
+  client (fix/cache-lock e894d67, its README "Safe writes"): the lock is
+  created O_CREAT|O_EXCL, mode 0600, holding `{"pid", "created_at"}`; it is
+  stale only when its pid is not running on this host or it is older than 10
+  minutes (by `created_at`, or by mtime when that does not parse or lies more
+  than 1 minute ahead), so a live writer's lock is never broken earlier; a
+  waiter retries every 25 ms and refuses after 10 s, on every path; a lock that
+  cannot be created or a stale one that cannot be deleted (EACCES, EROFS,
+  EPERM) means a read-only data dir: the list is checked but not kept. The
+  writer writes a 0600 temporary file and, just before the rename, re-reads
+  the lock (it must still be its own, else "cache lock lost" and nothing is
+  written), re-reads the cache and merges every record with what is on disk
+  (the stronger list wins: new keys, active → retired → revoked, an earlier
+  `valid_to` or `compromised_since`; a contradiction refuses) and re-checks
+  its own record. A revocation another writer recorded meanwhile is never
+  overwritten.
+- **Old single-document cache files (C2a, C2b):** a pre-v2 file (kronicle-lite
+  0.4–0.8's last fetched document, or the service client's round-4 file) is
+  adopted as the rollback reference only when it chains to the current
+  genesis pin and its recorded `anchor_url`, if any, is the service's;
+  otherwise it is ignored with one line and never blocks a valid list. It is
+  never the kept list for `--offline` or doctor until a fetch has confirmed it
+  (the file is then rewritten as v2).
 - **Removed: the 0.8.1 pin store.** First-use pinning, operator pins and
   successor pins (`anchor-keys.pinned.json`) are no longer read; `anchor keys
   add | remove | reset` exit 2 with the reason, and `anchor keys` shows the
@@ -161,6 +185,13 @@ uses semantic versioning once past 0.x.
   that descriptor; the roots directory is listed once. Before, the path was
   checked and then re-opened, so a symlink flipped in between (the review
   won that race in 26 of 60 runs) was read unchecked.
+
+### Known limitations
+
+- `verify-audit` keeps its own rollback cache (`<data-dir>/anchor-keys.seen.json`,
+  one list per genesis pin) and the anchor client keeps
+  `<data-dir>/anchor-keys.cache.json` (one list per service and pin); they are
+  separate, so a list one of them has seen is not the other's reference.
 
 ### Changed
 
