@@ -4,9 +4,9 @@ All notable changes to kronicle-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
-## [Unreleased] — next (0.10.0)
+## [0.10.0] — 2026-11-09
 
-### Added — IsoKron Evidence Packs (verifiable audits)
+### Added — IsoKron Evidence Packs (verifiable audits) (#37)
 
 - **`verify-audit PACK`**: offline verification of an IsoKron Evidence Pack,
   tamper-evident, independently timestamped audit evidence. Checks exactly the
@@ -46,7 +46,7 @@ uses semantic versioning once past 0.x.
   milestone kind in a `/1` bundle. The 0.9.0 convention (`finding` with
   `class: protocol_freeze`, `call_measured` with `measured_at`) is still read.
 
-### Security — independent review of the evidence-pack verifier (fail closed)
+### Security — independent review of the evidence-pack verifier (fail closed) (#37)
 
 - **The auditor key is pinned by fingerprint** (`--key-fingerprint`, from the
   report or SOW); a `--key` file inside the pack is refused (exit 2) and an
@@ -124,14 +124,54 @@ uses semantic versioning once past 0.x.
   DER times with out-of-range calendar fields are refused; `run_seq` must be
   integers ≥ 1.
 
+### Security — the anchor client on the service's key model
+
+- **`checkpoint --push`, `verify --remote [--offline]`, `anchor status`, the
+  MCP anchor tools and doctor** now trust the anchor service's key list the
+  way the service and its own client do (isokron-anchor `servicekeys.ts`,
+  vendored in `src/anchor/service-core/`): the list must be one signed chain
+  from the genesis pin (the compiled production pin, or a self-hosted
+  service's own: `--genesis`, `KRONICLE_ANCHOR_GENESIS`, or `anchor_genesis`
+  in `config.json`, as `<sha256>@<valid_from>`), and a receipt counts only
+  when its key is the current head (`checkServiceKey` with revoked and
+  nonHead `'reject'`). This client checks no RFC 3161 tokens and a
+  receipt's `received_at` is signed by the same key, so a retired or revoked
+  key's receipt is refused with a pointer to the verification page and
+  `kronicle-lite verify-audit`, which weigh independent timestamps.
+- **Rollback cache:** every list fetched is checked against the one kept for
+  that service and pin in `<data-dir>/anchor-keys.cache.json` before it is
+  used and before `checkpoint --push` sends anything (the service client's
+  file format and rules: one record per normalized URL and pin; any change
+  to a kept key other than the status progression is refused; a damaged file
+  refuses). `verify --remote --offline` checks each stored receipt against
+  the list kept for the service it was pushed to.
+- **Removed: the 0.8.1 pin store.** First-use pinning, operator pins and
+  successor pins (`anchor-keys.pinned.json`) are no longer read; `anchor keys
+  add | remove | reset` exit 2 with the reason, and `anchor keys` shows the
+  genesis pin and the kept list. `service_key_pins` in `config.json` and
+  `KRONICLE_ANCHOR_GENESIS_SHA256` are refused, not ignored. The service
+  client's "held" exception (a retired-key receipt it verified itself while
+  the key was the head) is not mirrored: kronicle-lite never accepts a
+  retired or revoked key's receipt without a TSA time inside the key's window.
+
+### Fixed — `verify-audit` trust inputs (T8)
+
+- `--key`, `--anchor-keys` and every `--tsa-roots` file are opened once,
+  checked by the (dev, ino) of the open descriptor (fstat), and read from
+  that descriptor; the roots directory is listed once. Before, the path was
+  checked and then re-opened, so a symlink flipped in between (the review
+  won that race in 26 of 60 runs) was read unchecked.
+
 ### Changed
 
 - **The production anchor service key is pinned in the package** as a genesis
   key (`anchor-ed25519-3dca1ecf66c2993e`, SPKI SHA-256
   `3dca1ecf…7b3367`, valid from 2026-11-01T02:29:25.705Z):
   `https://anchor.isokron.ai` is no longer trusted on first use. Later keys
-  only through successor signatures chaining back to it; in `verify-audit` a
-  key in the pack's `anchor-keys.json` that does not chain is a FAIL.
+  only through the signed key chain back to it, in `verify-audit` and in the
+  anchor client.
+- Version 0.10.0 (`package.json`, `server.json`, `CATALOG_VERSION`, the
+  `.mcp-catalog` snapshots).
 - Docs: the anchor service is described as IsoKron's audit-verification
   service (optional, self-hostable), not as a tier; the receipt caveat says
   the license key "only authorizes".
@@ -140,7 +180,7 @@ uses semantic versioning once past 0.x.
   0.9.0 binary's `rebuild` on a store that holds milestone events drops them
   from its projection (it does not know the kinds); the chain is unaffected.
 
-### Added — `kronicle-lite/core`
+### Added — `kronicle-lite/core` (#38)
 
 - **A slim entry for short-lived embedders**: `import { KronicleLite } from
   'kronicle-lite/core'` exports the store, the chain (`Chain`,
