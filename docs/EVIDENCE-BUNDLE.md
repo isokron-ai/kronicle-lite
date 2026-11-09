@@ -301,9 +301,12 @@ no timestamp; `measured_at` and payload values are recorded by the auditor.
 - **Auditor key:** `--key-fingerprint` from the report, the SOW or
   isokron.ai/verify (never from the pack), or `--key FILE` from outside the pack.
 - **Anchor service keys:** the same key-list model as the anchor service
-  (isokron-anchor `src/core/servicekeys.ts`; `src/anchor/keychain.ts` is a
-  port, and `test/keychain.test.ts` checks it against lists built by the
-  service's `scripts/rotate-key.mjs` and judged by the service):
+  (isokron-anchor `src/core/genesis.ts` and `src/core/servicekeys.ts` at PR #3
+  e28daa3, vendored byte for byte in `src/anchor/service-core/` behind a small
+  adapter; `test/keychain.test.ts` checks their SHA-256 and holds lists built
+  by the service's `scripts/rotate-key.mjs` and judged by the service).
+  Receipts are checked as the verification page does (`checkServiceKey` with
+  `revoked: 'tsa'`, `nonHead: 'tsa'`):
   - one linear chain from a genesis key pinned by SHA-256(SPKI): compiled in
     (`anchor-ed25519-3dca1ecf66c2993e`,
     `3dca1ecf66c2993e534ff08fe350dc9368ca52042e38b20a9d58cd7c2b7b3367`, valid
@@ -348,7 +351,7 @@ no timestamp; `measured_at` and payload values are recorded by the auditor.
   earlier `valid_to` or `compromised_since`, each with its new statement), fails
   with the date of the list it contradicts; `valid_from`,
   `successor_signature`, `signed_by` and a changed status statement are
-  compared too (`keyListRegression`, isokron-anchor 7e0e96f). A damaged cache
+  compared too (`keyListRegression`, isokron-anchor e28daa3). A damaged cache
   file (wrong shape anywhere) fails the check and is never overwritten; it is
   reset only by deleting it. With no list kept for the pin, the output says
   `key list  first seen for this genesis; recorded in <path>` (not a PASS).

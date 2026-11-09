@@ -6,14 +6,45 @@
  * entry, with the same detail text: a key list valid for one is valid for the other.
  */
 
+import { createHash, createPrivateKey, createPublicKey, sign } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { createPrivateKey, createPublicKey, sign } from 'node:crypto';
+import {
+  checkKeyChain,
+  checkServiceKey,
+  formatGenesisPin,
+  keyListOf,
+  keyListRegression,
+  parseGenesisPin,
+  PRODUCTION_GENESIS,
+  publicKeyFromPem,
+  retirementSigningPayload,
+  serviceKeyIdOf,
+  successorSigningPayload,
+  verifySignature,
+  type GenesisPin,
+} from '../src/anchor/keychain.js';
 
-import { checkKeyChain, checkServiceKey, keyListOf, keyListRegression, parseGenesisPin, publicKeyFromPem, retirementSigningPayload, serviceKeyIdOf, successorSigningPayload, verifySignature, type GenesisPin } from '../src/anchor/keychain.js';
+/**
+ * src/anchor/service-core/{genesis,servicekeys}.ts are isokron-anchor's src/core files at this commit, byte for
+ * byte; only service-core/ed25519.ts and jcs.ts are kronicle-lite adapters.
+ */
+const SERVICE_COMMIT = 'fix/rollback-cache e28daa3 (PR #3)';
+const VENDORED: Record<string, string> = {
+  'genesis.ts': '1c56b01c0cbb1ac4ceeb3ec02066e380b83671d23c7264337139f5fa69fa493a',
+  'servicekeys.ts': '547589180cd8a6355b817333b0fd2f5b537709a85af153c6e4a386347982bcbb',
+};
+
+describe(`vendored service code: isokron-anchor ${SERVICE_COMMIT}`, () => {
+  for (const [file, sha] of Object.entries(VENDORED)) {
+    it(`src/anchor/service-core/${file} is the service file byte for byte`, () => {
+      expect(createHash('sha256').update(readFileSync(join(__dirname, '..', 'src', 'anchor', 'service-core', file))).digest('hex')).toBe(sha);
+    });
+  }
+});
 
 interface Verdicts {
   generated_by: string;
@@ -37,7 +68,7 @@ describe('key chain: same verdicts as the anchor service', () => {
   }
 
   it('covers rotation, revocation (by the key itself, an earlier key, a later key) and each tampering the review named', () => {
-    expect(v.generated_by).toMatch(/^isokron-anchor fix\/rollback-cache 7e0e96f \(PR #3\): /);
+    expect(v.generated_by.startsWith(`isokron-anchor ${SERVICE_COMMIT}: `)).toBe(true);
     expect(Object.keys(v.cases).sort()).toEqual(
       [
         'empty',
@@ -83,7 +114,7 @@ describe('checkServiceKey: a revoked key never vouches on received_at alone', ()
   });
   it('the key after the revoked one is not trusted; the genesis before it still is', () => {
     expect(checkServiceKey(keys, after, '2027-01-02T00:00:00.000Z', pin, { revoked: 'tsa' })).toMatchObject({ ok: false, detail: expect.stringMatching(/is not trusted/) });
-    expect(checkServiceKey(keys, genesis, '2026-11-10T00:00:00.000Z', pin, { revoked: 'tsa' })).toMatchObject({ ok: true });
+    expect(checkServiceKey(keys, genesis, '2026-11-10T00:00:00.000Z', pin, { revoked: 'tsa', nonHead: 'tsa' })).toMatchObject({ ok: true });
   });
   it("the pin's valid_from bounds the genesis key, whatever the list says", () => {
     const k = list('genesis_valid_from_in_list_ignored');
@@ -94,15 +125,28 @@ describe('checkServiceKey: a revoked key never vouches on received_at alone', ()
 });
 
 describe('genesis pin', () => {
-  it('N4: the pin is canonical: case, colons and the spelling of valid_from do not make another pin', () => {
-    const want = { sha256: v.genesis.sha256, valid_from: '2026-11-01T00:00:00.000Z' };
+  // isokron-anchor e28daa3 test/node/keys.test.ts "round 5: the genesis pin is canonicalised by its parser"
+  const hex = PRODUCTION_GENESIS.sha256;
+  const colons = hex.toUpperCase().match(/../g)!.join(':');
+  it('N4: every spelling of one pin parses to the same canonical value and label', () => {
+    const spellings: unknown[] = [`${hex}@2026-11-01T02:29:25.705Z`, `${hex.toUpperCase()}@2026-11-01T02:29:25.705Z`, `${colons}@2026-11-01T02:29:25.705Z`, { sha256: colons, valid_from: '2026-11-01T02:29:25.705Z' }];
+    for (const sp of spellings) expect(parseGenesisPin(sp)).toEqual(PRODUCTION_GENESIS);
+    const z = { sha256: hex, valid_from: '2026-11-01T00:00:00.000Z' };
     for (const vf of ['2026-11-01T00:00:00Z', '2026-11-01T00:00:00.0Z', '2026-11-01T00:00:00.00Z', '2026-11-01T00:00:00.000Z']) {
-      expect(parseGenesisPin(`${v.genesis.sha256.toUpperCase()}@${vf}`)).toEqual(want);
-      expect(parseGenesisPin(`${v.genesis.sha256.match(/../g)!.join(':')}@${vf}`)).toEqual(want);
-      expect(parseGenesisPin({ sha256: v.genesis.sha256, valid_from: vf })).toEqual(want);
+      expect(parseGenesisPin(`${hex}@${vf}`)).toEqual(z);
+      expect(formatGenesisPin({ sha256: colons, valid_from: vf })).toBe(`${hex}@2026-11-01T00:00:00.000Z`);
     }
-    expect(parseGenesisPin(`${v.genesis.sha256}@2026-02-30T00:00:00Z`)).toBeNull(); // would roll over to March
-    expect(parseGenesisPin(`${v.genesis.sha256}@2026-11-01T24:00:00Z`)).toBeNull();
+    expect(parseGenesisPin(`${hex}@2026-11-01T00:00:00.5Z`)!.valid_from).toBe('2026-11-01T00:00:00.500Z');
+  });
+  it('N4: offsets other than Z, and dates or times that do not round-trip, are refused', () => {
+    for (const vf of ['2026-11-01T00:00:00+00:00', '2026-11-01T00:00:00.000+00:00', '2026-11-01T00:00:00.000z', '2026-11-01 00:00:00Z', '2026-11-01', '2026-02-30T00:00:00Z', '2026-11-01T24:00:00Z', '2026-11-01T23:60:00Z', '2026-11-01T00:00:00.1234Z', '+002026-11-01T00:00:00Z']) {
+      expect(parseGenesisPin(`${hex}@${vf}`), vf).toBeNull();
+    }
+    expect(() => formatGenesisPin({ sha256: hex, valid_from: '2026-11-01T00:00:00+00:00' })).toThrow();
+    // checkKeyChain uses the canonical pin; an invalid one breaks every key
+    const live = { key_id: 'anchor-ed25519-3dca1ecf66c2993e', public_key_pem: '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAvJAsc6UvXIKrZXFNO6jjSKKnkUKZvh2crVOyvrQqJm4=\n-----END PUBLIC KEY-----\n', valid_from: '2026-11-01T02:29:25.705Z', valid_to: null, status: 'active', successor_signature: null, signed_by: null };
+    expect(checkKeyChain([live], { sha256: colons, valid_from: '2026-11-01T02:29:25.705Z' }).ok).toBe(true);
+    expect(checkKeyChain([live], { sha256: hex, valid_from: '2026-11-01T02:29:25.705+00:00' })).toMatchObject({ ok: false, usable: false, detail: 'BROKEN: the genesis pin is not valid' });
   });
   it('is <sha256>@<valid_from>; a bare hash or a non-UTC time is not a pin', () => {
     expect(parseGenesisPin(`${v.genesis.sha256}@${v.genesis.valid_from}`)).toEqual(v.genesis);
@@ -197,5 +241,22 @@ describe('keyListRegression refuses any change to a kept key except the status p
   it('allowed: new keys, active/retired → revoked with its statement', () => {
     expect(keyListRegression(list('one_rotation'), kept)).toBeNull();
     expect(keyListRegression(kept, list('revoked_middle'))).toBeNull();
+  });
+});
+
+/** isokron-anchor e28daa3 test/node/keys.test.ts "round 5 H1", on the fixture lists (G → S → T; S retired, valid 2026-12-01 → 2027-01-01). */
+describe("checkServiceKey nonHead: a retired key is rejected unless the caller says how it decides (verify-audit uses 'tsa')", () => {
+  const keys = list('two_rotations');
+  const [t, s] = v.cases['two_rotations']!.service.entries.map((e) => e.key_id) as [string, string, string];
+  const inWindow = '2026-12-15T00:00:00.000Z';
+  it("default and 'reject' refuse it; 'tsa' and 'held' accept it inside its window only; the head is unaffected", () => {
+    expect(checkServiceKey(keys, s, inWindow, v.genesis)).toMatchObject({ ok: false, retired: { valid_to: '2027-01-01T00:00:00.000Z' }, detail: expect.stringMatching(/is retired .* independent RFC 3161 timestamp inside its window/) });
+    expect(checkServiceKey(keys, s, inWindow, v.genesis, { nonHead: 'reject' }).ok).toBe(false);
+    // @ts-expect-error -- unknown policies fail closed
+    expect(checkServiceKey(keys, s, inWindow, v.genesis, { nonHead: 'accept' }).ok).toBe(false);
+    expect(checkServiceKey(keys, s, inWindow, v.genesis, { nonHead: 'tsa' }).ok).toBe(true);
+    expect(checkServiceKey(keys, s, inWindow, v.genesis, { nonHead: 'held' }).ok).toBe(true);
+    expect(checkServiceKey(keys, s, '2027-02-01T00:00:00.000Z', v.genesis, { nonHead: 'tsa' }).ok).toBe(false);
+    expect(checkServiceKey(keys, t, '2027-02-01T00:00:00.000Z', v.genesis).ok).toBe(true);
   });
 });

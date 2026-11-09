@@ -882,9 +882,10 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
       const canonical = raw.toString('utf8') === canonicalize(parsedJson);
       let ok = add('anchor', 'receipts', base, 'receipt canonical', canonical, canonical ? `sha256 ${report.receipt_sha256}` : 'the file is not canonical JSON (RFC 8785), so its sha256 is not the receipt digest');
 
-      // The service's checkServiceKey with revoked: 'tsa': a revoked key's receipt counts only with a
-      // verified RFC 3161 time before compromised_since − 5 min (checked below, never received_at).
-      const sk = listOk ? checkServiceKey(keyList!, r.service_key_id, r.received_at, pin, { revoked: 'tsa' }) : null;
+      // The service's checkServiceKey with revoked: 'tsa' and nonHead: 'tsa' (the verify page's rules): a
+      // retired key's receipt counts only with a verified RFC 3161 time no later than valid_to + 5 min, a
+      // revoked key's only with one before compromised_since − 5 min (checked below, never received_at).
+      const sk = listOk ? checkServiceKey(keyList!, r.service_key_id, r.received_at, pin, { revoked: 'tsa', nonHead: 'tsa' }) : null;
       const entry: ServiceKeyEntry | null = sk?.ok ? sk.entry : null;
       const compromisedSince = sk?.ok ? (sk.revoked?.compromised_since ?? null) : null;
       const skProblem = sk === null

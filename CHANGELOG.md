@@ -59,9 +59,10 @@ uses semantic versioning once past 0.x.
   (`independent_timestamps` → `receipts`; `harness_frozen_before_runs` →
   `receipts`, `independent_timestamps`); `--require` of a claim that needs
   tokens together with `--no-tsa` is a usage error.
-- **Anchor key list = the service's model** (`src/anchor/keychain.ts`, a port of
-  isokron-anchor `checkKeyChain`, cross-checked against lists made by its
-  `rotate-key.mjs`): one linear chain from the genesis pin, signed successor and
+- **Anchor key list = the service's model** (isokron-anchor PR #3 e28daa3
+  `src/core/genesis.ts` and `servicekeys.ts`, vendored byte for byte in
+  `src/anchor/service-core/` behind an adapter, cross-checked against lists made
+  by its `rotate-key.mjs`): one linear chain from the genesis pin, signed successor and
   status statements byte for byte as the service's spec (its README test
   vectors are a kronicle-lite test), no forks, newest key active or revoked.
   A revocation is signed by the key itself or an earlier key and carries
@@ -97,8 +98,10 @@ uses semantic versioning once past 0.x.
   fails and is never overwritten; a first list is reported as recorded, not
   as PASS; library callers pass `seen_dir` or `rollback: 'off'`. The genesis
   source is labelled (`--genesis` or `KRONICLE_ANCHOR_GENESIS`).
-  `keyListRegression` is isokron-anchor PR #3 (7e0e96f): any change to a kept
-  key other than the status progression is a rollback.
+  The pin is canonicalised by the service's own parser (`parseGenesisPin`,
+  `canonicalValidFrom`). `keyListRegression` is the service's (PR #3 e28daa3):
+  any change to a kept key other than the status progression is a rollback.
+  Retired-key receipts use the service's `nonHead: 'tsa'` rule.
 - **Unchecked claims block exit 0:** a claim the pack declares that is not
   checked (for example under `--no-tsa`) is `not checked` and the result is
   `NOT VERIFIED` (exit 1). `--skip-claim CLAIM[,…]` opts out explicitly
