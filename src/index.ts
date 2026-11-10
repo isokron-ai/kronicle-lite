@@ -96,3 +96,8 @@ export {
 export { AnchorClient, AnchorApiError, AnchorUnreachableError } from './anchor/client.js';
 export { DEFAULT_ANCHOR_URL, loadConfig as loadAnchorConfig, type AnchorConfig } from './anchor/config.js';
 export * as shim from './shim/index.js';
+/**
+ * 0.11.0: the audit profile, for recorders (mcp-audit's evidence module) and verifiers: the freeze
+ * nonce, the sign-off statement and the findings digest are computed here so both sides agree.
+ */
+export * as audit from './audit/api.js';

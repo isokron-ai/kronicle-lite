@@ -27,7 +27,7 @@ import { canonicalize, type JsonValue } from '../crypto/canonical.js';
 import { sha256Hex } from '../crypto/hash.js';
 import { keyIdFromPublicKey, verifyEd25519 } from '../crypto/keys.js';
 import { manifestSigningPayload, type BundleManifest } from './bundle.js';
-import { blobRefsOf, BUNDLE_FORMATS, evidenceOf, kindOfEventType, kindsOfFormat, parseAuditPayload, type BundleFormat } from './schemas.js';
+import { blobRefsOf, BUNDLE_FORMAT_V3, BUNDLE_FORMATS, evidenceOf, kindOfEventType, kindsOfFormat, parseAuditPayloadIn, type BundleFormat } from './schemas.js';
 
 export const BUNDLE_CHECKS = ['canonical', 'signature', 'events', 'chain', 'root', 'artifacts', 'refs', 'missing'] as const;
 export type BundleCheck = (typeof BUNDLE_CHECKS)[number];
@@ -400,11 +400,13 @@ export function verifyBundle(dir: string, opts: VerifyBundleOptions = {}): Verif
       if (h !== ev.this_hash) later('events', `seq ${String(ev.seq)}: this_hash does not recompute`);
       const kind = kindOfEventType(String(ev.event_type));
       if (!kind) return later('events', `seq ${String(ev.seq)}: ${String(ev.event_type)} is not an audit event type`);
-      // A /1 bundle holds 0.9.0 kinds only (what a 0.9.0 reader accepts); milestone kinds need /2.
+      // A /1 bundle holds 0.9.0 kinds only (what a 0.9.0 reader accepts); milestone kinds need /2, the 0.11.0 kinds /3.
       if (!kindsOfFormat(m!.format as BundleFormat).includes(kind)) return later('events', `seq ${String(ev.seq)}: ${kind} is not allowed in a ${m!.format} bundle`);
       if (!isObj(ev.payload) || ev.payload['audit_id'] !== m!.audit_id) return later('events', `seq ${String(ev.seq)}: audit_id is not ${m!.audit_id}`);
-      const p = parseAuditPayload(kind, ev.payload);
+      const p = parseAuditPayloadIn(m!.format as BundleFormat, kind, ev.payload);
       if (!p.ok) later('events', `seq ${String(ev.seq)} (${kind}): ${p.problem}`);
+      // The exporter writes a planned freeze as /3, where its rules apply: an older tag on one is a downgrade.
+      else if (kind === 'harness_frozen' && ev.payload['plan'] !== undefined && m!.format !== BUNDLE_FORMAT_V3) later('events', `seq ${String(ev.seq)}: a harness_frozen with a run plan needs a ${BUNDLE_FORMAT_V3} bundle, not ${m!.format}`);
       full.push({
         seq: ev.seq,
         event_id: String(ev.event_id),

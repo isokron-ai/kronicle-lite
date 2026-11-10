@@ -93,9 +93,12 @@ is `{sha256, size, media_type?, redacted?: true}`.
 | `gate_result` | `finding_id`, `gate`, `verdict` (upheld \| refuted \| inconclusive) | `report` (ref), `evidence[]` |
 | `fix_applied` | `finding_id`, `ref` (PR / commit / rule id) | `fingerprint_before` / `_after`, `diff` (ref), `evidence[]` |
 | `regression_result` | `fingerprint_before`, `fingerprint_after`, `verdict` (improved \| regressed \| unchanged), `deltas{name: number}` | `finding_id`, `report` (ref), `evidence[]` |
-| `harness_frozen` (0.10.0) | `harness_id`, `fingerprint` (sha256 of the harness manifest), `manifest` (ref) | `hypotheses` (ref), `planned_runs`, `title` |
-| `run_completed` (0.10.0) | `run_id`, `run_seq` (1-based, no gaps), `fingerprint` (the harness it ran under), `status` | `nonce` (freeze nonce), `capture` (complete \| interrupted), `interruption`, `result` (ref), `evidence[]` |
-| `report_issued` (0.10.0) | `report_id`, `report` (ref) | `run_count`, `title`, `evidence[]` |
+| `harness_frozen` (0.10.0) | `harness_id`, `fingerprint` (sha256 of the harness manifest), `manifest` (ref) | `hypotheses` (ref), `planned_runs`, `plan` (0.11.0: the planned run IDs, unique, at most 2000; required in `/3`), `plan_detail` (ref: command, criterion, write cap per run), `title` |
+| `run_completed` (0.10.0) | `run_id`, `run_seq` (1-based, no gaps), `fingerprint` (the harness it ran under), `status` | `nonce` (freeze nonce; required in `/3`), `capture` (complete \| interrupted), `interruption`, `result` (ref), `evidence[]` |
+| `report_issued` (0.10.0) | `report_id`, `report` (ref) | `run_count` (the `run_completed` events; required in `/3`), `title`, `evidence[]` |
+| `run_abandoned` (0.11.0) | `run_id` (a planned run), `reason` | `fingerprint`, `detail` (ref), `evidence[]` |
+| `reproduction_signed` (0.11.0) | `finding_id`, `signer` (allowed-signers principal), `reproduced_at`, `commands` (ref), `output` (ref), `signature` (ref: armored SSH signature) | `evidence[]` |
+| `audit_closed` (0.11.0) | `report_id`, `run_count`, `findings_digest` | — |
 
 The full JSON Schemas are served at `kronicle://schemas/audit`.
 
@@ -123,6 +126,38 @@ timestamps:
 A bundle holding a milestone kind is exported as
 `kronicle-lite-evidence-bundle/2`; 0.9.0's `verify-bundle` refuses it by format
 (use 0.10.0 or later). A bundle with only the six 0.9.0 kinds is still `/1`.
+
+**The audit profile (0.11.0).** A freeze with a `plan`, or any of
+`run_abandoned`, `reproduction_signed` and `audit_closed`, makes the bundle
+`kronicle-lite-evidence-bundle/3`, where `plan`, `run_completed.nonce` and
+`report_issued.run_count` are required. Record an audit in this order:
+
+1. `harness_frozen` with `plan` (the run IDs), then `checkpoint --push` and
+   `audit stamp` (two TSAs). `audit stamp` prints the **freeze nonce**:
+   `sha256(freeze receipt digest ‖ every token over it, in TSA-name order)`
+   (`freezeNonce` in `src/audit/profile.ts`). The tokens are signed by third
+   parties at their own time, so nobody, the auditor included, can know the
+   nonce before the freeze is stamped. (In `/2` the nonce was the receipt
+   digest alone, which the auditor's own anchor fixes.)
+2. One `run_completed` per planned run, with `nonce`; a planned run that will
+   not finish gets `run_abandoned` with a `reason` instead. Each planned run
+   ends exactly once; no other run ID is recorded. Anchor and stamp after the
+   last run, before the report.
+3. Findings and refuters as before. For every finding to be accepted, a human
+   reproduces it and signs `reproductionStatement(...)` (canonical JSON of
+   `{format: "kronicle-lite-reproduction/1", audit_id, finding_id, signer,
+   reproduced_at, commands, output}` with the two blob digests, plus a
+   newline) with their own key: `ssh-keygen -Y sign -f KEY -n
+   kronicle-lite-reproduction statement.json`. Record `reproduction_signed`
+   with the signature as a blob, and give `audit package` the reproducers'
+   keys with `--allowed-signers FILE` (ssh-keygen ALLOWED SIGNERS format;
+   Ed25519 keys, `ssh-ed25519` or `sk-ssh-ed25519@openssh.com`).
+4. `report_issued` with `run_count`, then `audit_closed` with the same
+   `report_id`, `run_count` and `findings_digest` (`findingsDigest`: sha256 of
+   the canonical `[{finding_id, status}]` sorted by id, the status each
+   finding ends with). Nothing is recorded after it. Anchor and stamp.
+
+Use one store per audit: the audit profile refuses a bundle with stubs.
 
 **The 0.9.0 convention.** Before these kinds, a harness freeze was recorded as
 `finding` with `class: "protocol_freeze"` and `fingerprint`, and runs as

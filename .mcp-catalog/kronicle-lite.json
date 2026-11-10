@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-09T09:53:10.959Z",
+  "capturedAt": "2026-11-10T18:14:41.188Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -456,7 +456,10 @@
                 "regression_result",
                 "harness_frozen",
                 "run_completed",
-                "report_issued"
+                "report_issued",
+                "run_abandoned",
+                "reproduction_signed",
+                "audit_closed"
               ],
               "type": "string"
             },
@@ -530,7 +533,10 @@
                       "regression_result",
                       "harness_frozen",
                       "run_completed",
-                      "report_issued"
+                      "report_issued",
+                      "run_abandoned",
+                      "reproduction_signed",
+                      "audit_closed"
                     ],
                     "type": "string"
                   },
@@ -1572,7 +1578,7 @@
   "server": {
     "name": "kronicle-lite",
     "title": "kronicle-lite",
-    "version": "0.10.2"
+    "version": "0.11.0"
   },
-  "sha256": "e637c91cb88459555de409fdd3b52b1055faef81f116d91c0ecb20e627a276fd"
+  "sha256": "ebd2f0092cb3a7a9e94dae9825384bf6110d464273bd5811e84a1e20c70ed4d6"
 }

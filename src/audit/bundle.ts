@@ -39,7 +39,7 @@ export interface BundleStub {
 export type BundleLine = ChainEvent | BundleStub;
 
 export interface BundleManifest {
-  /** /1 when every event is a 0.9.0 kind (0.9.0 readers verify it), /2 when a milestone kind is present. */
+  /** /1 when every event is a 0.9.0 kind (0.9.0 readers verify it), /2 when a milestone kind is present, /3 with a run plan or a 0.11.0 kind. */
   format: BundleFormat;
   audit_id: string;
   range: { from_seq: number; to_seq: number; leaf_count: number; first_prev_hash: string };
@@ -171,11 +171,13 @@ export function exportBundle(args: { chain: Chain; audit: AuditLog; signer: Sign
   const stubs: BundleManifest['stubs'] = [];
   const refs = new Map<string, { size: number; redacted: boolean; by: Set<string> }>();
   const kinds = new Set<AuditKind>();
+  let planned = false;
   for (const ev of args.chain.range(from, to)) {
     if (mine.has(ev.seq)) {
       lines.push(ev);
       const k = kindOfEventType(ev.event_type);
       if (k) kinds.add(k);
+      if (k === 'harness_frozen' && Array.isArray(ev.payload['plan'])) planned = true;
       events.push({ seq: ev.seq, event_id: ev.event_id, event_type: ev.event_type, this_hash: ev.this_hash });
       for (const { ref } of blobRefsOf(ev.payload)) {
         const r = refs.get(ref.sha256) ?? { size: ref.size, redacted: ref.redacted === true, by: new Set<string>() };
@@ -219,7 +221,7 @@ export function exportBundle(args: { chain: Chain; audit: AuditLog; signer: Sign
   }
   const eventsText = lines.map(canonicalLine).join('');
   const manifest: BundleManifest = signManifest({
-    format: formatForKinds(kinds),
+    format: formatForKinds(kinds, planned),
     audit_id: args.audit_id,
     range: { from_seq: from, to_seq: to, leaf_count: cp.leaf_count, first_prev_hash: lines[0]!.prev_hash },
     events_sha256: sha256Hex(eventsText),

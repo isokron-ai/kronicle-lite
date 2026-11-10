@@ -17,24 +17,37 @@ import { z } from 'zod';
 export const AUDIT_KINDS_V1 = ['catalog_snapshot', 'call_measured', 'finding', 'gate_result', 'fix_applied', 'regression_result'] as const;
 /** Audit milestones (0.10.0): a bundle holding any of these is written as format /2 (0.9.0 readers refuse it by format). */
 export const MILESTONE_KINDS = ['harness_frozen', 'run_completed', 'report_issued'] as const;
-export const AUDIT_KINDS = [...AUDIT_KINDS_V1, ...MILESTONE_KINDS] as const;
+/** Audit-profile kinds (0.11.0): a bundle holding any of these, or a planned freeze, is written as format /3. */
+export const V3_KINDS = ['run_abandoned', 'reproduction_signed', 'audit_closed'] as const;
+export const AUDIT_KINDS = [...AUDIT_KINDS_V1, ...MILESTONE_KINDS, ...V3_KINDS] as const;
 export type AuditKind = (typeof AUDIT_KINDS)[number];
 export const AUDIT_EVENT_PREFIX = 'audit.';
 /** Evidence bundle format tags (src/audit/bundle.ts, docs/EVIDENCE-BUNDLE.md). */
 export const BUNDLE_FORMAT_V1 = 'kronicle-lite-evidence-bundle/1';
 export const BUNDLE_FORMAT_V2 = 'kronicle-lite-evidence-bundle/2';
-export const BUNDLE_FORMATS = [BUNDLE_FORMAT_V1, BUNDLE_FORMAT_V2] as const;
+/** 0.11.0: the run plan is required on the freeze, runs carry the derived nonce, the report its run count (V3_REQUIRED). */
+export const BUNDLE_FORMAT_V3 = 'kronicle-lite-evidence-bundle/3';
+export const BUNDLE_FORMATS = [BUNDLE_FORMAT_V1, BUNDLE_FORMAT_V2, BUNDLE_FORMAT_V3] as const;
 export type BundleFormat = (typeof BUNDLE_FORMATS)[number];
 /** @deprecated the /1 tag; kept for 0.9.0 callers. */
 export const BUNDLE_FORMAT = BUNDLE_FORMAT_V1;
 /** The kinds a bundle of `format` may hold. */
 export function kindsOfFormat(format: BundleFormat): readonly AuditKind[] {
-  return format === BUNDLE_FORMAT_V1 ? AUDIT_KINDS_V1 : AUDIT_KINDS;
+  if (format === BUNDLE_FORMAT_V1) return AUDIT_KINDS_V1;
+  if (format === BUNDLE_FORMAT_V2) return [...AUDIT_KINDS_V1, ...MILESTONE_KINDS];
+  return AUDIT_KINDS;
 }
-/** The oldest format that can carry every kind in `kinds` (older readers keep working when they can). */
-export function formatForKinds(kinds: Iterable<AuditKind>): BundleFormat {
-  for (const k of kinds) if (!(AUDIT_KINDS_V1 as readonly string[]).includes(k)) return BUNDLE_FORMAT_V2;
-  return BUNDLE_FORMAT_V1;
+/**
+ * The oldest format that can carry every kind in `kinds` (older readers keep working when they can).
+ * `planned`: a harness_frozen carries a run plan, which makes the bundle /3 (its rules then apply).
+ */
+export function formatForKinds(kinds: Iterable<AuditKind>, planned = false): BundleFormat {
+  let f: BundleFormat = planned ? BUNDLE_FORMAT_V3 : BUNDLE_FORMAT_V1;
+  for (const k of kinds) {
+    if ((V3_KINDS as readonly string[]).includes(k)) return BUNDLE_FORMAT_V3;
+    if (f === BUNDLE_FORMAT_V1 && !(AUDIT_KINDS_V1 as readonly string[]).includes(k)) f = BUNDLE_FORMAT_V2;
+  }
+  return f;
 }
 export const auditEventType = (kind: AuditKind): string => `${AUDIT_EVENT_PREFIX}${kind}`;
 export function kindOfEventType(event_type: string): AuditKind | null {
@@ -50,6 +63,10 @@ const SHA256 = z.string().regex(/^[0-9a-f]{64}$/, 'lowercase hex sha256');
 const ID = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/, 'id: 1-128 of [A-Za-z0-9._:/-], starting alphanumeric');
 const SHORT = z.string().min(1).max(200);
 const COUNT = z.number().int().nonnegative();
+/** Most runs one freeze may plan. */
+export const MAX_PLANNED_RUNS = 2000;
+/** An allowed-signers principal (ssh-keygen -Y sign -I): no whitespace, quotes or commas. */
+const PRINCIPAL = z.string().regex(/^[A-Za-z0-9._@+-]{1,128}$/, 'principal: 1-128 of [A-Za-z0-9._@+-]');
 /** Token counts by tokenizer name (bytes, cl100k, o200k, a model id …). */
 const TOKENS = z.record(z.string().min(1).max(64), COUNT).refine((r) => Object.keys(r).length <= 16, 'at most 16 tokenizers');
 
@@ -136,6 +153,14 @@ export const PAYLOAD_SCHEMAS = {
     manifest: BlobRefSchema.describe('the frozen harness (a tar or its manifest)'),
     hypotheses: BlobRefSchema.optional().describe('pre-registered hypotheses / expected outcomes'),
     planned_runs: COUNT.optional().describe('number of runs declared at freeze time (completeness signal)'),
+    plan: z
+      .array(ID)
+      .min(1)
+      .max(MAX_PLANNED_RUNS)
+      .refine((p) => new Set(p).size === p.length, 'plan lists a run_id twice')
+      .optional()
+      .describe('0.11.0: the run IDs planned at freeze time; required in a /3 bundle. Every run_completed / run_abandoned names one of them, each exactly once'),
+    plan_detail: BlobRefSchema.optional().describe('0.11.0: the plan in full (per run: command, pass criterion, write cap)'),
     title: SHORT.optional(),
   }),
   run_completed: z.strictObject({
@@ -146,7 +171,7 @@ export const PAYLOAD_SCHEMAS = {
     status: z.string().min(1).max(32),
     capture: z.enum(['complete', 'interrupted']).optional().describe('whether evidence capture ran uninterrupted (default complete)'),
     interruption: SHORT.optional().describe('what interrupted capture, when capture is interrupted'),
-    nonce: SHA256.optional().describe('freeze nonce: sha256 of the harness-freeze anchor receipt, known only after the freeze'),
+    nonce: SHA256.optional().describe('freeze nonce, known only after the freeze: /3 sha256(freeze receipt digest ‖ its TSA tokens) (freezeNonce), required; /2 the freeze receipt digest'),
     result: BlobRefSchema.optional(),
     evidence: EVIDENCE.optional(),
   }),
@@ -154,9 +179,33 @@ export const PAYLOAD_SCHEMAS = {
     ...Common,
     report_id: ID,
     report: BlobRefSchema,
-    run_count: COUNT.optional().describe('number of runs the report covers (completeness signal)'),
+    run_count: COUNT.optional().describe('number of runs the report covers: the run_completed events (completeness signal); required in a /3 bundle'),
     title: SHORT.optional(),
     evidence: EVIDENCE.optional(),
+  }),
+  run_abandoned: z.strictObject({
+    ...Common,
+    run_id: ID.describe('the planned run that will not complete'),
+    reason: SHORT.describe('why the run was abandoned (harness refusal, auth failure, budget stop …)'),
+    fingerprint: SHA256.optional().describe('harness fingerprint, when the run started'),
+    detail: BlobRefSchema.optional(),
+    evidence: EVIDENCE.optional(),
+  }),
+  reproduction_signed: z.strictObject({
+    ...Common,
+    finding_id: ID,
+    signer: PRINCIPAL.describe('the reproducer, as named in the allowed-signers file'),
+    reproduced_at: z.iso.datetime().describe('when the human reproduced the finding'),
+    commands: BlobRefSchema.describe('the commands run'),
+    output: BlobRefSchema.describe('what they printed'),
+    signature: BlobRefSchema.describe('armored SSH signature (ssh-keygen -Y sign -n kronicle-lite-reproduction) over reproductionStatement(...)'),
+    evidence: EVIDENCE.optional(),
+  }),
+  audit_closed: z.strictObject({
+    ...Common,
+    report_id: ID.describe('the report_issued this closes'),
+    run_count: COUNT.describe('run_completed events in the audit'),
+    findings_digest: SHA256.describe('findingsDigest: sha256 of the canonical [{finding_id, status}] the audit ends with'),
   }),
   regression_result: z.strictObject({
     ...Common,
@@ -171,6 +220,21 @@ export const PAYLOAD_SCHEMAS = {
 } as const satisfies Record<AuditKind, z.ZodType>;
 
 export type AuditPayload<K extends AuditKind = AuditKind> = z.infer<(typeof PAYLOAD_SCHEMAS)[K]>;
+
+/** Fields optional in the payload schemas that a /3 bundle requires (the store still records 0.10.0 events). */
+export const V3_REQUIRED: Partial<Record<AuditKind, readonly string[]>> = {
+  harness_frozen: ['plan'],
+  run_completed: ['nonce'],
+  report_issued: ['run_count'],
+};
+
+/** parseAuditPayload, plus the fields the bundle format requires. */
+export function parseAuditPayloadIn(format: BundleFormat, kind: AuditKind, payload: unknown): { ok: true; value: AuditPayload } | { ok: false; problem: string } {
+  const p = parseAuditPayload(kind, payload);
+  if (!p.ok || format !== BUNDLE_FORMAT_V3) return p;
+  const missing = (V3_REQUIRED[kind] ?? []).filter((f) => (p.value as Record<string, unknown>)[f] === undefined);
+  return missing.length ? { ok: false, problem: `${missing.join(', ')}: required in a ${BUNDLE_FORMAT_V3} bundle` } : p;
+}
 
 /** One event to record. `event_key` names the LOGICAL event within the audit: a retry with the same key is the same event. */
 export const AuditEventInputSchema = z.strictObject({
@@ -191,7 +255,7 @@ export function parseAuditPayload(kind: AuditKind, payload: unknown): { ok: true
 /** Every blob ref in a payload, with the field it sits in. */
 export function blobRefsOf(payload: Record<string, unknown>): { field: string; ref: BlobRef }[] {
   const out: { field: string; ref: BlobRef }[] = [];
-  for (const field of ['snapshot', 'request', 'response', 'detail', 'report', 'diff', 'manifest', 'hypotheses', 'result'] as const) {
+  for (const field of ['snapshot', 'request', 'response', 'detail', 'report', 'diff', 'manifest', 'hypotheses', 'result', 'plan_detail', 'commands', 'output', 'signature'] as const) {
     const r = BlobRefSchema.safeParse(payload[field]);
     if (r.success) out.push({ field, ref: r.data });
   }

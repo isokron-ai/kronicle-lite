@@ -9,12 +9,17 @@
  *                  later stamp carries a later time.
  *   audit package  the client package: the evidence bundle, every anchor whose
  *                  range lies inside the bundle's, the tokens for those anchors,
- *                  the auditor key, the anchor service keys, the TSA roots and a
- *                  README with the verification commands; then it runs
- *                  verify-audit on what it wrote.
+ *                  the auditor key, the anchor service keys, the TSA roots, the
+ *                  reproducers' allowed signers and a README with the
+ *                  verification commands; SHA256SUMS, its signature and (0.11.0)
+ *                  RFC 3161 tokens over it; then it runs verify-audit on what it
+ *                  wrote (the audit profile for a /3 bundle, legacy otherwise).
+ *
+ * A stamp that fails is left as `<anchor_id>.<tsa>.pending` beside the tokens;
+ * the package carries it, and the audit profile fails while one is there.
  */
 
-import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readdirSync, writeSync } from 'node:fs';
+import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readdirSync, rmSync, writeFileSync, writeSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
 import { parseAnchorReceipt } from '../anchor/receipt.js';
@@ -26,11 +31,29 @@ import type { KronicleLite } from '../store.js';
 import { exportBundle } from './bundle.js';
 import { AuditError } from './log.js';
 import { checkTimestampReply, inspectTimestamp, MAX_TSR_BYTES, timestampRequest, verifyTimestamp } from './rfc3161.js';
-import { kindOfEventType } from './schemas.js';
+import { freezeNonce } from './profile.js';
+import { BUNDLE_FORMAT_V3, kindOfEventType } from './schemas.js';
+import { parseAllowedSigners } from './sshsig.js';
 import { SHIPPED_TSA_ROOTS } from './tsa-roots.js';
 import { VERSION } from '../version.js';
 import { readBundleFile } from './verify-bundle.js';
-import { CLAIMS, CLAIMS_FORMAT, listPackFiles, PACK_NAME, sha256sums, verifyAudit, type Claim, type ClaimsFile, type TsaRoot, type VerifyAuditOptions, type VerifyAuditResult } from './verify-audit.js';
+import {
+  ALLOWED_SIGNERS_FILE,
+  CLAIMS,
+  CLAIMS_FORMAT,
+  LEGACY_CLAIMS,
+  listPackFiles,
+  PACK_NAME,
+  PENDING_SUFFIX,
+  sha256sums,
+  verifyAudit,
+  type Claim,
+  type ClaimsFile,
+  type Profile,
+  type TsaRoot,
+  type VerifyAuditOptions,
+  type VerifyAuditResult,
+} from './verify-audit.js';
 
 export const DEFAULT_TSAS: readonly { name: string; url: string }[] = [
   { name: 'sectigo', url: 'http://timestamp.sectigo.com' },
@@ -93,6 +116,29 @@ export interface StampResult {
   anchor_id: string;
   receipt_sha256: string;
   results: { tsa: string; url: string; ok: boolean; file: string | null; gen_time: string | null; problem: string | null; existing: boolean }[];
+  /**
+   * The /3 freeze nonce over this receipt and every token for it now in out_dir (freezeNonce), when
+   * there are two or more: what the runs after a freeze record as `nonce`. Stamp every TSA first: a
+   * token added later changes it.
+   */
+  nonce: string | null;
+  /** `<anchor_id>.<tsa>.pending` markers left in out_dir for the TSAs that failed. */
+  pending: string[];
+}
+
+/** Ask one TSA for a token over `message`; the reply is checked against the request. */
+async function fetchStamp(message: Buffer | string, t: { name: string; url: string }, doFetch: typeof fetch, timeoutMs: number): Promise<{ body: Buffer; gen_time: string }> {
+  const req = timestampRequest(message);
+  const res = await doFetch(t.url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/timestamp-query', accept: 'application/timestamp-reply' },
+    body: new Uint8Array(req.der),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const body = Buffer.from(await res.arrayBuffer());
+  const info = checkTimestampReply(body, req);
+  return { body, gen_time: info.gen_time };
 }
 
 /** RFC 3161 tokens over sha256(receipt) for one anchor (the latest by default), written to `out_dir`. */
@@ -108,9 +154,10 @@ export async function stampAnchor(
   const digest = sha256Hex(receipt);
   mkdirSync(opts.out_dir, { recursive: true, mode: 0o700 });
   const doFetch = opts.fetch ?? fetch;
-  const out: StampResult = { anchor_id: row.anchor_id, receipt_sha256: digest, results: [] };
+  const out: StampResult = { anchor_id: row.anchor_id, receipt_sha256: digest, results: [], nonce: null, pending: [] };
   for (const t of opts.tsas ?? DEFAULT_TSAS) {
     const file = join(opts.out_dir, `${row.anchor_id}.${t.name}.tsr`);
+    const marker = join(opts.out_dir, `${row.anchor_id}.${t.name}${PENDING_SUFFIX}`);
     if (existsSync(file)) {
       // Keep the first stamp: an earlier time is the stronger statement.
       try {
@@ -122,21 +169,39 @@ export async function stampAnchor(
       }
       continue;
     }
-    const req = timestampRequest(receipt);
     try {
-      const res = await doFetch(t.url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/timestamp-query', accept: 'application/timestamp-reply' },
-        body: new Uint8Array(req.der),
-        signal: AbortSignal.timeout(opts.timeoutMs ?? 20_000),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const body = Buffer.from(await res.arrayBuffer());
-      const info = checkTimestampReply(body, req);
-      writeNew(file, body);
-      out.results.push({ tsa: t.name, url: t.url, ok: true, file, gen_time: info.gen_time, problem: null, existing: false });
+      const got = await fetchStamp(receipt, t, doFetch, opts.timeoutMs ?? 20_000);
+      writeNew(file, got.body);
+      rmSync(marker, { force: true });
+      out.results.push({ tsa: t.name, url: t.url, ok: true, file, gen_time: got.gen_time, problem: null, existing: false });
     } catch (err) {
-      out.results.push({ tsa: t.name, url: t.url, ok: false, file: null, gen_time: null, problem: err instanceof Error ? err.message : String(err), existing: false });
+      const problem = err instanceof Error ? err.message : String(err);
+      // Leave the failure in the directory: the package carries it and the audit profile fails until it is stamped.
+      writeFileSync(marker, `${t.url}: ${problem}\n`, { mode: 0o644 });
+      out.pending.push(marker);
+      out.results.push({ tsa: t.name, url: t.url, ok: false, file: null, gen_time: null, problem, existing: false });
+    }
+  }
+  const tokens = readdirSync(opts.out_dir)
+    .map((f) => f.match(/^(.+)\.([a-z0-9][a-z0-9-]{0,31})\.tsr$/))
+    .filter((m): m is RegExpMatchArray => m !== null && (m[1] === row.anchor_id || m[1] === digest))
+    .map((m) => ({ tsa: m[2]!, bytes: readBundleFile(join(opts.out_dir, m[0]), MAX_TSR_BYTES) }));
+  if (tokens.length >= 2) out.nonce = freezeNonce(digest, tokens);
+  return out;
+}
+
+/** RFC 3161 tokens over a pack's SHA256SUMS, written as SHA256SUMS.<tsa>.tsr (after SHA256SUMS and its signature). */
+export async function stampSums(packDir: string, opts: { tsas?: readonly { name: string; url: string }[]; fetch?: typeof fetch; timeoutMs?: number } = {}): Promise<{ tsa: string; ok: boolean; file: string | null; gen_time: string | null; problem: string | null }[]> {
+  const sums = readBundleFile(join(packDir, 'SHA256SUMS'), 16 * 1024 * 1024);
+  const out: { tsa: string; ok: boolean; file: string | null; gen_time: string | null; problem: string | null }[] = [];
+  for (const t of opts.tsas ?? DEFAULT_TSAS) {
+    const file = join(packDir, `SHA256SUMS.${t.name}.tsr`);
+    try {
+      const got = await fetchStamp(sums, t, opts.fetch ?? fetch, opts.timeoutMs ?? 20_000);
+      writeNew(file, got.body);
+      out.push({ tsa: t.name, ok: true, file, gen_time: got.gen_time, problem: null });
+    } catch (err) {
+      out.push({ tsa: t.name, ok: false, file: null, gen_time: null, problem: err instanceof Error ? err.message : String(err) });
     }
   }
   return out;
@@ -172,6 +237,10 @@ export interface PackageResult {
   skipped: string[];
   /** What claims.json declares, and why each claim is or is not declared. */
   claims: { claim: Claim; declared: boolean; why: string }[];
+  /** The profile the pack was checked under: audit for a /3 bundle, legacy otherwise. */
+  profile: Profile;
+  /** RFC 3161 tokens over SHA256SUMS (empty when not asked for). */
+  sums_stamps: { tsa: string; ok: boolean; file: string | null; gen_time: string | null; problem: string | null }[];
   /** verify-audit run on the written pack. */
   check: VerifyAuditResult;
 }
@@ -201,6 +270,10 @@ export async function buildAuditPackage(
     anchor_keys?: unknown;
     /** Genesis pin for the key list, `<sha256>@<valid_from>` (default: the compiled production pin). */
     genesis?: string;
+    /** The reproducers' public keys (allowed-signers text), written as allowed_signers. */
+    allowed_signers?: string;
+    /** Stamp SHA256SUMS with these TSAs (the audit profile needs two). Absent: no tokens over SHA256SUMS. */
+    stamp_sums?: { tsas?: readonly { name: string; url: string }[]; fetch?: typeof fetch; timeoutMs?: number };
     fetch?: typeof fetch;
     now?: Date;
   },
@@ -251,7 +324,7 @@ export async function buildAuditPackage(
     picked.push(a);
   }
 
-  const tokenFiles = opts.timestamps_dir ? readdirSync(opts.timestamps_dir).filter((f) => f.endsWith('.tsr')) : [];
+  const tokenFiles = opts.timestamps_dir ? readdirSync(opts.timestamps_dir).filter((f) => f.endsWith('.tsr') || f.endsWith(PENDING_SUFFIX)) : [];
   const anchors: PackageAnchor[] = [];
   const width = Math.max(2, String(picked.length).length);
   for (const [i, a] of picked.entries()) {
@@ -260,6 +333,12 @@ export async function buildAuditPackage(
     writeNew(join(anchorsDir, `${base}.receipt.json`), a.receipt_json);
     const pa: PackageAnchor = { file: `${base}.receipt.json`, anchor_id: a.anchor_id, from_seq: a.from_seq, to_seq: a.to_seq, root: a.root, received_at: a.received_at, receipt_sha256: digest, timestamps: [] };
     for (const f of tokenFiles) {
+      const pend = f.match(/^(.+)\.([a-z0-9][a-z0-9-]{0,31})\.pending$/);
+      if (pend && (pend[1] === a.anchor_id || pend[1] === digest)) {
+        // A stamp that failed stays visible in the pack (verify-audit fails while it is there).
+        writeNew(join(anchorsDir, `${base}.${pend[2]}${PENDING_SUFFIX}`), readBundleFile(join(opts.timestamps_dir!, f), 64 * 1024, { followLinks: true }));
+        continue;
+      }
       const mt = f.match(/^(.+)\.([a-z0-9][a-z0-9-]{0,31})\.tsr$/);
       if (!mt || (mt[1] !== a.anchor_id && mt[1] !== digest)) continue;
       const bytes = readBundleFile(join(opts.timestamps_dir!, f), MAX_TSR_BYTES, { followLinks: true });
@@ -301,6 +380,14 @@ export async function buildAuditPackage(
     }
   }
   writeNew(join(anchorsDir, 'index.json'), JSON.stringify(anchors, null, 1) + '\n');
+  if (opts.allowed_signers !== undefined) {
+    const as = parseAllowedSigners(opts.allowed_signers);
+    if (as.entries.length === 0) throw new AuditError('invalid_audit_event', `--allowed-signers lists no usable key${as.problems.length ? ` (${as.problems[0]})` : ''}`);
+    writeNew(join(out, ALLOWED_SIGNERS_FILE), opts.allowed_signers.endsWith('\n') ? opts.allowed_signers : `${opts.allowed_signers}\n`);
+  }
+  const v3 = m.format === BUNDLE_FORMAT_V3;
+  const profile: Profile = v3 ? 'audit' : 'legacy';
+  const sumsTsas = opts.stamp_sums ? (opts.stamp_sums.tsas ?? DEFAULT_TSAS) : [];
 
   // Which claims the store's contents support: check all of them once, declare what holds.
   const trustOpts: VerifyAuditOptions = {
@@ -311,7 +398,7 @@ export async function buildAuditPackage(
     // The packager is an anchor client too: its data dir keeps the key list it has seen (an in-memory store opts out, and says so).
     ...(store.dataDir !== null ? { seen_dir: store.dataDir } : { rollback: 'off' as const }),
   };
-  const probe = verifyAudit(out, { ...trustOpts, claims_override: CLAIMS });
+  const probe = verifyAudit(out, { ...trustOpts, profile, claims_override: v3 ? CLAIMS : LEGACY_CLAIMS });
   // Files inside the pack never carry trust values (the auditor fingerprint, a genesis pin): a forger
   // would write their own. They name where the reader gets them; a self-hosted service needs its pin.
   const genesisArg = opts.genesis !== undefined ? ' --genesis <the anchor service genesis pin, sha256@valid_from, from its operator>' : '';
@@ -331,6 +418,18 @@ export async function buildAuditPackage(
       declared: runs.seqs.length > 0 && runs.seqs.every((s) => Number.isInteger(s)),
       why: runs.seqs.length > 0 ? `${runs.count} run(s) with run_seq` : 'no run_completed events with run_seq',
     },
+    // The 0.11.0 claims: a /3 bundle only (an older pack is verified under --profile legacy).
+    ...(v3
+      ? [
+          { claim: 'plan_complete' as const, declared: probe.plan.status === 'pass', why: probe.plan.status === 'pass' ? `${probe.plan.planned.length} planned run(s), each ended once` : (probe.plan.problem ?? 'not shown') },
+          {
+            claim: 'reproductions_signed' as const,
+            declared: probe.claims.find((c) => c.claim === 'reproductions_signed')?.status === 'pass',
+            why: probe.claims.find((c) => c.claim === 'reproductions_signed')?.evidence || 'not shown',
+          },
+          { claim: 'closed' as const, declared: probe.closed.status === 'pass', why: probe.closed.status === 'pass' ? `closed at seq ${probe.closed.seq}` : (probe.closed.problem ?? 'not shown') },
+        ]
+      : [{ claim: 'plan_complete' as const, declared: false, why: `a ${m.format} bundle (no run plan, sign-offs or close; ${BUNDLE_FORMAT_V3} needed)` }]),
   ];
   const claims: ClaimsFile = {
     format: CLAIMS_FORMAT,
@@ -370,21 +469,46 @@ export async function buildAuditPackage(
         : ['Anchors               none (this pack has no anchor receipts)']),
       `Claims                ${claims.claims.join(', ')}`,
       '',
-      `Verify:  npx -y kronicle-lite@${VERSION} verify-audit <this directory> --key-fingerprint <auditor key fingerprint from your statement of work>${genesisArg}`,
+      `Verify:  npx -y kronicle-lite@${VERSION} verify-audit <this directory> --key-fingerprint <auditor key fingerprint from your statement of work>${genesisArg}${profile === 'legacy' ? ' --profile legacy' : ''}`,
       '         (this file does not carry the fingerprint: take it from the statement of work, never from the pack)',
       'Raw commands without kronicle-lite: VERIFY.md',
       '',
     ].join('\n'),
   );
-  writeNew(join(out, 'VERIFY.md'), verifyMd({ audit_id: opts.audit_id, tagline, keyLine, manifestSha: exp.manifest_sha256, rootLabel, root: m.root.root, lastAnchored: last && !finalAnchored ? last : null, anchors, rootFor, claims: claims.claims, genesisArg }));
+  // The root file each TSA's tokens verify under (by label), for the SHA256SUMS commands.
+  const rootOfTsa = new Map<string, string>();
+  for (const a of anchors) for (const t of a.timestamps) if (!rootOfTsa.has(t.tsa)) rootOfTsa.set(t.tsa, rootFor.get(t.file) ?? `${t.tsa}.pem`);
+  const freezeAnchor = v3 ? anchors.find((a) => a.file.includes('-harness-frozen.')) : undefined;
+  writeNew(
+    join(out, 'VERIFY.md'),
+    verifyMd({
+      audit_id: opts.audit_id,
+      tagline,
+      keyLine,
+      manifestSha: exp.manifest_sha256,
+      rootLabel,
+      root: m.root.root,
+      lastAnchored: last && !finalAnchored ? last : null,
+      anchors,
+      rootFor,
+      claims: claims.claims,
+      genesisArg,
+      profile,
+      sumsTsas: sumsTsas.map((t) => ({ tsa: t.name, root: rootOfTsa.get(t.name) ?? `${t.name}.pem` })),
+      freezeAnchor: freezeAnchor ?? null,
+      signers: opts.allowed_signers !== undefined,
+    }),
+  );
 
   // SHA256SUMS over every file, and its raw Ed25519 signature by the auditor key (openssl pkeyutl checks it).
   const { files } = listPackFiles(out);
   const sums = sha256sums(out, files);
   writeNew(join(out, 'SHA256SUMS'), sums);
   writeNew(join(out, 'SHA256SUMS.sig'), Buffer.from(signer.sign(Buffer.from(sums, 'utf8')), 'base64'));
+  // Then RFC 3161 over SHA256SUMS: the pack as a whole existed no later than these times.
+  const sumsStamps = opts.stamp_sums ? await stampSums(out, { tsas: sumsTsas, ...(opts.stamp_sums.fetch ? { fetch: opts.stamp_sums.fetch } : opts.fetch ? { fetch: opts.fetch } : {}), ...(opts.stamp_sums.timeoutMs ? { timeoutMs: opts.stamp_sums.timeoutMs } : {}) }) : [];
 
-  const check = verifyAudit(out, trustOpts);
+  const check = verifyAudit(out, { ...trustOpts, profile });
   return {
     dir: out,
     audit_id: opts.audit_id,
@@ -400,6 +524,8 @@ export async function buildAuditPackage(
     anchors,
     skipped,
     claims: decisions,
+    profile,
+    sums_stamps: sumsStamps,
     check,
   };
 }
@@ -427,7 +553,23 @@ export function packTsaRootFiles(custom: readonly TsaRoot[] = []): { file: strin
 
 const epoch = (iso: string) => Math.floor(Date.parse(iso) / 1000);
 
-function verifyMd(v: { audit_id: string; tagline: string; keyLine: string; manifestSha: string; rootLabel: string; root: string; lastAnchored: PackageAnchor | null; anchors: PackageAnchor[]; rootFor: Map<string, string>; claims: readonly Claim[]; genesisArg: string }): string {
+function verifyMd(v: {
+  audit_id: string;
+  tagline: string;
+  keyLine: string;
+  manifestSha: string;
+  rootLabel: string;
+  root: string;
+  lastAnchored: PackageAnchor | null;
+  anchors: PackageAnchor[];
+  rootFor: Map<string, string>;
+  claims: readonly Claim[];
+  genesisArg: string;
+  profile: Profile;
+  sumsTsas: { tsa: string; root: string }[];
+  freezeAnchor: PackageAnchor | null;
+  signers: boolean;
+}): string {
   const a0 = v.anchors[0];
   const stamped = v.anchors.filter((a) => a.timestamps.length > 0);
   let n = 0;
@@ -449,7 +591,51 @@ function verifyMd(v: { audit_id: string; tagline: string; keyLine: string; manif
     '`bundle/manifest.json` also lists the SHA-256 of `events.jsonl` (`events_sha256`) and of every',
     'artifact in `bundle/blobs/` (each file is named by its own SHA-256).',
     '',
+    ...(v.sumsTsas.length
+      ? [
+          'SHA256SUMS itself is timestamped (it is not listed in itself, nor are its tokens):',
+          '',
+          '```sh',
+          ...v.sumsTsas.map((t) => `openssl ts -verify -data SHA256SUMS -in SHA256SUMS.${t.tsa}.tsr -CAfile tsa-roots/${t.root} -partial_chain`),
+          '```',
+          '',
+        ]
+      : []),
   ];
+  const nonceSection = v.freezeAnchor && v.freezeAnchor.timestamps.length >= 2
+    ? [
+        h3('The freeze nonce every run carries'),
+        '',
+        'The nonce is SHA-256 over the freeze receipt digest (32 bytes) followed by every timestamp token',
+        'over that receipt, in byte order of the TSA name. The authorities sign the tokens at their own',
+        'time, so nobody could know the nonce before the freeze was stamped. Each `run_completed` in',
+        '`bundle/events.jsonl` must record it as `nonce`.',
+        '',
+        '```sh',
+        `D=$(shasum -a 256 anchors/${v.freezeAnchor.file} | cut -c1-64)`,
+        `{ printf %s "$D" | xxd -r -p; LC_ALL=C cat ${v.freezeAnchor.timestamps.map((t) => `anchors/${t.file}`).join(' ')}; } | shasum -a 256`,
+        `jq -r 'select(.event_type == "audit.run_completed") | .payload.nonce' bundle/events.jsonl | sort -u`,
+        '```',
+        '',
+      ]
+    : [];
+  const signersSection = v.signers
+    ? [
+        h3('Human sign-offs'),
+        '',
+        'Each `reproduction_signed` event carries an SSH signature (`ssh-keygen -Y sign -n kronicle-lite-reproduction`)',
+        'over the statement `verify-audit` rebuilds from the event; `allowed_signers` lists the reproducers\' keys.',
+        'Compare those keys with the ones the reproducers gave you, then check one sign-off (the first here):',
+        '',
+        '```sh',
+        `P=$(jq -c 'select(.event_type == "audit.reproduction_signed") | .payload' bundle/events.jsonl | head -1)`,
+        `{ echo "$P" | jq -cjS '{format: "kronicle-lite-reproduction/1", audit_id, finding_id, signer, reproduced_at, commands: .commands.sha256, output: .output.sha256}'; echo; } > statement.json`,
+        'cp "bundle/blobs/$(echo "$P" | jq -r .signature.sha256)" statement.sig',
+        'ssh-keygen -Y verify -f allowed_signers -I "$(echo "$P" | jq -r .signer)" -n kronicle-lite-reproduction -s statement.sig < statement.json',
+        '```',
+        '',
+      ]
+    : [];
   const tokenSection = stamped.length
     ? [
         h3('Independent time: each RFC 3161 token'),
@@ -524,13 +710,22 @@ function verifyMd(v: { audit_id: string; tagline: string; keyLine: string; manif
     '## One command',
     '',
     '```sh',
-    `npx -y kronicle-lite@${VERSION} verify-audit . --key-fingerprint <the auditor key fingerprint from your statement of work>${v.genesisArg}`,
+    `npx -y kronicle-lite@${VERSION} verify-audit . --key-fingerprint <the auditor key fingerprint from your statement of work>${v.genesisArg}${v.profile === 'legacy' ? ' --profile legacy' : ''}`,
     '```',
     '',
     'It pins the auditor key by the fingerprint you give it, verifies SHA256SUMS before it reads',
-    '`claims.json`, always checks integrity and chain, then the claims in `claims.json`, and prints',
-    'PASS or FAIL for each with its evidence, then the values to compare with the completion letter',
-    'you were sent. Exit 0 means every checked claim passed.',
+    ...(v.profile === 'audit'
+      ? [
+          '`claims.json`, checks every claim of the audit profile (whatever `claims.json` says), and prints',
+          'PASS or FAIL for each with its evidence, then the values to compare with the completion letter',
+          'you were sent. Exit 0 (VERIFIED) means every claim was checked and passed.',
+        ]
+      : [
+          '`claims.json`, always checks integrity and chain, then the claims in `claims.json`, and prints',
+          'PASS or FAIL for each with its evidence, then the values to compare with the completion letter',
+          'you were sent. This pack was made without the 0.11.0 audit profile (no run plan, sign-offs or',
+          'close): verify it with `--profile legacy`; the best result is PARTIAL (exit 2).',
+        ]),
     '',
     '## Without kronicle-lite',
     '',
@@ -539,7 +734,9 @@ function verifyMd(v: { audit_id: string; tagline: string; keyLine: string; manif
     ...filesSection,
     ...absent,
     ...tokenSection,
+    ...nonceSection,
     ...receiptSection,
+    ...signersSection,
     ...(stamped.length
       ? [
           '## Re-verifying in later years',
@@ -581,11 +778,14 @@ export function renderPackage(r: PackageResult): string {
   for (const d of r.claims) L.push(`  ${(d.declared ? 'declared' : 'not declared').padEnd(12)}  ${d.claim.padEnd(26)} ${d.why}`);
   const fin = r.check.final;
   if (fin) L.push('', `timestamped    ${fin.tsa_times.length ? fin.tsa_times.map((t) => `${t.gen_time} (${t.tsa})`).join(', ') : `${fin.service_time} (anchor service)`}`);
+  for (const t of r.sums_stamps) L.push(`SHA256SUMS     RFC 3161 ${t.tsa.padEnd(10)} ${t.ok ? t.gen_time : `FAIL ${t.problem}`}`);
   const bad = r.check.checks.filter((c) => c.status === 'fail');
   L.push('');
-  if (r.check.ok) L.push(`verify-audit   PASS  ${r.check.claims.filter((c) => c.status === 'pass').map((c) => c.claim).join(', ')}`);
+  const passed = r.check.claims.filter((c) => c.status === 'pass').map((c) => c.claim).join(', ');
+  if (r.check.verdict === 'verified') L.push(`verify-audit   VERIFIED (${r.profile} profile)  ${passed}`);
+  else if (r.check.verdict === 'partial') L.push(`verify-audit   PARTIAL (${r.profile} profile: an older bundle format; verify with --profile legacy)  ${passed}`);
   else {
-    L.push(`verify-audit   FAIL (${r.check.failed} failed check(s))`);
+    L.push(`verify-audit   FAIL (${r.profile} profile, ${r.check.failed} failed check(s))`);
     for (const c of bad) L.push(`  FAIL  ${c.subject ? `${c.subject} ` : ''}${c.check}: ${c.evidence}`);
   }
   return L.join('\n') + '\n';

@@ -14,6 +14,14 @@
  *   PACK/tsa-roots/*.pem                   the pinned TSA CAs, for the openssl route; never a trust root here
  *   PACK/COMPLETION.txt, VERIFY.md         values for the report, raw verification commands
  *
+ * Profiles (0.11.0):
+ *   audit    (default) every claim is checked, whatever claims.json says (it may add claims, never
+ *            remove them); the bundle must be format /3 and hold this audit only (no stubs); anchors
+ *            must close the freeze, the last run and the report, each stamped by two TSA CAs; the
+ *            SHA256SUMS file is stamped too; no stamp may be pending. Exit 0 = VERIFIED.
+ *   legacy   the 0.10.0 rules (claims.json picks the claims) for packs made before 0.11.0. The best
+ *            result is PARTIAL (exit 2): the checks that ran passed, the audit profile was not met.
+ *
  * Order (fail closed at every step):
  *   1. the auditor key is pinned out of band (--key-fingerprint from the report / SOW, or --key FILE
  *      outside the pack); an unpinned key is a FAIL;
@@ -47,6 +55,13 @@
  *   run_sequence                run_completed.run_seq is integers 1..N with no gap or repeat, N agrees with
  *                               every declared count, and the interruptions claims.json lists are the runs
  *                               whose capture was interrupted
+ *   plan_complete               (/3) one freeze with a plan of run IDs; every run_completed / run_abandoned
+ *                               names a planned run, each planned run ends exactly once (abandoned with a
+ *                               reason), planned_runs and the report's run_count agree
+ *   reproductions_signed        every accepted finding has a human sign-off (reproduction_signed) whose SSH
+ *                               signature verifies under an allowed-signers entry that is not the auditor key
+ *   closed                      one audit_closed, the bundle's last event, after the report it names, with the
+ *                               run count and the digest of every finding's final status
  *
  * Hostile input yields failed checks, never a throw.
  */
@@ -57,7 +72,7 @@ import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 
 import { z } from 'zod';
 
-import { verifyEd25519Strict } from '../anchor/ed25519-strict.js';
+import { rawEd25519PublicKey, verifyEd25519Strict } from '../anchor/ed25519-strict.js';
 import { checkKeyChain, checkServiceKey, formatGenesisPin, KEY_TIME_SKEW_MS, keyListOf, keyListRegression, parseGenesisPin, PRODUCTION_GENESIS, type GenesisPin, type ServiceKeyEntry } from '../anchor/keychain.js';
 import { parseAnchorReceipt, verifyAnchorReceiptSignature, type AnchorReceipt } from '../anchor/receipt.js';
 import { isJsonObject } from '../anchor/wire.js';
@@ -66,16 +81,30 @@ import { merkleRootHex } from '../chain/merkle.js';
 import { canonicalize } from '../crypto/canonical.js';
 import { sha256Hex } from '../crypto/hash.js';
 import { chainIdFromPublicKeyPem, keyIdFromPublicKey } from '../crypto/keys.js';
+import { finalFindingStatuses, findingsDigest, freezeNonce, REPRODUCTION_NAMESPACE, reproductionStatement } from './profile.js';
 import { MAX_TSR_BYTES, verifyTimestamp } from './rfc3161.js';
-import { kindOfEventType } from './schemas.js';
+import { BUNDLE_FORMAT_V3, kindOfEventType } from './schemas.js';
+import { MAX_SSHSIG_BYTES, verifySshSignature } from './sshsig.js';
 import { SHIPPED_TSA_EXTRAS, SHIPPED_TSA_ROOTS } from './tsa-roots.js';
 import { DEFAULT_MAX_BUNDLE_BYTES, hashRegularFile, MAX_BUNDLE_BLOB_BYTES, MAX_MANIFEST_BYTES, readBundleFile, verifyBundle } from './verify-bundle.js';
 
-export const VERIFY_AUDIT_FORMAT = 'kronicle-lite-verify-audit/1';
+export const VERIFY_AUDIT_FORMAT = 'kronicle-lite-verify-audit/2';
 export const PACK_NAME = 'IsoKron Evidence Pack';
 export const CLAIMS_FORMAT = 'isokron-evidence-pack-claims/1';
-export const CLAIMS = ['integrity', 'chain', 'receipts', 'independent_timestamps', 'harness_frozen_before_runs', 'run_sequence'] as const;
+export const CLAIMS = ['integrity', 'chain', 'receipts', 'independent_timestamps', 'harness_frozen_before_runs', 'run_sequence', 'plan_complete', 'reproductions_signed', 'closed'] as const;
 export type Claim = (typeof CLAIMS)[number];
+/** The 0.10.0 claims (what a legacy pack can declare). */
+export const LEGACY_CLAIMS: readonly Claim[] = ['integrity', 'chain', 'receipts', 'independent_timestamps', 'harness_frozen_before_runs', 'run_sequence'];
+export const PROFILES = ['audit', 'legacy'] as const;
+export type Profile = (typeof PROFILES)[number];
+/** The audit profile checks all of these on every pack; claims.json may add to them, never remove one. */
+export const AUDIT_PROFILE_CLAIMS: readonly Claim[] = CLAIMS;
+/**
+ * verified: the audit profile, every claim checked and passed. partial: every check that ran passed,
+ * but the audit profile was not met (--profile legacy, or a claim skipped by user): exit 2.
+ * not_verified: a claim the pack needs was not checked. failed: a check failed.
+ */
+export type Verdict = 'verified' | 'partial' | 'not_verified' | 'failed';
 /** Always checked, whatever claims.json says. */
 const ALWAYS: readonly Claim[] = ['integrity', 'chain'];
 /** Claims that need others to mean anything. */
@@ -96,6 +125,14 @@ const TSA_LABEL = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const RUN_KINDS = new Set(['call_measured', 'run_completed']);
 /** Files of the pack that SHA256SUMS does not (cannot) list. */
 export const SUMS_FILES = ['SHA256SUMS', 'SHA256SUMS.sig'] as const;
+/** RFC 3161 replies over SHA256SUMS (0.11.0): `SHA256SUMS.<tsa>.tsr`, made after it, so not listed in it. */
+export const SUMS_TOKEN = /^SHA256SUMS\.([a-z0-9][a-z0-9-]{0,31})\.tsr$/;
+/** A file SHA256SUMS does not list: SHA256SUMS, its signature and its timestamp replies. */
+export const isSumsFile = (f: string): boolean => (SUMS_FILES as readonly string[]).includes(f) || SUMS_TOKEN.test(f);
+/** A stamp that was asked for and not obtained (`<name>.<tsa>.pending`): the audit profile fails while one is in the pack. */
+export const PENDING_SUFFIX = '.pending';
+/** The reproducers' public keys (ssh-keygen ALLOWED SIGNERS format), in the pack root. */
+export const ALLOWED_SIGNERS_FILE = 'allowed_signers';
 /** The rollback cache in the data dir: the newest anchor key list seen per genesis pin. */
 export const SEEN_KEYS_FILE = 'anchor-keys.seen.json';
 interface SeenKeysFile {
@@ -145,7 +182,7 @@ export const ClaimsFileSchema = z.strictObject({
 });
 export type ClaimsFile = z.infer<typeof ClaimsFileSchema>;
 
-export type CheckGroup = 'pack' | 'bundle' | 'keys' | 'anchor' | 'timestamp' | 'timeline' | 'ordering' | 'runs';
+export type CheckGroup = 'pack' | 'bundle' | 'keys' | 'anchor' | 'timestamp' | 'timeline' | 'ordering' | 'runs' | 'plan' | 'signoff' | 'close';
 export type CheckStatus = 'pass' | 'fail' | 'not_applicable';
 /** not_checked blocks exit 0 (a claim the pack makes that was not verified); skipped is the user's explicit --skip-claim. */
 export type ClaimStatus = 'pass' | 'fail' | 'not_declared' | 'not_checked' | 'skipped';
@@ -200,7 +237,10 @@ export interface AnchorReport {
 
 export interface OrderingReport {
   status: 'pass' | 'fail' | 'not_declared' | 'not_checked';
-  basis: 'freeze_nonce' | null;
+  /** freeze_nonce: the freeze receipt digest (/1, /2); derived_nonce: sha256(receipt digest ‖ its TSA tokens) (/3). */
+  basis: 'freeze_nonce' | 'derived_nonce' | null;
+  /** The nonce every run must carry, as the verifier computed it. */
+  nonce: string | null;
   harness_digest: string | null;
   freeze: { seq: number; event_key: string | null; anchor: string | null; time: string | null; clock: 'tsa' | 'service' | null } | null;
   runs: { count: number; first_measured_at: string | null; last_measured_at: string | null; nonce_bound: number } | null;
@@ -216,6 +256,33 @@ export interface RunSequenceReport {
   problem: string | null;
 }
 
+export interface PlanReport {
+  status: 'pass' | 'fail' | 'not_declared';
+  planned: string[];
+  completed: string[];
+  abandoned: { run_id: string; reason: string }[];
+  problem: string | null;
+}
+
+export interface ReproductionReport {
+  seq: number;
+  finding_id: string | null;
+  signer: string | null;
+  ok: boolean;
+  /** SHA256:… of the reproducer key (ssh-keygen -l). */
+  key: string | null;
+  problem: string | null;
+}
+
+export interface CloseReport {
+  status: 'pass' | 'fail' | 'not_declared';
+  seq: number | null;
+  report_id: string | null;
+  run_count: number | null;
+  findings_digest: string | null;
+  problem: string | null;
+}
+
 export interface TimelineEntry {
   seq: number;
   kind: string;
@@ -228,7 +295,10 @@ export interface TimelineEntry {
 
 export interface VerifyAuditResult {
   format: typeof VERIFY_AUDIT_FORMAT;
+  /** verdict === 'verified'. */
   ok: boolean;
+  profile: Profile;
+  verdict: Verdict;
   package: string;
   audit_id: string | null;
   bundle_format: string | null;
@@ -269,6 +339,11 @@ export interface VerifyAuditResult {
   anchors: AnchorReport[];
   ordering: OrderingReport;
   run_sequence: RunSequenceReport;
+  plan: PlanReport;
+  reproductions: ReproductionReport[];
+  closed: CloseReport;
+  /** RFC 3161 replies over SHA256SUMS. */
+  sums_timestamps: AnchorTimestampReport[];
   timeline: TimelineEntry[];
   final: {
     root: string;
@@ -285,6 +360,10 @@ export interface VerifyAuditResult {
 export type TsaRoot = string | { name: string; pem: string };
 
 export interface VerifyAuditOptions {
+  /** audit (default): every claim, /3 rules; legacy: the 0.10.0 rules, PARTIAL at best. */
+  profile?: Profile;
+  /** Allowed-signers text for the reproducers, obtained out of band (default: the pack's allowed_signers). */
+  allowed_signers?: string;
   /** Auditor public key (PEM) obtained out of band, never the pack's own file. */
   key_pem?: string;
   /** SHA-256 of the auditor key's SPKI (hex), from the report / SOW: PACK/auditor-key.pem must match it. */
@@ -576,6 +655,9 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     throw new VerifyAuditUsageError(`cannot read evidence pack ${packageDir}: ${(err as Error).message}`);
   }
   const noTsa = opts.no_tsa === true;
+  const profile: Profile = opts.profile ?? 'audit';
+  if (!(PROFILES as readonly string[]).includes(profile)) throw new VerifyAuditUsageError(`--profile must be one of ${PROFILES.join(', ')}`);
+  const auditProfile = profile === 'audit';
   for (const c of opts.require ?? []) {
     if (noTsa && NEEDS_TSA.includes(c)) throw new VerifyAuditUsageError(`--require ${c} needs RFC 3161 tokens; it cannot be combined with --no-tsa`);
   }
@@ -606,6 +688,8 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
   const result: VerifyAuditResult = {
     format: VERIFY_AUDIT_FORMAT,
     ok: false,
+    profile,
+    verdict: 'failed',
     package: dir,
     audit_id: null,
     bundle_format: null,
@@ -626,8 +710,12 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     checks,
     failed: 0,
     anchors: [],
-    ordering: { status: 'not_declared', basis: null, harness_digest: null, freeze: null, runs: null, problem: null },
+    ordering: { status: 'not_declared', basis: null, nonce: null, harness_digest: null, freeze: null, runs: null, problem: null },
     run_sequence: { status: 'not_declared', count: null, seqs: [], declared_counts: [], interruptions: [], problem: null },
+    plan: { status: 'not_declared', planned: [], completed: [], abandoned: [], problem: null },
+    reproductions: [],
+    closed: { status: 'not_declared', seq: null, report_id: null, run_count: null, findings_digest: null, problem: null },
+    sums_timestamps: [],
     timeline: [],
     final: null,
   };
@@ -641,10 +729,15 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
   const on = (c: Claim) => checked.has(c);
   /** Set when receipts pulled in independent_timestamps: a receipt is signed by a key that is not the active head. */
   let tsaForKeys: string | null = null;
-  /** The policy: authenticated claims.json (or every claim), plus the always-checked ones, the required ones and their dependencies. */
+  /** Every timestamp reply read per receipt (NN-label → replies by TSA label): the /3 freeze nonce is derived from them. */
+  const tokenBytes = new Map<string, { tsa: string; bytes: Buffer }[]>();
+  /**
+   * The policy: authenticated claims.json (or every claim), plus the always-checked ones, the required ones and their
+   * dependencies. Under the audit profile every claim is checked: claims.json can add claims, never remove one.
+   */
   const setPolicy = (d: Iterable<Claim>) => {
     declared = new Set(d);
-    checked = new Set<Claim>([...ALWAYS, ...declared, ...required]);
+    checked = new Set<Claim>([...ALWAYS, ...(auditProfile ? AUDIT_PROFILE_CLAIMS : []), ...declared, ...required]);
     for (let grew = true; grew; ) {
       grew = false;
       for (const c of [...checked]) for (const dep of DEPENDS[c] ?? []) {
@@ -718,12 +811,17 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     result.claims.push({ claim: c, status, declared: isDeclared, required: isRequired, evidence });
   }
   result.failed = checks.filter((c) => c.status === 'fail').length + result.claims.filter((c) => c.status === 'fail' && !checks.some((k) => k.claim === c.claim && k.status === 'fail')).length;
-  result.ok =
+  const allPassed =
     result.failed === 0 &&
     result.auditor.source !== 'unpinned' &&
     ALWAYS.every((c) => result.claims.find((x) => x.claim === c)!.status === 'pass') &&
     // A claim the pack makes (or the checks need) that was not verified blocks exit 0, unless the user skipped it.
     result.claims.every((c) => c.status !== 'fail' && c.status !== 'not_checked');
+  // VERIFIED only under the audit profile with every claim checked; the legacy rules, or a claim the
+  // user skipped, can at best show that what ran passed: PARTIAL.
+  const failedAny = result.failed > 0 || result.claims.some((c) => c.status === 'fail') || result.auditor.source === 'unpinned';
+  result.verdict = allPassed ? (auditProfile && AUDIT_PROFILE_CLAIMS.every((c) => result.claims.find((x) => x.claim === c)!.status === 'pass') ? 'verified' : 'partial') : failedAny ? 'failed' : 'not_verified';
+  result.ok = result.verdict === 'verified';
   return result;
 
   function claimSummaries(): Partial<Record<Claim, string>> {
@@ -740,6 +838,9 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     out.independent_timestamps = `${toks.filter((t) => t.ok).length} of ${toks.length} RFC 3161 token(s), each receipt stamped under ≥ 2 pinned TSA CAs (${[...new Set(toks.map((t) => t.ca).filter(Boolean))].sort().join(', ')})`;
     out.harness_frozen_before_runs = checks.find((c) => c.group === 'ordering' && c.status === 'pass')?.evidence ?? '';
     out.run_sequence = checks.find((c) => c.group === 'runs' && c.status === 'pass')?.evidence ?? '';
+    out.plan_complete = checks.find((c) => c.group === 'plan' && c.status === 'pass')?.evidence ?? '';
+    out.reproductions_signed = checks.filter((c) => c.group === 'signoff' && c.status === 'pass').map((c) => c.evidence).join('; ');
+    out.closed = checks.find((c) => c.group === 'close' && c.status === 'pass')?.evidence ?? '';
     return out;
   }
 
@@ -804,9 +905,16 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
         } else {
           claimsFile = p.data;
           setPolicy(p.data.claims);
-          add('pack', null, null, 'claims.json', true, `declares ${p.data.claims.join(', ') || 'nothing'} (authenticated by SHA256SUMS)`);
+          const left = auditProfile ? AUDIT_PROFILE_CLAIMS.filter((c) => !p.data.claims.includes(c)) : [];
+          add('pack', null, null, 'claims.json', true, `declares ${p.data.claims.join(', ') || 'nothing'} (authenticated by SHA256SUMS)${left.length ? `; the audit profile checks ${left.join(', ')} too` : ''}`);
         }
       }
+    }
+
+    // A stamp asked for and not obtained is pending: nothing it would vouch for is timestamped yet.
+    if (on('independent_timestamps')) {
+      const pending = listPackFiles(dir).files.filter((f) => f.endsWith(PENDING_SUFFIX));
+      add('timestamp', 'independent_timestamps', null, 'pending stamps', pending.length === 0, pending.length === 0 ? 'none pending' : `${pending.length} stamp(s) pending: ${pending.slice(0, 5).join(', ')} (stamp them, then package again)`);
     }
 
     // ── 3. bundle (integrity, chain: always) ──
@@ -837,8 +945,19 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     const events = eventsTrusted ? readEvents(join(bundleDir, 'events.jsonl'), maxBytes, allowHardlinks) : null;
     const full = events ? [...events.values()].filter((e) => !e.stub && e.kind !== null).sort((x, y) => x.seq - y.seq) : [];
 
-    // ── 4. run sequence (needs only the bundle) ──
+    // ── audit profile: a /3 bundle of this audit alone ──
+    if (auditProfile) {
+      const v3 = result.bundle_format === BUNDLE_FORMAT_V3;
+      add('pack', 'integrity', null, 'bundle format', v3, v3 ? `${BUNDLE_FORMAT_V3} (audit profile)` : `${result.bundle_format ?? 'unknown'} is not ${BUNDLE_FORMAT_V3}: the audit profile needs the run plan, the derived nonce and the run count; verify a pack made before 0.11.0 with --profile legacy (PARTIAL at best)`);
+      // Stubs are events of other documents or audits inside the range: one store per audit, so none.
+      add('bundle', 'integrity', null, 'this audit only', vb.counts.stubs === 0 && manifest !== null, vb.counts.stubs === 0 ? `the bundle holds only audit ${vb.audit_id ?? '?'}'s events (no stubs)` : `the bundle holds ${vb.counts.stubs} stub(s): events of other documents or audits inside its range (record each audit in its own store)`);
+    }
+
+    // ── 4. run sequence, plan, sign-offs, close (need only the bundle) ──
     if (on('run_sequence')) checkRunSequence(events !== null, full);
+    if (on('plan_complete')) checkPlan(events !== null, full);
+    if (on('reproductions_signed')) checkReproductions(events !== null, full, auditorPem, bundleDir);
+    if (on('closed')) checkClosed(events !== null, full, to);
 
     if (!on('receipts')) {
       timeline([], full, events !== null, to, vb.root, vb.manifest_sha256, null);
@@ -1043,6 +1162,7 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
           add('timestamp', 'independent_timestamps', base, `RFC 3161 ${tsa}`, false, (err as Error).message);
           continue;
         }
+        (tokenBytes.get(base) ?? tokenBytes.set(base, []).get(base)!).push({ tsa, bytes });
         const v = verifyTimestamp(bytes, { message: raw, roots, at: tsaAt, known_extras: opts.tsa_roots === undefined ? SHIPPED_TSA_EXTRAS.map((x) => x.sha256) : [], ...(opts.now ? { now: opts.now } : {}) });
         let problem = v.problem;
         if (v.ok) {
@@ -1086,7 +1206,43 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
         add('timestamp', 'receipts', base, 'stamped within key validity', fine, fine ? `earliest TSA time ${earliest}${end === null ? `; ${r.service_key_id} has no valid_to` : ` ≤ ${r.service_key_id} valid_to ${entry.valid_to} + 5 min`}` : `earliest TSA time ${earliest} is after ${r.service_key_id} ended at ${entry.valid_to}`);
       }
     }
+    if (on('independent_timestamps') && !noTsa) checkSumsTokens(roots, groupOf);
     timeline(result.anchors, full, events !== null, to, vb.root, vb.manifest_sha256, keyEndOk);
+  }
+
+  /** RFC 3161 replies over SHA256SUMS: required (two pinned TSA CAs) by the audit profile; checked when present otherwise. */
+  function checkSumsTokens(roots: string[], groupOf: Map<string, string>): void {
+    const names = readdirSync(dir).filter((f) => SUMS_TOKEN.test(f)).sort();
+    if (names.length === 0) {
+      if (auditProfile) add('timestamp', 'independent_timestamps', 'SHA256SUMS', 'RFC 3161', false, 'no timestamp token over SHA256SUMS (the audit profile stamps the pack itself: SHA256SUMS.<tsa>.tsr)');
+      return;
+    }
+    let sums: Buffer;
+    try {
+      sums = readBundleFile(join(dir, 'SHA256SUMS'), MAX_SUMS_BYTES, { allowHardlinks });
+    } catch (err) {
+      add('timestamp', 'independent_timestamps', 'SHA256SUMS', 'RFC 3161', false, `SHA256SUMS: ${(err as Error).message}`);
+      return;
+    }
+    for (const t of names) {
+      const tsa = SUMS_TOKEN.exec(t)![1]!;
+      let bytes: Buffer;
+      try {
+        bytes = readBundleFile(join(dir, t), MAX_TSR_BYTES, { allowHardlinks });
+      } catch (err) {
+        result.sums_timestamps.push({ file: t, tsa, ok: false, gen_time: null, signer: null, root: null, ca: null, problem: (err as Error).message });
+        add('timestamp', 'independent_timestamps', 'SHA256SUMS', `RFC 3161 ${tsa}`, false, (err as Error).message);
+        continue;
+      }
+      const v = verifyTimestamp(bytes, { message: sums, roots, at: tsaAt, known_extras: opts.tsa_roots === undefined ? SHIPPED_TSA_EXTRAS.map((x) => x.sha256) : [], ...(opts.now ? { now: opts.now } : {}) });
+      const ca = v.ok && v.root_sha256 ? (groupOf.get(v.root_sha256) ?? null) : null;
+      result.sums_timestamps.push({ file: t, tsa, ok: v.ok, gen_time: v.info?.gen_time ?? null, signer: v.signer, root: v.root, ca, problem: v.problem });
+      add('timestamp', 'independent_timestamps', 'SHA256SUMS', `RFC 3161 ${tsa}`, v.ok, v.ok ? `${v.info!.gen_time}, signed by ${v.signer}, CA ${v.root} (${ca})` : (v.problem ?? 'does not verify'));
+    }
+    const cas = new Set(result.sums_timestamps.filter((t) => t.ok && t.ca).map((t) => t.ca!));
+    if (auditProfile || names.length > 0) {
+      add('timestamp', 'independent_timestamps', 'SHA256SUMS', 'independent TSAs', cas.size >= 2, cas.size >= 2 ? `SHA256SUMS stamped under ${cas.size} pinned TSA CAs (${[...cas].sort().join(', ')})` : `SHA256SUMS has valid tokens under ${cas.size} pinned TSA CA(s); at least two different TSA CAs are required`);
+    }
   }
 
   function checkRollback(list: ServiceKeyEntry[]): void {
@@ -1157,7 +1313,7 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     for (const [i, line] of sums.toString('utf8').split('\n').entries()) {
       if (line === '') continue;
       const m = line.match(/^([0-9a-f]{64}) {2}(.+)$/);
-      if (!m || !SAFE_PATH.test(m[2]!) || listed.has(m[2]!) || (SUMS_FILES as readonly string[]).includes(m[2]!)) {
+      if (!m || !SAFE_PATH.test(m[2]!) || listed.has(m[2]!) || isSumsFile(m[2]!)) {
         return add('pack', 'integrity', null, 'SHA256SUMS', false, `SHA256SUMS line ${i + 1} is not "<sha256>  <relative path>" for a pack file`);
       }
       listed.set(m[2]!, m[1]!);
@@ -1165,7 +1321,7 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     const { files, odd } = listPackFiles(dir);
     const problems: string[] = [];
     if (odd.length) problems.push(`not regular files: ${odd.slice(0, 5).join(', ')}`);
-    const present = files.filter((f) => !(SUMS_FILES as readonly string[]).includes(f));
+    const present = files.filter((f) => !isSumsFile(f));
     const unlisted = present.filter((f) => !listed.has(f));
     if (unlisted.length) problems.push(`not in SHA256SUMS: ${unlisted.slice(0, 5).join(', ')}${unlisted.length > 5 ? ` (+${unlisted.length - 5})` : ''}`);
     let budget = maxBytes;
@@ -1213,8 +1369,10 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     const gaps: number[] = [];
     for (let i = 1; i <= (rs.seqs[rs.seqs.length - 1] ?? 0); i++) if (!rs.seqs.includes(i)) gaps.push(i);
     if (gaps.length) return fail(`run_seq is not contiguous: ${gaps.slice(0, 10).join(', ')} missing of 1..${rs.seqs[rs.seqs.length - 1]}`);
-    const off = rs.declared_counts.filter((d) => d.count !== runs.length);
-    if (off.length) return fail(`${runs.length} run(s) recorded; declared ${off.map((d) => `${d.count} (${d.source})`).join(', ')}`);
+    // /3: planned_runs counts the plan, so the abandoned runs too; the report and claims.json count the completed runs.
+    const abandoned = result.bundle_format === BUNDLE_FORMAT_V3 ? full.filter((e) => e.kind === 'run_abandoned').length : 0;
+    const off = rs.declared_counts.filter((d) => d.count !== runs.length + (d.source === 'planned_runs' ? abandoned : 0));
+    if (off.length) return fail(`${runs.length} run(s) recorded${abandoned ? ` and ${abandoned} abandoned` : ''}; declared ${off.map((d) => `${d.count} (${d.source})`).join(', ')}`);
     if (claimsFile?.runs) {
       if (canonicalize([...claimsFile.runs.seqs].sort((a, b) => a - b)) !== canonicalize(rs.seqs)) return fail('claims.json runs.seqs differ from the run_seq values in the bundle');
       const ci = claimsFile.runs.interruptions.map((x) => x.run_seq).sort((a, b) => a - b);
@@ -1224,6 +1382,154 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     const decl = rs.declared_counts.length ? `; matches ${rs.declared_counts.map((d) => `${d.source} ${d.count}`).join(', ')}` : '';
     const intr = rs.interruptions.length ? `; ${rs.interruptions.length} capture interruption(s): ${rs.interruptions.map((x) => `run ${x.run_seq}${x.note ? ` (${x.note})` : ''}`).join(', ')}` : '; no capture interruptions';
     add('runs', 'run_sequence', null, 'run sequence', true, `${runs.length} run(s), run_seq 1..${runs.length} contiguous${decl}${intr}`);
+  }
+
+  function checkPlan(haveEvents: boolean, full: BundleEvent[]): void {
+    const pr = result.plan;
+    const fail = (why: string) => {
+      pr.status = 'fail';
+      pr.problem = why;
+      add('plan', 'plan_complete', null, 'run plan', false, why);
+    };
+    if (!haveEvents) return fail('not checked: the bundle does not verify');
+    if (result.bundle_format !== BUNDLE_FORMAT_V3) return fail(`a ${result.bundle_format ?? 'bundle of unknown format'} has no run plan (${BUNDLE_FORMAT_V3} records harness_frozen.plan)`);
+    const freezes = full.filter((e) => e.kind === 'harness_frozen');
+    if (freezes.length !== 1) return fail(freezes.length === 0 ? 'the bundle holds no harness_frozen event' : `the bundle holds ${freezes.length} harness_frozen events; one freeze per audit (record a retest as its own audit)`);
+    const fz = freezes[0]!;
+    const rawPlan = fz.payload?.['plan'];
+    const plan = Array.isArray(rawPlan) ? rawPlan.filter((x): x is string => typeof x === 'string') : [];
+    if (plan.length === 0) return fail(`the freeze (seq ${fz.seq}) records no plan of run IDs`);
+    pr.planned = plan;
+    const planned = new Set(plan);
+    const ends = full.filter((e) => e.kind === 'run_completed' || e.kind === 'run_abandoned');
+    const byRun = new Map<string, BundleEvent[]>();
+    for (const e of ends) {
+      const id = sOrNull(e.payload?.['run_id']) ?? `(seq ${e.seq}: no run_id)`;
+      (byRun.get(id) ?? byRun.set(id, []).get(id)!).push(e);
+    }
+    pr.completed = ends.filter((e) => e.kind === 'run_completed').map((e) => sOrNull(e.payload?.['run_id']) ?? '?');
+    pr.abandoned = ends.filter((e) => e.kind === 'run_abandoned').map((e) => ({ run_id: sOrNull(e.payload?.['run_id']) ?? '?', reason: sOrNull(e.payload?.['reason']) ?? '' }));
+    const list = (xs: string[]) => `${xs.slice(0, 10).join(', ')}${xs.length > 10 ? ` (+${xs.length - 10} more)` : ''}`;
+    const unplanned = [...byRun.keys()].filter((id) => !planned.has(id));
+    if (unplanned.length) return fail(`run(s) not in the plan frozen at seq ${fz.seq}: ${list(unplanned.map((id) => `${id} (seq ${byRun.get(id)!.map((e) => e.seq).join(', ')})`))}`);
+    const dup = [...byRun].filter(([, es]) => es.length > 1);
+    if (dup.length) return fail(`planned run(s) recorded more than once: ${list(dup.map(([id, es]) => `${id} (seq ${es.map((e) => `${e.seq} ${e.kind}`).join(', ')})`))}`);
+    const missing = plan.filter((id) => !byRun.has(id));
+    if (missing.length) return fail(`planned run(s) with neither run_completed nor run_abandoned: ${list(missing)}`);
+    const early = ends.filter((e) => e.seq < fz.seq);
+    if (early.length) return fail(`run(s) recorded before the freeze (seq ${fz.seq}): seq ${list(early.map((e) => String(e.seq)))}`);
+    const pl = fz.payload?.['planned_runs'];
+    if (typeof pl === 'number' && pl !== plan.length) return fail(`planned_runs is ${pl}; the plan lists ${plan.length} run(s)`);
+    const report = [...full].reverse().find((e) => e.kind === 'report_issued');
+    if (!report) return fail('the bundle holds no report_issued event, so no run_count');
+    const rc = report.payload?.['run_count'];
+    if (typeof rc !== 'number') return fail(`the report (seq ${report.seq}) records no run_count`);
+    if (rc !== pr.completed.length) return fail(`the report's run_count is ${rc}; the bundle records ${pr.completed.length} run_completed event(s)`);
+    pr.status = 'pass';
+    const ab = pr.abandoned.length ? ` (${pr.abandoned.map((a) => `${a.run_id}: ${a.reason}`).slice(0, 5).join('; ')})` : '';
+    add('plan', 'plan_complete', null, 'run plan', true, `${plan.length} planned run(s) frozen at seq ${fz.seq}: ${pr.completed.length} completed, ${pr.abandoned.length} abandoned${ab}; none unplanned, missing or repeated; report run_count ${rc}`);
+  }
+
+  function checkReproductions(haveEvents: boolean, full: BundleEvent[], auditorPem: string, bundleDir: string): void {
+    const no = (check: string, why: string) => add('signoff', 'reproductions_signed', null, check, false, why);
+    if (!haveEvents) return void no('sign-offs', 'not checked: the bundle does not verify');
+    const statuses = finalFindingStatuses(full);
+    const accepted = [...statuses].filter(([, st]) => st === 'accepted').map(([id]) => id).sort();
+    const signoffs = full.filter((e) => e.kind === 'reproduction_signed');
+    let allowed: string | null = opts.allowed_signers ?? null;
+    let source = 'allowed signers given out of band';
+    const asPath = join(dir, ALLOWED_SIGNERS_FILE);
+    if (allowed === null && exists(asPath)) {
+      try {
+        allowed = readBundleFile(asPath, 64 * 1024, { allowHardlinks }).toString('utf8');
+        source = `the pack's ${ALLOWED_SIGNERS_FILE}, authenticated by SHA256SUMS`;
+      } catch (err) {
+        return void no('allowed signers', `${ALLOWED_SIGNERS_FILE}: ${(err as Error).message}`);
+      }
+    }
+    const auditorRaw = rawEd25519PublicKey(auditorPem);
+    const good = new Set<string>();
+    for (const e of signoffs) {
+      const p = e.payload ?? {};
+      const fid = sOrNull(p['finding_id']);
+      const signer = sOrNull(p['signer']);
+      const at = sOrNull(p['reproduced_at']);
+      const ref = (k: string) => (isJsonObject(p[k]) ? sOrNull((p[k] as Record<string, unknown>)['sha256']) : null);
+      const rep: ReproductionReport = { seq: e.seq, finding_id: fid, signer, ok: false, key: null, problem: null };
+      result.reproductions.push(rep);
+      const check = `sign-off ${fid ?? '?'}`;
+      const bad = (why: string) => {
+        rep.problem = why;
+        no(check, `seq ${e.seq}: ${why}`);
+      };
+      if (allowed === null) {
+        bad(`no allowed signers: the pack has no ${ALLOWED_SIGNERS_FILE} and none was given out of band`);
+        continue;
+      }
+      const sigSha = ref('signature');
+      const cmd = ref('commands');
+      const out = ref('output');
+      if (fid === null || signer === null || at === null || sigSha === null || cmd === null || out === null || result.audit_id === null) {
+        bad('the sign-off lacks finding_id, signer, reproduced_at, commands, output or signature');
+        continue;
+      }
+      let sig: Buffer;
+      try {
+        sig = readBundleFile(join(bundleDir, 'blobs', sigSha), MAX_SSHSIG_BYTES, { allowHardlinks });
+      } catch {
+        bad(`the signature blob ${short(sigSha)} is not in the bundle`);
+        continue;
+      }
+      const stmt = reproductionStatement({ audit_id: result.audit_id, finding_id: fid, signer, reproduced_at: at, commands: cmd, output: out });
+      const v = verifySshSignature(sig, stmt, { namespace: REPRODUCTION_NAMESPACE, principal: signer, allowed_signers: allowed, at: new Date(at) });
+      rep.key = v.fingerprint;
+      if (!v.ok) {
+        bad(v.problem ?? 'the signature does not verify');
+        continue;
+      }
+      if (auditorRaw !== null && v.ed25519 !== null && Buffer.from(auditorRaw).equals(v.ed25519)) {
+        bad('signed with the auditor key; a sign-off needs the reproducer\'s own key');
+        continue;
+      }
+      rep.ok = true;
+      good.add(fid);
+      add('signoff', 'reproductions_signed', null, check, true, `seq ${e.seq}: ${signer}, key ${v.fingerprint} (${source}), reproduced ${at}`);
+    }
+    const unsigned = accepted.filter((id) => !good.has(id));
+    add(
+      'signoff',
+      'reproductions_signed',
+      null,
+      'accepted findings',
+      unsigned.length === 0,
+      unsigned.length === 0
+        ? `${accepted.length} accepted finding(s)${accepted.length ? ` (${accepted.slice(0, 10).join(', ')})` : ''}, each with a verified human sign-off`
+        : `accepted finding(s) without a verified human sign-off (reproduction_signed): ${unsigned.slice(0, 10).join(', ')}`,
+    );
+  }
+
+  function checkClosed(haveEvents: boolean, full: BundleEvent[], to: number | null): void {
+    const c = result.closed;
+    const fail = (why: string) => {
+      c.status = 'fail';
+      c.problem = why;
+      add('close', 'closed', null, 'audit closed', false, why);
+    };
+    if (!haveEvents) return fail('not checked: the bundle does not verify');
+    const closes = full.filter((e) => e.kind === 'audit_closed');
+    if (closes.length !== 1) return fail(closes.length === 0 ? 'the bundle holds no audit_closed event: the audit was not closed' : `the bundle holds ${closes.length} audit_closed events`);
+    const ce = closes[0]!;
+    const p = ce.payload ?? {};
+    Object.assign(c, { seq: ce.seq, report_id: sOrNull(p['report_id']), run_count: typeof p['run_count'] === 'number' ? p['run_count'] : null, findings_digest: sOrNull(p['findings_digest']) });
+    if (to === null || ce.seq !== to) return fail(`audit_closed (seq ${ce.seq}) is not the bundle's last event (seq ${to ?? '?'})`);
+    const report = full.find((e) => e.kind === 'report_issued' && e.seq < ce.seq && e.payload?.['report_id'] === c.report_id);
+    if (!report) return fail(`audit_closed names report ${c.report_id ?? '?'}, which no earlier report_issued records`);
+    const completed = full.filter((e) => e.kind === 'run_completed').length;
+    if (c.run_count !== completed) return fail(`audit_closed run_count is ${c.run_count ?? '?'}; the bundle records ${completed} run_completed event(s)`);
+    const want = findingsDigest(finalFindingStatuses(full.filter((e) => e.seq < ce.seq)));
+    if (c.findings_digest !== want) return fail(`audit_closed findings_digest ${short(c.findings_digest)} is not the digest of the findings' final status (${short(want)})`);
+    c.status = 'pass';
+    add('close', 'closed', null, 'audit closed', true, `seq ${ce.seq}, the bundle's last event: report ${c.report_id} (seq ${report.seq}), ${completed} run(s), findings digest ${want}`);
   }
 
   interface Valid {
@@ -1293,6 +1599,7 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
         );
       }
     }
+    if (auditProfile && on('receipts') && haveEvents) checkMilestoneAnchors(valid, full, to);
     const committing = (seq: number) => valid.find((v) => v.from <= seq && seq <= v.to) ?? null;
     for (const e of full) {
       const c = committing(e.seq);
@@ -1306,6 +1613,38 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
       if (noTsa) result.ordering.status = 'not_checked';
       else checkOrdering(full, haveEvents, committing);
     }
+  }
+
+  /** Audit profile: verified, two-CA anchors close the freeze (before any run), the last run (before the report) and the report (the whole bundle). */
+  function checkMilestoneAnchors(valid: Valid[], full: BundleEvent[], to: number | null): void {
+    const freeze = full.find((e) => e.kind === 'harness_frozen');
+    const runs = full.filter((e) => e.kind === 'run_completed' || e.kind === 'run_abandoned');
+    const report = [...full].reverse().find((e) => e.kind === 'report_issued');
+    const need: string[] = [];
+    const got: string[] = [];
+    const firstRun = runs[0]?.seq ?? Number.POSITIVE_INFINITY;
+    if (!freeze) need.push('a freeze anchor (the bundle holds no harness_frozen event)');
+    else {
+      const a = valid.find((v) => v.to >= freeze.seq && v.to < firstRun);
+      if (a) got.push(`freeze ${a.base}`);
+      else need.push(`an anchor after the freeze (seq ${freeze.seq}) that commits no run${runs.length ? ` (the first is seq ${firstRun})` : ''}`);
+    }
+    const lastRun = runs[runs.length - 1];
+    if (!lastRun) need.push('an anchor after the last run (no runs recorded)');
+    else {
+      const until = report?.seq ?? Number.POSITIVE_INFINITY;
+      const a = valid.find((v) => v.to >= lastRun.seq && v.to < until);
+      if (a) got.push(`last run ${a.base}`);
+      else need.push(`an anchor after the last run (seq ${lastRun.seq})${report ? ` that does not yet commit the report (seq ${report.seq})` : ''}`);
+    }
+    if (!report) need.push('an anchor at the report (the bundle holds no report_issued event)');
+    else {
+      const a = valid.find((v) => to !== null && v.to === to && v.to >= report.seq);
+      if (a) got.push(`report ${a.base}`);
+      else need.push(`an anchor at the report that commits the whole bundle (seq ${report.seq}..${to ?? '?'})`);
+    }
+    const how = !noTsa && on('independent_timestamps') ? 'each verified and stamped under two pinned TSA CAs' : 'each verified';
+    add('timeline', 'receipts', null, 'milestone anchors', need.length === 0, need.length === 0 ? `${got.join(', ')}: ${how}` : `missing ${need.join('; ')} (${how})`);
   }
 
   function checkOrdering(full: BundleEvent[], haveEvents: boolean, committing: (seq: number) => Valid | null): void {
@@ -1324,7 +1663,13 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     const fa = committing(freeze.seq);
     const measured = runs.map((r) => sOrNull(r.payload?.['measured_at'])).filter((x): x is string => x !== null && Number.isFinite(Date.parse(x)));
     const sortedM = [...measured].sort((a, b) => Date.parse(a) - Date.parse(b));
-    const digest = fa ? fa.a.receipt_sha256 : null;
+    // /3: the nonce is derived from the freeze receipt and the TSA tokens over it (W2), which the
+    // auditor cannot know before the TSAs sign; /1, /2: the receipt digest, as 0.10.0 recorded it.
+    const v3 = result.bundle_format === BUNDLE_FORMAT_V3;
+    const toks = fa ? (tokenBytes.get(fa.base) ?? []) : [];
+    const digest = !fa ? null : v3 ? (toks.length >= 2 ? freezeNonce(fa.a.receipt_sha256, toks) : null) : fa.a.receipt_sha256;
+    const nonceName = v3 ? `derived freeze nonce sha256(${fa?.base ?? 'freeze'} receipt digest ‖ its ${toks.length} TSA token(s)) = ${digest}` : `freeze receipt digest ${digest}`;
+    o.nonce = digest;
     const nonceBound = runs.filter((r) => digest !== null && r.payload?.['nonce'] === digest).length;
     const harness = sOrNull(freeze.payload?.['fingerprint']);
     o.harness_digest = harness;
@@ -1346,17 +1691,17 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     }
     if (uncommitted.length) return fail(`run seq ${uncommitted.slice(0, 10).join(', ')} ${uncommitted.length > 1 ? 'are' : 'is'} not committed by a timestamped anchor later than the freeze anchor ${fa.base}`);
     const wrongNonce = runs.filter((r) => typeof r.payload?.['nonce'] === 'string' && r.payload['nonce'] !== digest);
-    if (wrongNonce.length > 0) return fail(`run seq ${wrongNonce.map((r) => r.seq).join(', ')} carries a nonce that is not the freeze receipt digest ${digest}`);
+    if (wrongNonce.length > 0) return fail(`run seq ${wrongNonce.map((r) => r.seq).slice(0, 10).join(', ')} carries a nonce that is not the ${nonceName}`);
     const freezeAt = `harness ${short(harness)} frozen, committed ${fa.time} (${fa.base}, RFC 3161)`;
     if (nonceBound === runs.length) {
       o.status = 'pass';
-      o.basis = 'freeze_nonce';
-      add('ordering', 'harness_frozen_before_runs', null, label, true, `${freezeAt}; ${runs.length}/${runs.length} run(s) name that harness, carry the freeze receipt digest ${digest} and are committed by later timestamped anchors (${[...new Set([...runAnchor.values()].map((v) => v.base))].join(', ')})`);
+      o.basis = v3 ? 'derived_nonce' : 'freeze_nonce';
+      add('ordering', 'harness_frozen_before_runs', null, label, true, `${freezeAt}; ${runs.length}/${runs.length} run(s) name that harness, carry the ${nonceName} and are committed by later timestamped anchors (${[...new Set([...runAnchor.values()].map((v) => v.base))].join(', ')})`);
       return;
     }
     // measured_at is the auditor's own record: whoever holds the auditor key can write any time into it.
     // Only the freeze nonce (the freeze receipt's digest, unknown before the freeze anchor) shows the order.
-    return fail(`${freezeAt}; ${runs.length - nonceBound} of ${runs.length} run(s) do not carry the freeze nonce (the freeze receipt digest ${digest}); the order is shown by the freeze nonce only, never by recorded times`);
+    return fail(`${freezeAt}; ${runs.length - nonceBound} of ${runs.length} run(s) do not carry the freeze nonce (the ${nonceName}); the order is shown by the freeze nonce only, never by recorded times`);
   }
 }
 
@@ -1365,9 +1710,13 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
 const STATUS = z.enum(['pass', 'fail', 'not_applicable']);
 
 /** The JSON output (`--json`), as a schema: tests and docs hold the CLI to it. */
+const TOKEN_REPORT = z.strictObject({ file: z.string(), tsa: z.string(), ok: z.boolean(), gen_time: z.string().nullable(), signer: z.string().nullable(), root: z.string().nullable(), ca: z.string().nullable(), problem: z.string().nullable() });
+
 export const VerifyAuditJsonSchema = z.strictObject({
   format: z.literal(VERIFY_AUDIT_FORMAT),
   ok: z.boolean(),
+  profile: z.enum(PROFILES),
+  verdict: z.enum(['verified', 'partial', 'not_verified', 'failed']),
   package: z.string(),
   audit_id: z.string().nullable(),
   bundle_format: z.string().nullable(),
@@ -1398,7 +1747,7 @@ export const VerifyAuditJsonSchema = z.strictObject({
   }),
   claims: z.array(z.strictObject({ claim: z.enum(CLAIMS), status: z.enum(['pass', 'fail', 'not_declared', 'not_checked', 'skipped']), declared: z.boolean(), required: z.boolean(), evidence: z.string() })).length(CLAIMS.length),
   checks: z.array(
-    z.strictObject({ group: z.enum(['pack', 'bundle', 'keys', 'anchor', 'timestamp', 'timeline', 'ordering', 'runs']), claim: z.enum(CLAIMS).nullable(), subject: z.string().nullable(), check: z.string(), status: STATUS, evidence: z.string() }),
+    z.strictObject({ group: z.enum(['pack', 'bundle', 'keys', 'anchor', 'timestamp', 'timeline', 'ordering', 'runs', 'plan', 'signoff', 'close']), claim: z.enum(CLAIMS).nullable(), subject: z.string().nullable(), check: z.string(), status: STATUS, evidence: z.string() }),
   ),
   failed: z.number().int().nonnegative(),
   anchors: z.array(
@@ -1413,12 +1762,13 @@ export const VerifyAuditJsonSchema = z.strictObject({
       service_key_id: z.string().nullable(),
       receipt_sha256: z.string(),
       ok: z.boolean(),
-      timestamps: z.array(z.strictObject({ file: z.string(), tsa: z.string(), ok: z.boolean(), gen_time: z.string().nullable(), signer: z.string().nullable(), root: z.string().nullable(), ca: z.string().nullable(), problem: z.string().nullable() })),
+      timestamps: z.array(TOKEN_REPORT),
     }),
   ),
   ordering: z.strictObject({
     status: z.enum(['pass', 'fail', 'not_declared', 'not_checked']),
-    basis: z.enum(['freeze_nonce']).nullable(),
+    basis: z.enum(['freeze_nonce', 'derived_nonce']).nullable(),
+    nonce: z.string().nullable(),
     harness_digest: z.string().nullable(),
     freeze: z.strictObject({ seq: z.number().int(), event_key: z.string().nullable(), anchor: z.string().nullable(), time: z.string().nullable(), clock: z.enum(['tsa', 'service']).nullable() }).nullable(),
     runs: z.strictObject({ count: z.number().int(), first_measured_at: z.string().nullable(), last_measured_at: z.string().nullable(), nonce_bound: z.number().int() }).nullable(),
@@ -1432,6 +1782,23 @@ export const VerifyAuditJsonSchema = z.strictObject({
     interruptions: z.array(z.strictObject({ run_seq: z.number().int(), event_key: z.string().nullable(), note: z.string().nullable() })),
     problem: z.string().nullable(),
   }),
+  plan: z.strictObject({
+    status: z.enum(['pass', 'fail', 'not_declared']),
+    planned: z.array(z.string()),
+    completed: z.array(z.string()),
+    abandoned: z.array(z.strictObject({ run_id: z.string(), reason: z.string() })),
+    problem: z.string().nullable(),
+  }),
+  reproductions: z.array(z.strictObject({ seq: z.number().int(), finding_id: z.string().nullable(), signer: z.string().nullable(), ok: z.boolean(), key: z.string().nullable(), problem: z.string().nullable() })),
+  closed: z.strictObject({
+    status: z.enum(['pass', 'fail', 'not_declared']),
+    seq: z.number().int().nullable(),
+    report_id: z.string().nullable(),
+    run_count: z.number().int().nullable(),
+    findings_digest: z.string().nullable(),
+    problem: z.string().nullable(),
+  }),
+  sums_timestamps: z.array(TOKEN_REPORT),
   timeline: z.array(
     z.strictObject({ seq: z.number().int(), kind: z.string(), event_key: z.string().nullable(), measured_at: z.string().nullable(), committed_by: z.string().nullable(), no_later_than: z.string().nullable(), clock: z.enum(['tsa', 'service']).nullable() }),
   ),
@@ -1449,7 +1816,7 @@ export const VerifyAuditJsonSchema = z.strictObject({
 });
 
 const LABEL: Record<CheckStatus | ClaimStatus, string> = { pass: 'PASS', fail: 'FAIL', not_applicable: 'N/A', not_declared: 'not declared', not_checked: 'not checked', skipped: 'skipped' };
-const GROUP_TITLE: Record<CheckGroup, string> = { pack: 'Pack', bundle: 'Evidence bundle', keys: 'Anchor service keys', anchor: 'Anchors', timestamp: 'Anchors', timeline: 'Timeline', ordering: 'Ordering', runs: 'Runs' };
+const GROUP_TITLE: Record<CheckGroup, string> = { pack: 'Pack', bundle: 'Evidence bundle', keys: 'Anchor service keys', anchor: 'Anchors', timestamp: 'Anchors', timeline: 'Timeline', ordering: 'Ordering', runs: 'Runs', plan: 'Run plan', signoff: 'Human sign-offs', close: 'Close' };
 
 /** The human-readable report: claims, one PASS / FAIL / N/A line per check with its evidence, values to compare. */
 export function renderVerifyAudit(r: VerifyAuditResult): string {
@@ -1457,6 +1824,7 @@ export function renderVerifyAudit(r: VerifyAuditResult): string {
   const line = (c: AuditCheck, indent = '  ', w = 26) => L.push(`${indent}${LABEL[c.status].padEnd(4)}  ${c.check.padEnd(w)} ${c.evidence}`);
   L.push(`${PACK_NAME}  ${r.package}`);
   L.push(`audit          ${r.audit_id ?? '?'}${r.bundle_format ? `  (${r.bundle_format})` : ''}`);
+  L.push(`profile        ${r.profile === 'audit' ? 'audit (every claim checked; claims.json can add claims, not remove them)' : 'legacy (0.10.0 rules: claims.json picks the claims; PARTIAL at best)'}`);
   L.push(`auditor key    ${r.auditor.key_id ?? '?'}  spki sha256 ${r.auditor.spki_sha256 ?? '?'}  (${r.auditor.source === 'fingerprint' ? 'pinned by --key-fingerprint' : r.auditor.source === 'key_file' ? 'pinned by --key' : 'NOT pinned'})`);
   L.push(`service keys   genesis ${r.trust.genesis_sha256}@${r.trust.genesis_valid_from} (${r.trust.genesis_source === 'compiled' ? 'compiled pin' : r.trust.genesis_source === 'env' ? 'KRONICLE_ANCHOR_GENESIS' : '--genesis'}); key list from ${r.trust.key_list === 'pack' ? 'anchor-keys.json' : '--anchor-keys'}: ${r.trust.key_chain.status}`);
   const rb = r.trust.rollback;
@@ -1475,13 +1843,21 @@ export function renderVerifyAudit(r: VerifyAuditResult): string {
   const anchorChecks = r.checks.filter((c) => c.group === 'anchor' || c.group === 'timestamp');
   if (anchorChecks.length) {
     L.push('', 'Anchors');
+    const bases = new Set<string>();
     for (const a of r.anchors) {
       const base = a.file.slice(0, -'.receipt.json'.length);
+      bases.add(base);
       L.push(`  ${base}${a.from_seq !== null ? `  seq ${a.from_seq}..${a.to_seq}` : ''}${a.received_at ? `  received ${a.received_at}` : ''}${a.anchor_id ? `  id ${a.anchor_id}` : ''}`);
       for (const c of anchorChecks.filter((x) => x.subject === base)) line(c, '    ', 20);
     }
+    // Checks about the pack as a whole (SHA256SUMS tokens, pending stamps) or a receipt not listed above.
+    const rest = anchorChecks.filter((x) => x.subject === null || !bases.has(x.subject));
+    for (const subject of [...new Set(rest.map((x) => x.subject ?? 'pack'))]) {
+      L.push(`  ${subject}`);
+      for (const c of rest.filter((x) => (x.subject ?? 'pack') === subject)) line(c, '    ', 20);
+    }
   }
-  for (const g of ['timeline', 'ordering', 'runs'] as const) {
+  for (const g of ['timeline', 'ordering', 'runs', 'plan', 'signoff', 'close'] as const) {
     const cs = r.checks.filter((c) => c.group === g);
     if (!cs.length) continue;
     L.push('', GROUP_TITLE[g]);
@@ -1512,12 +1888,19 @@ export function renderVerifyAudit(r: VerifyAuditResult): string {
   const unchecked = r.claims.filter((c) => c.status === 'not_checked').map((c) => c.claim);
   const skippedC = r.claims.filter((c) => c.status === 'skipped').map((c) => c.claim);
   const failedC = r.claims.filter((c) => c.status === 'fail').map((c) => c.claim);
+  const notDeclared = r.claims.filter((c) => c.status === 'not_declared').map((c) => c.claim);
   L.push(
-    r.ok
-      ? `RESULT: VERIFIED  ${passed.join(', ')}${skippedC.length ? `  (${skippedC.join(', ')} skipped by user)` : ''}`
-      : r.failed === 0 && failedC.length === 0 && unchecked.length > 0
-        ? `RESULT: NOT VERIFIED  ${unchecked.join(', ')} not checked${passed.length ? `; passed: ${passed.join(', ')}` : ''}`
-        : `RESULT: FAILED  ${failedC.join(', ') || 'pack structure'} (${r.failed} failed check(s))${unchecked.length ? `; not checked: ${unchecked.join(', ')}` : ''}`,
+    r.verdict === 'verified'
+      ? `RESULT: VERIFIED  ${passed.join(', ')}`
+      : r.verdict === 'partial'
+        ? `RESULT: PARTIAL  ${passed.join(', ')}${skippedC.length ? `  (${skippedC.join(', ')} skipped by user)` : ''}`
+        : r.verdict === 'not_verified'
+          ? `RESULT: NOT VERIFIED  ${unchecked.join(', ')} not checked${passed.length ? `; passed: ${passed.join(', ')}` : ''}`
+          : `RESULT: FAILED  ${failedC.join(', ') || 'pack structure'} (${r.failed} failed check(s))${unchecked.length ? `; not checked: ${unchecked.join(', ')}` : ''}`,
   );
+  if (r.verdict === 'partial') {
+    const why = r.profile === 'legacy' ? `checked under --profile legacy (the 0.10.0 rules)${notDeclared.length ? `; not checked: ${notDeclared.join(', ')}` : ''}` : `skipped by user: ${skippedC.join(', ')}`;
+    L.push(`  PARTIAL: every check that ran passed, but the pack does not meet the audit profile (${why}). Exit 2.`);
+  }
   return L.join('\n') + '\n';
 }

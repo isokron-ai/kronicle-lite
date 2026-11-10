@@ -93,6 +93,7 @@ const BOOLEAN_FLAGS = new Set([
   'allow-secrets',
   'insecure-http',
   'no-tsa',
+  'no-stamp-sums',
   'tsa-at-gentime',
 ]);
 
@@ -237,28 +238,35 @@ Usage:
                                                                  --strict requires --key. Reads at most 1 GiB (--max-bytes)
   kronicle-lite audit stamp  [--anchor-id ID] --out DIR [--tsa name=url,…] [--json]
                                                                  RFC 3161 tokens over an anchor receipt (latest by default)
-                                                                 from Sectigo and DigiCert; run right after checkpoint --push
-  kronicle-lite audit package --audit-id A --out DIR [--timestamps DIR] [--tsa-roots DIR] [--anchor-keys FILE] [--genesis SHA256@VALID_FROM] [--json]
+                                                                 from Sectigo and DigiCert; run right after checkpoint --push.
+                                                                 Prints the derived freeze nonce for runs to record (/3)
+  kronicle-lite audit package --audit-id A --out DIR [--timestamps DIR] [--tsa-roots DIR] [--anchor-keys FILE] [--genesis SHA256@VALID_FROM]
+                 [--allowed-signers FILE] [--tsa name=url,…] [--no-stamp-sums] [--json]
                                                                  IsoKron Evidence Pack: bundle, anchors inside its range,
-                                                                 their tokens, keys, TSA roots, claims.json (the claims the
-                                                                 store supports), SHA256SUMS(.sig), COMPLETION.txt, VERIFY.md;
-                                                                 then runs verify-audit on it
-  kronicle-lite verify-audit PACK --key-fingerprint SHA256 | --key PEM-FILE [--anchor-keys FILE] [--genesis SHA256@VALID_FROM]
-                 [--tsa-roots DIR] [--no-tsa] [--tsa-at-gentime] [--require CLAIM,…] [--skip-claim CLAIM,…] [--max-bytes N] [--allow-hardlinks] [--json]
+                                                                 their tokens, keys, TSA roots, the reproducers' allowed
+                                                                 signers, claims.json (the claims the store supports),
+                                                                 SHA256SUMS(.sig) and RFC 3161 tokens over SHA256SUMS,
+                                                                 COMPLETION.txt, VERIFY.md; then runs verify-audit on it
+                                                                 (the audit profile for a /3 bundle). Exit 0 VERIFIED,
+                                                                 2 PARTIAL, 1 otherwise
+  kronicle-lite verify-audit PACK --key-fingerprint SHA256 | --key PEM-FILE [--profile audit|legacy] [--anchor-keys FILE] [--genesis SHA256@VALID_FROM]
+                 [--tsa-roots DIR] [--allowed-signers FILE] [--no-tsa] [--tsa-at-gentime] [--require CLAIM,…] [--skip-claim CLAIM,…] [--max-bytes N] [--allow-hardlinks] [--json]
                                                                  verify an IsoKron Evidence Pack offline. The auditor key is
                                                                  pinned by its SHA-256 from the statement of work (--key-fingerprint;
-                                                                 --key, --anchor-keys, --tsa-roots must not resolve into the
-                                                                 pack). SHA256SUMS is
-                                                                 verified first; integrity and chain are always checked, then
-                                                                 the claims in the authenticated claims.json (receipts,
-                                                                 independent_timestamps, harness_frozen_before_runs,
-                                                                 run_sequence; every claim when claims.json is missing or
-                                                                 unauthenticated), each PASS or FAIL with its evidence; others
-                                                                 are "not declared" (--require CLAIM checks one and needs it
-                                                                 to pass, declared or not). A declared claim that is not
-                                                                 checked (e.g. under --no-tsa) blocks exit 0: NOT VERIFIED;
+                                                                 --key, --anchor-keys, --tsa-roots, --allowed-signers must not
+                                                                 resolve into the pack). SHA256SUMS is verified first. The audit
+                                                                 profile (default) checks every claim: integrity, chain,
+                                                                 receipts, independent_timestamps, harness_frozen_before_runs,
+                                                                 run_sequence, plan_complete, reproductions_signed, closed;
+                                                                 claims.json can add claims, never remove one; the bundle
+                                                                 must be format /3, anchors must close the freeze, the last run
+                                                                 and the report, SHA256SUMS must be stamped, nothing pending.
+                                                                 --profile legacy applies the 0.10.0 rules (claims.json picks
+                                                                 the claims) to older packs and reports PARTIAL at best.
+                                                                 Each claim is PASS or FAIL with its evidence. A claim that is
+                                                                 not checked (e.g. under --no-tsa) blocks exit 0: NOT VERIFIED;
                                                                  --skip-claim CLAIM opts out of one explicitly ("skipped by
-                                                                 user"). Trust: the
+                                                                 user"; PARTIAL at best). Trust: the
                                                                  compiled genesis pin of the anchor service key chain
                                                                  (--genesis or KRONICLE_ANCHOR_GENESIS, <sha256>@<valid_from>,
                                                                  for a self-hosted service) and the pinned TSA CAs (--tsa-roots).
@@ -268,8 +276,8 @@ Usage:
                                                                  fails both). Remembers the newest anchor key list per genesis
                                                                  pin in the data dir and fails on a rollback or a damaged cache. Establishes integrity, ordering
                                                                  and independent time; the audit's depth is described in its
-                                                                 report. Exit 0 every checked claim passed, 1 a check failed,
-                                                                 2 usage or an unreadable pack
+                                                                 report. Exit 0 VERIFIED, 1 a check failed or a claim was not
+                                                                 checked, 2 PARTIAL, usage or an unreadable pack
   kronicle-lite shim install [--dir D] [--commands git,terraform,kubectl,…] [--world "make release,…"] [--mode deny|warn]
   [--git-hook]   | status | ack --operator [--through SEQ] | uninstall   PATH wrappers (+ git pre-push hook) that pulse before
                                                                  world-changing commands (git push, terraform apply, …)
@@ -828,16 +836,16 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
-/** `verify-audit PACKAGE`: exit 0 verified, 1 a check failed, 2 usage or an unreadable package / trust input. */
+/** `verify-audit PACKAGE`: exit 0 VERIFIED, 1 a check failed (or a claim was not checked), 2 PARTIAL, usage or an unreadable package / trust input. */
 async function verifyAuditCommand(positional: string[], flags: Record<string, string | true>, dataDir: string): Promise<number> {
   const usage =
-    'usage: kronicle-lite verify-audit PACK --key-fingerprint SHA256 | --key PEM-FILE [--anchor-keys FILE] [--genesis SHA256@VALID_FROM] [--tsa-roots DIR] [--no-tsa] [--tsa-at-gentime] [--require CLAIM,…] [--skip-claim CLAIM,…] [--max-bytes N] [--allow-hardlinks] [--json]';
+    'usage: kronicle-lite verify-audit PACK --key-fingerprint SHA256 | --key PEM-FILE [--profile audit|legacy] [--anchor-keys FILE] [--genesis SHA256@VALID_FROM] [--tsa-roots DIR] [--allowed-signers FILE] [--no-tsa] [--tsa-at-gentime] [--require CLAIM,…] [--skip-claim CLAIM,…] [--max-bytes N] [--allow-hardlinks] [--json]';
   const dir = positional[0];
   if (!dir) {
     process.stderr.write(`${usage}\n`);
     return 2;
   }
-  const { verifyAudit, renderVerifyAudit, VerifyAuditUsageError, CLAIMS, genesisFromCli, readTrustInput, refuseInsidePack } = await import('./audit/verify-audit.js');
+  const { verifyAudit, renderVerifyAudit, VerifyAuditUsageError, CLAIMS, PROFILES, genesisFromCli, readTrustInput, refuseInsidePack } = await import('./audit/verify-audit.js');
   const { pemFileNames, pemsFromText } = await import('./audit/package.js');
   let opts: VerifyAuditOptions;
   try {
@@ -849,6 +857,10 @@ async function verifyAuditCommand(positional: string[], flags: Record<string, st
     // once, checked by the identity of the open file and read from it (T8: no check-then-reopen race).
     const keyPem = key ? readTrustInput(dir, key, '--key', 64 * 1024).toString('utf8') : undefined;
     const keysDoc = keys ? readTrustInput(dir, keys, '--anchor-keys', 1024 * 1024).toString('utf8') : undefined;
+    const signersFile = str(flags['allowed-signers']);
+    const allowedSigners = signersFile ? readTrustInput(dir, signersFile, '--allowed-signers', 64 * 1024).toString('utf8') : undefined;
+    const profile = str(flags['profile']);
+    if (flags['profile'] !== undefined && (profile === undefined || !(PROFILES as readonly string[]).includes(profile))) throw new Error(`--profile must be one of ${PROFILES.join(', ')}`);
     const roots = str(flags['tsa-roots']);
     let tsaRoots: { name: string; pem: string }[] | undefined;
     if (roots) {
@@ -865,6 +877,8 @@ async function verifyAuditCommand(positional: string[], flags: Record<string, st
     const skip = list(flags['skip-claim']);
     if (flags['no-tsa'] === true && (roots !== undefined || flags['tsa-at-gentime'] === true)) throw new Error('--no-tsa cannot be combined with --tsa-roots or --tsa-at-gentime');
     opts = {
+      ...(profile !== undefined ? { profile: profile as 'audit' | 'legacy' } : {}),
+      ...(allowedSigners !== undefined ? { allowed_signers: allowedSigners } : {}),
       ...(keyPem !== undefined ? { key_pem: keyPem } : {}),
       ...(fingerprint ? { key_fingerprint: fingerprint } : {}),
       ...genesis,
@@ -891,7 +905,7 @@ async function verifyAuditCommand(positional: string[], flags: Record<string, st
     return 2;
   }
   process.stdout.write(flags['json'] === true ? JSON.stringify(r, null, 2) + '\n' : renderVerifyAudit(r));
-  return r.ok ? 0 : 1;
+  return r.verdict === 'verified' ? 0 : r.verdict === 'partial' ? 2 : 1;
 }
 
 /**

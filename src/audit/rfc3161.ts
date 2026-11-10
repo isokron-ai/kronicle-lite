@@ -157,6 +157,7 @@ function tokenOf(top: Tlv): Tlv {
   const status = children(expect(k[0], TAG.SEQUENCE, 'PKIStatusInfo'));
   const s = readSmallInt(expect(status[0], TAG.INTEGER, 'PKIStatus'));
   // Only "granted": nothing in our request is modifiable, so grantedWithMods (1) is refused too.
+  if (s === 3) throw new DerError('pending: the TSA answered "waiting" (PKIStatus 3), so this is not a timestamp yet');
   if (s !== 0) throw new DerError(`the TSA did not grant the request as made (PKIStatus ${s})`);
   if (k.length !== 2) throw new DerError('timestamp reply has unexpected fields');
   return expect(k[1], TAG.SEQUENCE, 'timeStampToken');

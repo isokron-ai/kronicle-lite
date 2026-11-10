@@ -14,7 +14,7 @@ type Flags = Record<string, string | true>;
 const str = (v: string | true | undefined): string | undefined => (typeof v === 'string' ? v : undefined);
 
 const USAGE =
-  'usage: kronicle-lite audit put-blob FILE [--media-type T] | record --audit-id A [--in FILE|-] | query --audit-id A|--fingerprint F [--kind K] [--finding ID] [--findings] [--json] | export --audit-id A --out DIR | stamp [--anchor-id ID] --out DIR [--tsa name=url,…] [--json] | package --audit-id A --out DIR [--timestamps DIR] [--tsa-roots DIR] [--anchor-keys FILE] [--genesis SHA256@VALID_FROM] [--json]\n';
+  'usage: kronicle-lite audit put-blob FILE [--media-type T] | record --audit-id A [--in FILE|-] | query --audit-id A|--fingerprint F [--kind K] [--finding ID] [--findings] [--json] | export --audit-id A --out DIR | stamp [--anchor-id ID] --out DIR [--tsa name=url,…] [--json] | package --audit-id A --out DIR [--timestamps DIR] [--tsa-roots DIR] [--anchor-keys FILE] [--genesis SHA256@VALID_FROM] [--allowed-signers FILE] [--tsa name=url,…] [--no-stamp-sums] [--json]\n';
 
 export async function runAuditCli(positional: string[], flags: Flags, dataDir: string): Promise<number> {
   const [op, ...rest] = positional;
@@ -89,6 +89,8 @@ export async function runAuditCli(positional: string[], flags: Flags, dataDir: s
           for (const x of r.results) {
             process.stdout.write(`  ${x.ok ? 'PASS' : 'FAIL'}  RFC 3161 ${x.tsa.padEnd(10)} ${x.ok ? `${x.gen_time}  ${x.file}${x.existing ? ' (already present)' : ''}` : x.problem}\n`);
           }
+          for (const f of r.pending) process.stdout.write(`  pending ${f} (stamp again; the audit profile fails while it is there)\n`);
+          if (r.nonce) process.stdout.write(`freeze nonce   ${r.nonce}  (sha256 of the receipt digest and its tokens: record it as run_completed.nonce after a freeze)\n`);
         }
         // Network or TSA trouble is I/O (2); a token file that does not match is a conflict (1).
         if (r.results.every((x) => x.ok)) return 0;
@@ -104,6 +106,8 @@ export async function runAuditCli(positional: string[], flags: Flags, dataDir: s
         const keysFile = str(flags['anchor-keys']);
         const { genesisFromCli } = await import('./verify-audit.js');
         const genesis = genesisFromCli(str(flags['genesis']));
+        const signers = str(flags['allowed-signers']);
+        const sumsTsas = str(flags['tsa']) !== undefined ? (await import('./package.js')).parseTsaList(str(flags['tsa'])!) : undefined;
         const r = await buildAuditPackage(store, {
           audit_id,
           out,
@@ -111,9 +115,12 @@ export async function runAuditCli(positional: string[], flags: Flags, dataDir: s
           ...(roots ? { tsa_roots: readPemDir(roots) } : {}),
           ...(keysFile ? { anchor_keys: JSON.parse(readFileSync(keysFile, 'utf8')) as unknown } : {}),
           ...(genesis.genesis !== undefined ? { genesis: genesis.genesis } : {}),
+          ...(signers ? { allowed_signers: readFileSync(signers, 'utf8') } : {}),
+          // The audit profile needs SHA256SUMS stamped by two TSAs (Sectigo and DigiCert unless --tsa).
+          ...(flags['no-stamp-sums'] === true ? {} : { stamp_sums: sumsTsas ? { tsas: sumsTsas } : {} }),
         });
         process.stdout.write(flags['json'] === true ? JSON.stringify(r, null, 2) + '\n' : renderPackage(r));
-        return r.check.ok ? 0 : 1;
+        return r.check.verdict === 'verified' ? 0 : r.check.verdict === 'partial' ? 2 : 1;
       }
     }
     process.stderr.write(USAGE);
