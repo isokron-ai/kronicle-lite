@@ -4,6 +4,28 @@ All notable changes to kronicle-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
+## [0.11.2] — 2026-11-10
+
+### Fixed — token-count labels are no longer refused as secrets
+
+- **`password_assignment` matched measurement labels.** A key ending in
+  `token` or `tokens` with a value holding a letter and a digit was taken for
+  a credential, so an evidence summary line `Tokens: cl100k` (a token count
+  naming the cl100k tokenizer) was refused at write time and masked at read
+  time. Under a key whose only sensitive word is token(s), the value must now
+  look like an issued credential: 16+ characters at 3+ bits of entropy per
+  character, or a mixed-case alphanumeric run of 8+ with a digit. A count with
+  an optional magnitude suffix (`4096`, `1.2k`, `128000k`) never is one. Keys
+  naming a password, passwd, pwd or secret keep the 0.8.1 rule.
+- **`env_secret`** applies the same value check when the name's only keyword
+  is `TOKEN`, so `TOKENIZER=cl100k_base` and `TOKENS: o200k_base` pass.
+  `…PASSWORD=`, `…SECRET=`, `…API_KEY=`, `…ACCESS_KEY=` and `…PRIVATE_KEY=`
+  are unchanged.
+- Still refused: provider tokens after a token key (`token: ghp_…`), Anthropic
+  and OpenAI keys, bearer credentials and JWTs, AWS key pairs, passwords
+  under a password key, and high-entropy or mixed-case values after any
+  token key (`apiToken:`, `auth_token:`, `SERVICE_TOKEN=`).
+
 ## [0.11.1] — 2026-11-10
 
 ### Added — the anchor key from a command or a file (GL-6, PH-10)
