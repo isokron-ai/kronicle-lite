@@ -4,7 +4,83 @@ All notable changes to kronicle-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
-## [Unreleased]
+## [Unreleased] — next (0.11.0)
+
+### Changed — `verify-audit` checks the audit profile by default (breaking)
+
+- **W1: claims.json no longer chooses what is checked.** The new default
+  profile, `audit`, checks every claim (the six 0.10.0 claims plus
+  `plan_complete`, `reproductions_signed` and `closed`) whatever `claims.json`
+  says: it can add claims, never remove one. It also requires bundle format
+  `/3`, no stubs (one store per audit: a bundle with other documents' or
+  audits' events fails), verified anchors after the freeze (before any run),
+  after the last run (before the report) and at the report (the whole
+  bundle), each with tokens from two different pinned TSA CAs, RFC 3161
+  tokens from two CAs over `SHA256SUMS`, and no pending stamp. In 0.10.x a
+  pack whose `claims.json` declared only `integrity` and `chain` verified
+  with no anchors at all.
+- **`--profile legacy`** checks packs made before 0.11.0 with the 0.10.0
+  rules. Its best result is **`PARTIAL`, exit 2**: every check that ran
+  passed, but the pack does not meet the audit profile. A 0.10.x pack that
+  exited 0 now exits 1 under the default profile (`bundle format … is not
+  …/3: verify a pack made before 0.11.0 with --profile legacy`) and 2 with
+  `PARTIAL` under `--profile legacy`. `--skip-claim` under the audit profile
+  also gives `PARTIAL`.
+- **W2: the freeze nonce is derived from third-party tokens.** In a `/3`
+  bundle every `run_completed.nonce` must equal
+  `sha256(freeze receipt digest ‖ every TSA token over it, in TSA-name order)`,
+  recomputed by the verifier. The 0.10.0 nonce was the digest of IsoKron's own
+  receipt, which the auditor could know before any third party signed.
+  `audit stamp` prints the nonce; `freezeNonce` exports the recipe.
+- **`--json` is `kronicle-lite-verify-audit/2`**: `profile`, `verdict`
+  (`verified` \| `partial` \| `not_verified` \| `failed`), `plan`,
+  `reproductions`, `closed`, `sums_timestamps`, `ordering.nonce` and the
+  `derived_nonce` basis; `ok` is true only for `verified`. Library callers:
+  `verifyAudit()` defaults to `profile: 'audit'`.
+- **`audit package`** stamps `SHA256SUMS` with Sectigo and DigiCert
+  (`--tsa`, `--no-stamp-sums`), writes `allowed_signers`
+  (`--allowed-signers FILE`), carries `*.pending` markers, checks a `/3` pack
+  under the audit profile and an older one under the legacy profile, and
+  exits 0 VERIFIED, 2 PARTIAL, 1 otherwise. `VERIFY.md` adds the raw commands
+  for the `SHA256SUMS` tokens, the freeze nonce and a sign-off.
+
+### Added
+
+- **W3: bundle format `/3` and a required run plan.** `harness_frozen.plan`
+  (the planned run IDs) and the new `run_abandoned` event (`run_id`,
+  `reason`). Claim `plan_complete`: every `run_completed` and `run_abandoned`
+  names a planned run; each planned run ends exactly once; unplanned, missing
+  and duplicate runs fail; `report_issued.run_count` is required and must
+  equal the completed runs. In `/3`, `plan`, `run_completed.nonce` and
+  `report_issued.run_count` are required.
+- **Human sign-off: `reproduction_signed`** (`finding_id`, `signer`,
+  `reproduced_at`, `commands`, `output`, `signature`). The reproducer signs
+  `reproductionStatement(...)` with their own key (`ssh-keygen -Y sign -n
+  kronicle-lite-reproduction`); `verify-audit` checks the SSH signature
+  in-process (`src/audit/sshsig.ts`: `ssh-ed25519`, and `sk-ssh-ed25519` with
+  user presence) against the pack's `allowed_signers` or `--allowed-signers
+  FILE`, and refuses the auditor key. Claim `reproductions_signed`: every
+  accepted finding has a verified sign-off.
+- **`audit_closed`** (`report_id`, `run_count`, `findings_digest`). Claim
+  `closed`: one close, the bundle's last event, after the report it names,
+  with the run count and `findingsDigest` of every finding's final status.
+- **RFC 3161 over `SHA256SUMS`**: `SHA256SUMS.<tsa>.tsr`, not listed in
+  `SHA256SUMS`, verified under the pinned TSA CAs.
+- **Pending stamps**: `audit stamp` leaves `<anchor_id>.<tsa>.pending` when a
+  TSA fails (and removes it once stamped); `audit package` carries it into
+  `anchors/`; the audit profile fails while one is in the pack. A TSA reply
+  with status `waiting` is reported as pending.
+- **Tamper suite** (`test/verify-audit-profile.test.ts`): a golden pack
+  verifies with nothing pending, and a changed byte, an added file, a removed
+  file, a missing anchor, a missing token, two tokens from one CA, an
+  unplanned, missing or duplicate run, a run before the freeze anchor, a
+  nonce mismatch, a foreign stub, a pending stamp, an unsigned accepted
+  finding, a wrong run count and a tampered sign-off each exit 1. Differential
+  tests run `openssl ts -verify`, every raw command in `VERIFY.md`, and
+  `ssh-keygen -Y sign` / `-Y verify` when the tools are present; the new
+  `openssl-differential` CI job requires them.
+- The MCP `audit_record` / `audit_query` kind enums list the three new kinds
+  (`.mcp-catalog/kronicle-lite.json` re-snapshotted).
 
 ## [0.10.2] — 2026-11-09
 

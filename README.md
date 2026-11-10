@@ -347,40 +347,71 @@ kronicle-lite anchor keys              # the genesis pin in force and the kept s
 - Exit codes: 0 ok, 1 divergence, conflict or an untrusted receipt, 2 usage
   or I/O (incl. unreachable and a refused `http://` URL).
 
-## Evidence packs (0.10.0)
+## Evidence packs (0.10.0; audit profile 0.11.0)
 
 An **IsoKron Evidence Pack** is tamper-evident, independently timestamped audit
 evidence: the audit's evidence bundle, the anchor receipts that commit each
 stage (harness frozen, runs, report), an RFC 3161 timestamp from independent
-timestamp authorities (Sectigo, DigiCert) on every receipt, and the keys and
-roots to check them. A client checks it offline with one command:
+timestamp authorities (Sectigo, DigiCert) on every receipt and on the pack's
+`SHA256SUMS`, the reproducers' signing keys, and the keys and roots to check
+them. A client checks it offline with one command:
 
 ```sh
-npx -y kronicle-lite@0.10.2 verify-audit pack/ --key-fingerprint <SHA-256 of the auditor key, from the statement of work>
+npx -y kronicle-lite@0.11.0 verify-audit pack/ --key-fingerprint <SHA-256 of the auditor key, from the statement of work>
 ```
 
+(0.11.0 is unreleased. Until it is published, `npx -y kronicle-lite@0.10.2 verify-audit`
+checks packs made by 0.10.x with the 0.10.0 rules, which `--profile legacy` keeps.)
+
 ```sh
-# auditor: after each milestone event
+# auditor: record harness_frozen with the plan of run IDs, then
 kronicle-lite checkpoint --push              # anchor [1..head]
-kronicle-lite audit stamp --out stamps/      # RFC 3161 tokens over sha256(receipt), right away
-# at delivery
-kronicle-lite audit package --audit-id A --out pack/ --timestamps stamps/
+kronicle-lite audit stamp --out stamps/      # RFC 3161 tokens over sha256(receipt), right away; prints the freeze nonce
+# … every run records that nonce; a run that cannot finish is run_abandoned with its reason;
+#   anchor + stamp after the last run, and after the report and audit_closed
+# at delivery (stamps SHA256SUMS with Sectigo and DigiCert)
+kronicle-lite audit package --audit-id A --out pack/ --timestamps stamps/ --allowed-signers reproducers.allowed
 ```
 
-- **Claims.** `claims.json` lists what the pack claims: `integrity`, `chain`,
-  `receipts`, `independent_timestamps`, `harness_frozen_before_runs`,
-  `run_sequence`. `audit package` declares only what the store's contents
-  support. `verify-audit` pins the auditor key by fingerprint, verifies
-  `SHA256SUMS` before it reads `claims.json`, always checks `integrity` and
-  `chain`, then the declared claims and what they depend on (every claim when
-  `claims.json` is missing or unauthenticated), and prints `PASS` / `FAIL` per
+- **Profiles.** `verify-audit` checks a pack against the **audit profile** by
+  default: every claim below is checked whatever `claims.json` says
+  (`claims.json` can add claims, never remove one). The pack must also be
+  bundle format `/3` with only this audit's events (no stubs); verified
+  anchors must close the freeze (before any run), the last run (before the
+  report) and the report (the whole bundle), each stamped by two different
+  pinned TSA CAs; `SHA256SUMS` must be stamped by two TSA CAs too; and no
+  stamp may be pending (a `*.pending` marker that `audit stamp` leaves when a
+  TSA fails). `--profile legacy` applies the 0.10.0 rules to packs made
+  before 0.11.0: `claims.json` picks the claims, and the best result is
+  `PARTIAL`.
+- **Claims.** `integrity`, `chain`, `receipts`, `independent_timestamps`,
+  `harness_frozen_before_runs` (every run carries the freeze nonce
+  `sha256(freeze receipt digest ‖ its TSA tokens)`, which nobody can know
+  before the TSAs sign), `run_sequence`, `plan_complete` (the freeze lists the
+  planned run IDs; every planned run completes or is abandoned with a reason,
+  exactly once; no unplanned run; the report's `run_count` matches),
+  `reproductions_signed` (every accepted finding has a human sign-off, an SSH
+  signature from `ssh-keygen -Y sign` checked against the pack's
+  `allowed_signers`, or `--allowed-signers FILE` from outside the pack, by a
+  key that is not the auditor's) and `closed` (`audit_closed` is the last
+  event, names the report, and commits the run count and the final status of
+  every finding). `verify-audit` pins the auditor key by fingerprint, verifies
+  `SHA256SUMS` before it reads `claims.json`, and prints `PASS` / `FAIL` per
   claim with the evidence for every check (hashes, roots, keys, TSA names and
-  signed times); the rest show as `not declared` (`--require CLAIM` checks one
-  and needs it to pass). A declared claim that is not checked (for example
-  under `--no-tsa`) gives `NOT VERIFIED`, unless the user opts out of it with
-  `--skip-claim CLAIM` (`skipped by user`). Exit 0 means every checked claim
-  passed and none was left unchecked; an unpinned auditor key never exits 0;
-  `--json` follows `VerifyAuditJsonSchema`.
+  signed times). `--json` follows `VerifyAuditJsonSchema`
+  (`kronicle-lite-verify-audit/2`, with `profile` and `verdict`).
+- **Reading the result.**
+
+  | Result | Exit | Meaning |
+  |---|---|---|
+  | `VERIFIED` | 0 | the audit profile: every claim checked and passed |
+  | `PARTIAL` | 2 | every check that ran passed, but the pack does not meet the audit profile: it was checked under `--profile legacy` (a pack made before 0.11.0; the line below the result lists what was not checked), or the user skipped a claim with `--skip-claim`. Read it as "nothing was found wrong in what was checked", not as a verified audit |
+  | `NOT VERIFIED` | 1 | a claim the pack needs was not checked (for example the timestamp claims under `--no-tsa`) |
+  | `FAILED` | 1 | a check failed; the first failing check of each claim is printed |
+
+  Exit 2 is also a usage error or an unreadable pack; those print an
+  `error:` line on stderr and no `RESULT`. An unpinned auditor key never
+  exits 0.
 - **Scope.** The claims establish integrity, ordering and independent time.
   The depth and method of the audit are described in its report.
 - **Trust.** The production anchor service key (a genesis key pinned by its
@@ -395,8 +426,10 @@ kronicle-lite audit package --audit-id A --out pack/ --timestamps stamps/
   RFC 3161 is verified in-process (no openssl needed).
 - **Without kronicle-lite.** Every pack has a `VERIFY.md` with the raw
   commands: `shasum -a 256 -c SHA256SUMS` and `openssl pkeyutl -verify` for the
-  files and their signature, `openssl ts -verify` for each token, `jq` +
-  `openssl pkeyutl` for the anchor receipts' Ed25519 signatures.
+  files and their signature, `openssl ts -verify` for each token and for
+  `SHA256SUMS`, `xxd` + `shasum` to recompute the freeze nonce, `jq` +
+  `openssl pkeyutl` for the anchor receipts' Ed25519 signatures, and
+  `ssh-keygen -Y verify` for a human sign-off.
 - **Later years.** TSA certificates expire: re-verify with
   `openssl ts -verify -partial_chain -attime <genTime>` (or `verify-audit --tsa-at-gentime`)
   against the same pinned CAs, and keep the pack whole (the tokens carry
@@ -408,7 +441,8 @@ kronicle-lite audit package --audit-id A --out pack/ --timestamps stamps/
 - **Milestone events.** `harness_frozen`, `run_completed` (numbered by
   `run_seq`, with the freeze nonce) and `report_issued` ([AUDIT.md](docs/AUDIT.md));
   a bundle that uses them is format `/2`, which needs kronicle-lite 0.10.0 to
-  verify.
+  verify. A freeze with a `plan`, or the 0.11.0 kinds `run_abandoned`,
+  `reproduction_signed` and `audit_closed`, makes it format `/3` (0.11.0).
 
 Details: [EVIDENCE-BUNDLE.md](docs/EVIDENCE-BUNDLE.md#evidence-packs-0100).
 
