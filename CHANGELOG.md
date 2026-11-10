@@ -4,7 +4,7 @@ All notable changes to kronicle-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
-## [Unreleased] — next (0.11.0)
+## [0.11.0] — 2026-11-10
 
 ### Changed — `verify-audit` checks the audit profile by default (breaking)
 

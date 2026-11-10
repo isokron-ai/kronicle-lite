@@ -360,8 +360,8 @@ them. A client checks it offline with one command:
 npx -y kronicle-lite@0.11.0 verify-audit pack/ --key-fingerprint <SHA-256 of the auditor key, from the statement of work>
 ```
 
-(0.11.0 is unreleased. Until it is published, `npx -y kronicle-lite@0.10.2 verify-audit`
-checks packs made by 0.10.x with the 0.10.0 rules, which `--profile legacy` keeps.)
+(Packs made by 0.10.x fail the default audit profile; check them with `--profile legacy`, which
+applies the 0.10.0 rules and reports `PARTIAL`, or with `npx -y kronicle-lite@0.10.2 verify-audit`.)
 
 ```sh
 # auditor: record harness_frozen with the plan of run IDs, then

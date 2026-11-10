@@ -205,7 +205,7 @@ kronicle-lite audit stamp --out stamps/               # RFC 3161 over sha256(rec
 # at delivery
 kronicle-lite audit package --audit-id A --out pack/ --timestamps stamps/
 # client
-npx -y kronicle-lite@0.10.2 verify-audit pack/ --key-fingerprint <SHA-256 of the auditor key, from the statement of work>
+npx -y kronicle-lite@0.11.0 verify-audit pack/ --key-fingerprint <SHA-256 of the auditor key, from the statement of work>
 ```
 
 Use one store per audit, so the bundle starts at seq 1 and every anchor's range

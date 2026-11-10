@@ -44,7 +44,7 @@ jobs:
       - if: steps.tools.outputs.openssl == 'yes'
         run: npm run build
       - if: steps.tools.outputs.openssl == 'yes'
-        run: npx vitest run test/verify-audit-profile.test.ts -t 'openssl differential|differential: ssh-keygen'
+        run: "npx vitest run test/verify-audit-profile.test.ts -t 'openssl differential|differential: ssh-keygen'"
         env:
           KL_REQUIRE_RAW_TOOLS: '1'
 
