@@ -71,10 +71,37 @@ function isPlaceholder(v: string): boolean {
 /**
  * 0.8.1: `<key><sep><value>` where the key contains password/passwd, or ends in
  * pwd/secret/token (`secretName`, `token_url`, `tokenizer` are not secrets).
- * Group 1 = key, 2 = value (quotes kept, checked by isPlaceholder).
+ * Group 1 = key, 2 = value (quotes kept, checked by isPlaceholder). Under a
+ * token(s) key the value must also pass tokenValueOk (0.11.2).
  */
 const PASSWORD_ASSIGNMENT =
   /(?<![A-Za-z0-9_-])["']?([A-Za-z0-9_-]{0,48}pass(?:word|wd)[A-Za-z0-9_-]{0,48}|[A-Za-z0-9_-]{0,48}(?:pwd|secret|token)s?)["']?[ \t]*(?::=|=|:)[ \t]*(["']?[^\s"'#,;{}[\]]{6,512}["']?)/gi;
+/** Shannon entropy of `s` in bits per character. */
+function entropy(s: string): number {
+  const counts = new Map<string, number>();
+  for (const c of s) counts.set(c, (counts.get(c) ?? 0) + 1);
+  let h = 0;
+  for (const n of counts.values()) h -= (n / s.length) * Math.log2(n / s.length);
+  return h;
+}
+
+/**
+ * 0.11.2: the value under a key whose only sensitive word is `token(s)` must
+ * look like an issued credential, because "token" is also a unit of measure
+ * (`Tokens: cl100k`, `Tokens: o200k_base`, `max_tokens: 4096k`). A count with
+ * an optional magnitude suffix never is one. Otherwise: 16+ characters at 3+
+ * bits per character (hex, base64, random alphanumerics), or a mixed-case
+ * alphanumeric run of 8+ with a digit (`h7Gq2xLp9vRt`). Tokenizer and
+ * encoding names are lowercase words and digits, short and low in entropy.
+ */
+const tokenValueOk = (v: string): boolean => {
+  if (/^[0-9][0-9.,_]*[ \t]?[kKmMbBgG]?$/.test(v)) return false;
+  if (v.length >= 16 && entropy(v) >= 3) return true;
+  return v.length >= 8 && /^[A-Za-z0-9]+$/.test(v) && /[a-z]/.test(v) && /[A-Z]/.test(v) && /[0-9]/.test(v);
+};
+/** A key name that is sensitive for a reason other than containing "token". */
+const STRONG_KEY = /pass(?:word|wd)|pwd|secret|api_?key|access_?key|private_?key/i;
+
 /** The value of a password assignment: a literal credential, not a path, a reference or an expression. */
 const passwordValueOk = (m: string): boolean => {
   const sep = m.search(/(?::=|=|:)[ \t]*["']?[^\s"'#,;{}[\]]{6,}["']?$/);
@@ -82,6 +109,8 @@ const passwordValueOk = (m: string): boolean => {
   if (/^[~/.]|^[A-Za-z]:\\|^https?:|^\$|^%|environ|getenv|secrets?\.|\(|^(?:true|false|null|none|nil|undefined)$/i.test(v)) return false;
   // A letter and a digit (hunter2, Zq…9), or a long mixed value (three of: lower, upper, digit, symbol).
   if (!/[A-Za-z]/.test(v)) return false;
+  // 0.11.2: `Tokens: cl100k` is a measurement label; a token key needs a credential-strength value.
+  if (!STRONG_KEY.test(m.slice(0, sep))) return tokenValueOk(v);
   if (/[0-9]/.test(v)) return true;
   const classes = [/[a-z]/, /[A-Z]/, /[^A-Za-z0-9]/].filter((r) => r.test(v)).length;
   return v.length >= 12 && classes >= 3;
@@ -243,7 +272,12 @@ export const WRITE_DETECTORS: readonly Detector[] = [
     re: /^[ \t]*(?:export[ \t]+)?[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|API_?KEY|ACCESS_?KEY|PRIVATE_?KEY)[A-Z0-9_]*[ \t]*[:=][ \t]*(['"]?[^\s'"#]{8,}['"]?)/gm,
     find: findEnvSecrets,
     valueGroup: 1,
-    accept: (m) => looksLikeCredential(m.slice(m.search(/[:=]/) + 1)),
+    // 0.11.2: a name whose only keyword is TOKEN (TOKENIZER=, MAX_TOKENS=) needs a credential-strength value.
+    accept: (m) => {
+      const sep = m.search(/[:=]/);
+      const raw = m.slice(sep + 1);
+      return looksLikeCredential(raw) && (STRONG_KEY.test(m.slice(0, sep)) || tokenValueOk(raw.trim().replace(/^['"]|['"]$/g, '')));
+    },
   },
   {
     // 0.8.1 (R2-11): a key NAME that contains password / passwd (anywhere) or ends in
