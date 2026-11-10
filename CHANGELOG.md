@@ -4,6 +4,49 @@ All notable changes to kronicle-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
+## [0.11.1] — 2026-11-10
+
+### Added — the anchor key from a command or a file (GL-6, PH-10)
+
+- **`KRONICLE_ANCHOR_KEY_CMD`**: a command whose stdout is the license key,
+  so the key can stay in the macOS keychain
+  (`security find-generic-password -w -s kronicle-anchor`) or a password
+  manager (`op read op://Private/kronicle-anchor/credential`) instead of
+  being exported by hand. It runs without a shell (sh-style quoting; a pipe,
+  redirect, `$` or `;` is refused), with stdin closed, a 30 s timeout
+  (`KRONICLE_ANCHOR_KEY_CMD_TIMEOUT_MS`) and its stderr never shown. A
+  command that fails, times out or prints more than one line is an error and
+  never falls through to the next source.
+- **`--anchor-key-file PATH`** on `checkpoint --push`, `verify`, `anchor
+  status` and `audit stamp`: a file holding only the key (a warning when
+  others can read it).
+- **Order**: `--anchor-key-file` (or `--key`; not both) >
+  `KRONICLE_ANCHOR_KEY_CMD` > `KRONICLE_ANCHOR_KEY` > `license_key` in
+  `config.json`. The key is never logged, written or put in an error message.
+  `anchor status` and `doctor` count a configured command without running
+  it. Library: `resolveAnchorKey`, `requireLicenseKey`, `withLicenseKey`,
+  `AnchorCallOptions.licenseKeyFile`.
+
+### Changed — in audit mode a missing anchor fails instead of recording PENDING
+
+- **`audit stamp`** stamps the latest anchor when it commits the latest
+  audit event; otherwise it pushes a checkpoint over `[1..head]` first (new
+  options `--anchor-key-file`, `--key`, `--url`, `--genesis`,
+  `--insecure-http`). A missing key, an unreachable anchor service or a TSA
+  that does not answer exits 2 with the cause and writes **no** `.pending`
+  marker; the tokens that were obtained are kept, and no freeze nonce is
+  printed until every TSA has answered. In 0.11.0 a failed TSA left
+  `<anchor>.<tsa>.pending` and the freeze was recorded as PENDING.
+- **`--allow-pending`** keeps the 0.11.0 behaviour (a `.pending` marker per
+  failed TSA, exit 2). `audit package` carries the marker and the audit
+  profile rejects the pack (`pending stamps`), so such a pack never
+  verifies. Library: `stampAnchor` writes a marker only with
+  `allow_pending: true`.
+- **`checkpoint --push` over a range holding a `/3` audit's events** resolves
+  the key before anything is stored: without one it exits 2 with nothing
+  stored. When the push fails it says that the milestone anchor was not
+  obtained. Outside audit mode `checkpoint --push` is unchanged.
+
 ## [0.11.0] — 2026-11-10
 
 ### Changed — `verify-audit` checks the audit profile by default (breaking)
