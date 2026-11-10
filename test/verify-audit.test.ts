@@ -28,7 +28,7 @@ import { inspectTimestamp, OID, timestampRequest, checkTimestampReply, verifyTim
 import { BUNDLE_FORMAT_V1, BUNDLE_FORMAT_V2 } from '../src/audit/schemas.js';
 import { readTime, TAG } from '../src/audit/der.js';
 import { SHIPPED_TSA_ROOTS } from '../src/audit/tsa-roots.js';
-import { listPackFiles, openTrustInput, readTrustInput, refuseInsidePack, renderVerifyAudit, SEEN_KEYS_FILE, sha256sums, SUMS_FILES, verifyAudit, VerifyAuditJsonSchema, VerifyAuditUsageError, type VerifyAuditOptions } from '../src/audit/verify-audit.js';
+import { LEGACY_CLAIMS, listPackFiles, openTrustInput, readTrustInput, refuseInsidePack, renderVerifyAudit, SEEN_KEYS_FILE, sha256sums, SUMS_FILES, verifyAudit, VerifyAuditJsonSchema, VerifyAuditUsageError, type VerifyAuditOptions } from '../src/audit/verify-audit.js';
 import { verifyBundle } from '../src/audit/verify-bundle.js';
 import { canonicalize } from '../src/crypto/canonical.js';
 import { chainIdFromPublicKeyPem } from '../src/crypto/keys.js';
@@ -149,14 +149,20 @@ async function build(variant: Variant, o: { tsas?: TestTsa[]; genTime?: (i: numb
   return { dataDir, pkg, keyFile, keysFile, rootsDir, tsDir, digests, tsas, pack, fp: chainIdFromPublicKeyPem(readFileSync(keyFile, 'utf8')), genesis, genesisFp };
 }
 
-/** A fresh rollback cache per call unless the test passes its own seen_dir. */
-const trustOpts = (f: Fixture): VerifyAuditOptions => ({ seen_dir: tempDir('kl-va-seen-'), key_fingerprint: f.fp, genesis: f.genesis, tsa_roots: f.tsas.map((t) => t.root.pem) });
+/**
+ * A fresh rollback cache per call unless the test passes its own seen_dir. 0.11.0: these packs are
+ * 0.10.0 packs (format /2, no run plan), so they are checked under the legacy profile, where the
+ * best result is PARTIAL (exit 2); test/verify-audit-profile.test.ts covers the audit profile.
+ */
+const trustOpts = (f: Fixture): VerifyAuditOptions => ({ profile: 'legacy', seen_dir: tempDir('kl-va-seen-'), key_fingerprint: f.fp, genesis: f.genesis, tsa_roots: f.tsas.map((t) => t.root.pem) });
 
 function cli(args: string[], env: Record<string, string> = {}) {
   const r = spawnSync(process.execPath, [CLI, ...args], { encoding: 'utf8', env: cleanEnv({ KRONICLE_LITE_DATA_DIR: tempDir('kl-va-cli-'), ...env }) });
   return { code: r.status, out: r.stdout, err: r.stderr };
 }
-const trustArgs = (f: Fixture) => ['--key-fingerprint', f.fp, '--genesis', f.genesis, '--tsa-roots', f.rootsDir];
+const trustArgs = (f: Fixture) => ['--profile', 'legacy', '--key-fingerprint', f.fp, '--genesis', f.genesis, '--tsa-roots', f.rootsDir];
+/** What a 0.10.0 pack that passes every check it declares reports in 0.11.0 (legacy profile). */
+const PARTIAL = 'partial';
 const copyPkg = (f: Fixture) => {
   const d = join(tempDir('kl-va-copy-'), 'package');
   cpSync(f.pkg, d, { recursive: true });
@@ -268,7 +274,9 @@ describe('verify-audit: a synthetic evidence pack end to end', () => {
       claims: ['integrity', 'chain', 'receipts', 'independent_timestamps', 'harness_frozen_before_runs', 'run_sequence'],
       runs: { count: 3, seqs: [1, 2, 3], interruptions: [{ run_seq: 3, event_key: 'run:3', note: 'proxy restarted; resumed' }] },
     });
-    expect(f.pack.check.ok).toBe(true);
+    // 0.11.0: a /2 pack is checked under the legacy profile; everything it declares passes: PARTIAL.
+    expect(f.pack.profile).toBe('legacy');
+    expect(f.pack.check.verdict).toBe(PARTIAL);
     const completion = readFileSync(join(f.pkg, 'COMPLETION.txt'), 'utf8');
     expect(completion).toContain('IsoKron Evidence Pack: acme-mcp-2026-11');
     expect(completion).toContain('Tamper-evident, independently timestamped audit evidence.');
@@ -291,10 +299,10 @@ describe('verify-audit: a synthetic evidence pack end to end', () => {
     }
   });
 
-  it('verifies: exit 0, one PASS per claim, the key pinned by fingerprint, values to compare', () => {
+  it('verifies: exit 2 PARTIAL under --profile legacy, one PASS per declared claim, the key pinned by fingerprint, values to compare', () => {
     const r = cli(['verify-audit', f.pkg, ...trustArgs(f)]);
     expect(r.err).toBe('');
-    expect(r.code).toBe(0);
+    expect(r.code).toBe(2);
     expect(r.out.split('\n')[0]).toBe(`IsoKron Evidence Pack  ${f.pkg}`);
     expect(r.out).toContain('(pinned by --key-fingerprint)');
     for (const c of ['integrity', 'chain', 'receipts', 'independent_timestamps', 'harness_frozen_before_runs', 'run_sequence']) expect(r.out).toMatch(new RegExp(`^ {2}PASS {10}${c} `, 'm'));
@@ -305,7 +313,8 @@ describe('verify-audit: a synthetic evidence pack end to end', () => {
     expect(r.out).toMatch(/PASS {2}SHA256SUMS +\d+ file\(s\) match; signed by ed25519-/);
     expect(r.out).toMatch(/PASS {2}stamped within key validity/);
     expect(r.out).toContain(`manifest sha256  ${f.pack.manifest_sha256}`);
-    expect(r.out).toContain('RESULT: VERIFIED  integrity, chain, receipts, independent_timestamps, harness_frozen_before_runs, run_sequence');
+    expect(r.out).toContain('RESULT: PARTIAL  integrity, chain, receipts, independent_timestamps, harness_frozen_before_runs, run_sequence');
+    expect(r.out).toContain('PARTIAL: every check that ran passed, but the pack does not meet the audit profile (checked under --profile legacy (the 0.10.0 rules); not checked: plan_complete, reproductions_signed, closed). Exit 2.');
     expect(r.out).not.toContain('FAIL');
     expect(r.out).not.toMatch(/does not prove|NOT proven|not prove/i);
     expect(cli(['help']).out).toContain('Establishes integrity, ordering');
@@ -313,17 +322,21 @@ describe('verify-audit: a synthetic evidence pack end to end', () => {
 
   it('--json follows the published schema', () => {
     const r = cli(['verify-audit', f.pkg, ...trustArgs(f), '--json']);
-    expect(r.code).toBe(0);
+    expect(r.code).toBe(2);
     const j = VerifyAuditJsonSchema.parse(JSON.parse(r.out));
-    expect(j).toMatchObject({ ok: true, failed: 0, audit_id: AUDIT, bundle_format: BUNDLE_FORMAT_V2, manifest_sha256: f.pack.manifest_sha256, auditor: { source: 'fingerprint', spki_sha256: f.fp }, trust: { key_list: 'pack', genesis_sha256: f.genesisFp, genesis_valid_from: '2026-11-01T00:00:00.000Z', genesis_source: 'option', key_chain: { status: 'intact' }, tsa_roots: 'dir', tsa_time: 'now' } });
-    expect(j.claims.map((c) => [c.claim, c.status])).toEqual(['integrity', 'chain', 'receipts', 'independent_timestamps', 'harness_frozen_before_runs', 'run_sequence'].map((c) => [c, 'pass']));
+    expect(j).toMatchObject({ ok: false, profile: 'legacy', verdict: 'partial', failed: 0, audit_id: AUDIT, bundle_format: BUNDLE_FORMAT_V2, manifest_sha256: f.pack.manifest_sha256, auditor: { source: 'fingerprint', spki_sha256: f.fp }, trust: { key_list: 'pack', genesis_sha256: f.genesisFp, genesis_valid_from: '2026-11-01T00:00:00.000Z', genesis_source: 'option', key_chain: { status: 'intact' }, tsa_roots: 'dir', tsa_time: 'now' } });
+    expect(j.claims.map((c) => [c.claim, c.status])).toEqual([
+      ...['integrity', 'chain', 'receipts', 'independent_timestamps', 'harness_frozen_before_runs', 'run_sequence'].map((c) => [c, 'pass']),
+      ...['plan_complete', 'reproductions_signed', 'closed'].map((c) => [c, 'not_declared']),
+    ]);
     expect(j.ordering).toMatchObject({ status: 'pass', basis: 'freeze_nonce', harness_digest: H, runs: { count: 3, nonce_bound: 3 } });
     expect(j.anchors.every((a) => a.ok && a.timestamps.length === 2 && a.timestamps.every((t) => t.ok) && new Set(a.timestamps.map((t) => t.ca)).size === 2)).toBe(true);
   });
 
   it('does not depend on openssl (PATH empty)', () => {
     const r = cli(['verify-audit', f.pkg, ...trustArgs(f)], { PATH: '' });
-    expect(r.code).toBe(0);
+    expect(r.code).toBe(2);
+    expect(r.out).toContain('RESULT: PARTIAL');
   });
 
   const rawTools = (() => {
@@ -583,7 +596,7 @@ describe('review probes P1: claims and the auditor key', () => {
     expect(cli(['verify-audit', d, ...trustArgs(f)]).code).toBe(1);
     resign(d, f.dataDir);
     const r = verifyAudit(d, trustOpts(f));
-    expect(claimStatus(r)).toEqual({ integrity: 'pass', chain: 'pass', receipts: 'not_declared', independent_timestamps: 'not_declared', harness_frozen_before_runs: 'not_declared', run_sequence: 'not_declared' });
+    expect(claimStatus(r)).toEqual({ integrity: 'pass', chain: 'pass', receipts: 'not_declared', independent_timestamps: 'not_declared', harness_frozen_before_runs: 'not_declared', run_sequence: 'not_declared', plan_complete: 'not_declared', reproductions_signed: 'not_declared', closed: 'not_declared' });
   });
 
   it('P1c / P1d: claims.json deleted, or [] unsigned: every claim is checked', () => {
@@ -737,8 +750,9 @@ describe('review probes P3/P4a: the anchor key chain and the receipt times', () 
     // the stub list with the compiled production genesis: BROKEN, with the self-hosting hint
     const r = verifyAudit(d, { rollback: 'off', key_fingerprint: f.fp, tsa_roots: f.tsas.map((t) => t.root.pem) });
     expect(r.checks.find((c) => c.check === 'anchor key list')).toMatchObject({ status: 'fail', evidence: expect.stringMatching(/pass --genesis <sha256>@<valid_from>/) });
-    const env = cli(['verify-audit', f.pkg, '--key-fingerprint', f.fp, '--tsa-roots', f.rootsDir], { KRONICLE_ANCHOR_GENESIS: f.genesis });
-    expect(env.code).toBe(0);
+    const env = cli(['verify-audit', f.pkg, '--profile', 'legacy', '--key-fingerprint', f.fp, '--tsa-roots', f.rootsDir], { KRONICLE_ANCHOR_GENESIS: f.genesis });
+    expect(env.code).toBe(2);
+    expect(env.out).toContain('RESULT: PARTIAL');
     // the anchor client's rules: a bare hash is not a pin, and the old variable is refused, not ignored
     expect(cli(['verify-audit', f.pkg, '--key-fingerprint', f.fp, '--genesis', f.genesisFp, '--tsa-roots', f.rootsDir]).code).toBe(2);
     const old = cli(['verify-audit', f.pkg, ...trustArgs(f)], { KRONICLE_ANCHOR_GENESIS_SHA256: f.genesisFp });
@@ -748,7 +762,8 @@ describe('review probes P3/P4a: the anchor key chain and the receipt times', () 
     const late = verifyAudit(d, { ...trustOpts(f), genesis: `${f.genesisFp}@2099-01-01T00:00:00.000Z` });
     expect(late.checks.find((c) => c.check === 'service signature' && c.status === 'fail')!.evidence).toMatch(/precedes anchor-ed25519-[0-9a-f]{16} valid_from 2099-01-01T00:00:00.000Z/);
     const file = cli(['verify-audit', f.pkg, ...trustArgs(f), '--anchor-keys', f.keysFile]);
-    expect(file.code).toBe(0);
+    expect(file.code).toBe(2);
+    expect(file.out).toContain('RESULT: PARTIAL');
   });
 
   it('rollback: a shorter key list than one seen before fails (cache in the data dir)', () => {
@@ -792,7 +807,7 @@ describe('a revoked anchor service key: only a verified TSA time before compromi
     expect(r.trust.key_chain).toMatchObject({ status: 'intact', entries: [{ key_id: R.id, state: 'revoked', compromised_since: iso(now + 3600e3) }] });
     expect(stampCheck(r)).toHaveLength(3);
     expect(stampCheck(r)[0]!.evidence).toMatch(/earliest verified TSA time .* < .* − 5 min/);
-    expect(r.ok).toBe(true);
+    expect(r.verdict).toBe(PARTIAL);
   });
 
   it('stamped inside the 5 min before compromised_since: FAIL', () => {
@@ -832,7 +847,7 @@ describe('a revoked anchor service key: only a verified TSA time before compromi
     resign(d, f.dataDir);
     const r = verifyAudit(d, { ...trustOpts(f), genesis: `${R.fp}@${GENESIS_FROM}` });
     expect(r.trust.key_chain.status).toBe('intact');
-    expect(r.ok).toBe(true);
+    expect(r.verdict).toBe(PARTIAL);
     // and the reverse: R revoked, S after it: S's receipts fail
     const e = copyPkg(f);
     resignReceipts(e, f, S, recent);
@@ -1046,7 +1061,7 @@ describe('verify-audit: run sequence, ordering details and the v1 convention', (
   it('runs recorded before the freeze anchor: not declared; required, it fails', async () => {
     const f = await build('v1-early');
     expect(f.pack.claims.find((c) => c.claim === 'harness_frozen_before_runs')).toMatchObject({ declared: false, why: expect.stringMatching(/do not carry the freeze nonce/) });
-    expect(cli(['verify-audit', f.pkg, ...trustArgs(f)]).code).toBe(0);
+    expect(cli(['verify-audit', f.pkg, ...trustArgs(f)]).code).toBe(2);
     const req = cli(['verify-audit', f.pkg, ...trustArgs(f), '--require', 'harness_frozen_before_runs']);
     expect(req.code).toBe(1);
     expect(req.out).toMatch(/^ {2}FAIL {10}harness_frozen_before_runs +harness frozen before runs: .*do not carry the freeze nonce/m);
@@ -1377,7 +1392,7 @@ describe('review round 2 (N1–N9): every R-case fails closed', () => {
       const r = verifyAudit(d, { ...trustOpts(f), genesis: pinR });
       expect(failedChecks(r)).toEqual([]);
       expect(claimStatus(r)).toMatchObject({ receipts: 'pass', independent_timestamps: 'pass' });
-      expect(r.ok).toBe(true);
+      expect(r.verdict).toBe(PARTIAL);
     });
     it('the active head needs no TSA for receipts: independent_timestamps stays not declared', () => {
       const r = verifyAudit(keyPack([{ key_id: R.id, public_key_pem: R.pem, valid_from: GF, status: 'active' }], R, recent, ['integrity', 'chain', 'receipts']), { ...trustOpts(f), genesis: pinR });
@@ -1394,7 +1409,7 @@ describe('review round 2 (N1–N9): every R-case fails closed', () => {
       const rolled = keyPack(activeList(), R, recent, null);
       for (const v of [pinR, `${R.fp.toUpperCase()}@${GF}`, `${R.fp}@2026-01-01T00:00:00Z`, `${R.fp}@2026-01-01T00:00:00.0Z`, `${R.fp.match(/../g)!.join(':')}@${GF}`]) {
         const seen = tempDir('kl-va-seen-');
-        expect(verifyAudit(revoked, { ...trustOpts(f), genesis: pinR, seen_dir: seen }).ok).toBe(true);
+        expect(verifyAudit(revoked, { ...trustOpts(f), genesis: pinR, seen_dir: seen }).verdict).toBe(PARTIAL);
         const b = verifyAudit(rolled, { ...trustOpts(f), genesis: v, seen_dir: seen });
         expect(rollbackCheck(b)).toMatchObject({ status: 'fail', evidence: expect.stringMatching(/was revoked in the list seen earlier and is active now/) });
         expect(b.trust.genesis_valid_from).toBe(GF);
@@ -1447,14 +1462,15 @@ describe('review round 2 (N1–N9): every R-case fails closed', () => {
       const revoked = keyPack(revokedList(), R, recent, null);
       const rolled = keyPack(activeList(), R, recent, null);
       const dd = tempDir('kl-va-dd-');
-      const base = ['--key-fingerprint', f.fp, '--tsa-roots', f.rootsDir];
-      expect(cli(['verify-audit', revoked, ...base, '--genesis', pinR], { KRONICLE_LITE_DATA_DIR: dd }).code).toBe(0);
+      const base = ['--profile', 'legacy', '--key-fingerprint', f.fp, '--tsa-roots', f.rootsDir];
+      expect(cli(['verify-audit', revoked, ...base, '--genesis', pinR], { KRONICLE_LITE_DATA_DIR: dd }).code).toBe(2);
       const e = cli(['verify-audit', rolled, ...base], { KRONICLE_LITE_DATA_DIR: dd, KRONICLE_ANCHOR_GENESIS: `${R.fp}@2026-01-01T00:00:00Z` });
       expect(e.code).toBe(1);
       expect(e.out).toMatch(/^service keys {3}genesis [0-9a-f]{64}@2026-01-01T00:00:00\.000Z \(KRONICLE_ANCHOR_GENESIS\)/m);
       expect(e.out).toMatch(/FAIL +key list rollback +anchor-keys\.json is an older or weaker list/);
       const other = cli(['verify-audit', rolled, ...base, '--genesis', pinR]);
-      expect(other.code).toBe(0);
+      expect(other.code).toBe(2);
+      expect(other.out).toContain('RESULT: PARTIAL');
       expect(other.out).toMatch(/^key list {7}first seen for this genesis; recorded in /m);
       expect(other.out).not.toMatch(/PASS +key list rollback/);
     });
@@ -1477,7 +1493,7 @@ describe('review round 2 (N1–N9): every R-case fails closed', () => {
       const outside = tempDir('kl-va-out-');
       symlinkSync(join(d, 'auditor-key.pem'), join(outside, 'sym.pem'));
       linkSync(join(d, 'auditor-key.pem'), join(outside, 'hard.pem'));
-      const rest = ['--genesis', f.genesis, '--tsa-roots', f.rootsDir];
+      const rest = ['--profile', 'legacy', '--genesis', f.genesis, '--tsa-roots', f.rootsDir];
       for (const k of [join(d, 'auditor-key.pem'), join(d, '..auditor-key.pem'), join(outside, 'sym.pem')]) {
         const r = cli(['verify-audit', d, '--key', k, ...rest]);
         expect(r.code, k).toBe(2);
@@ -1486,8 +1502,10 @@ describe('review round 2 (N1–N9): every R-case fails closed', () => {
       const h = cli(['verify-audit', d, '--key', join(outside, 'hard.pem'), ...rest]);
       expect(h.code).toBe(2);
       expect(h.err).toMatch(/is a hard link to a file inside the pack/);
-      // a key file genuinely outside the pack is still accepted
-      expect(cli(['verify-audit', f.pkg, '--key', f.keyFile, ...rest]).code).toBe(0);
+      // a key file genuinely outside the pack is still accepted (PARTIAL: a 0.10.0 pack under --profile legacy)
+      const ok = cli(['verify-audit', f.pkg, '--key', f.keyFile, ...rest]);
+      expect(ok.code).toBe(2);
+      expect(ok.out).toContain('RESULT: PARTIAL');
     });
     it('--anchor-keys or --tsa-roots inside the pack, or a roots dir holding a symlink into it: exit 2', () => {
       const d = copyPkg(f);
@@ -1586,7 +1604,9 @@ describe('review round 2 (N1–N9): every R-case fails closed', () => {
       });
 
       it('T8: the CLI reads --key, --anchor-keys and each --tsa-roots file through that path (and still verifies a good pack)', () => {
-        expect(cli(['verify-audit', f.pkg, '--key', f.keyFile, '--genesis', f.genesis, '--tsa-roots', f.rootsDir, '--anchor-keys', f.keysFile]).code).toBe(0);
+        const good = cli(['verify-audit', f.pkg, '--profile', 'legacy', '--key', f.keyFile, '--genesis', f.genesis, '--tsa-roots', f.rootsDir, '--anchor-keys', f.keysFile]);
+        expect(good.code).toBe(2);
+        expect(good.out).toContain('RESULT: PARTIAL');
         const roots = tempDir('kl-va-t8-roots-');
         writeFileSync(join(roots, 'empty.pem'), 'no certificates here\n');
         const r = cli(['verify-audit', f.pkg, '--key-fingerprint', f.fp, '--genesis', f.genesis, '--tsa-roots', roots]);
@@ -1633,12 +1653,12 @@ describe('review round 2 (N1–N9): every R-case fails closed', () => {
       const r = verifyAudit(declared(), { ...trustOpts(f), require: ['receipts'] });
       expect(claimStatus(r).receipts).toBe('pass');
       expect(r.claims.find((c) => c.claim === 'receipts')).toMatchObject({ declared: false, required: true });
-      expect(r.ok).toBe(true);
+      expect(r.verdict).toBe(PARTIAL);
     });
     it('R6b: --require run_sequence (not declared): checked; it passes when the runs are 1..N', () => {
       const r = verifyAudit(declared(), { ...trustOpts(f), require: ['run_sequence'] });
       expect(claimStatus(r).run_sequence).toBe('pass');
-      expect(r.ok).toBe(true);
+      expect(r.verdict).toBe(PARTIAL);
     });
     it('R6b: --require of a claim that is checked and fails: FAIL', () => {
       const r = verifyAudit(declared(), { ...trustOpts(f), require: ['harness_frozen_before_runs'] });
@@ -1656,12 +1676,12 @@ describe('review round 2 (N1–N9): every R-case fails closed', () => {
     });
     it('R6c: --no-tsa with --tsa-roots is a usage error; R6d: declared claims only: PASS', () => {
       expect(cli(['verify-audit', f.pkg, ...trustArgs(f), '--no-tsa']).code).toBe(2);
-      expect(verifyAudit(declared(), trustOpts(f)).ok).toBe(true);
+      expect(verifyAudit(declared(), trustOpts(f)).verdict).toBe(PARTIAL);
     });
   });
 
   describe('R7a: a declared claim that is not checked blocks exit 0; --skip-claim opts out explicitly', () => {
-    const base = () => ['verify-audit', f.pkg, '--key-fingerprint', f.fp, '--genesis', f.genesis];
+    const base = () => ['verify-audit', f.pkg, '--profile', 'legacy', '--key-fingerprint', f.fp, '--genesis', f.genesis];
     it('--no-tsa on a pack that declares TSA claims: exit 1, NOT VERIFIED, each printed as not checked (--no-tsa)', () => {
       const r = cli([...base(), '--no-tsa']);
       expect(r.code).toBe(1);
@@ -1672,15 +1692,15 @@ describe('review round 2 (N1–N9): every R-case fails closed', () => {
       expect(j.ok).toBe(false);
       expect(VerifyAuditJsonSchema.safeParse(j).success).toBe(true);
     });
-    it('--no-tsa --skip-claim for both: exit 0, reported as skipped by user', () => {
+    it('--no-tsa --skip-claim for both: exit 2 PARTIAL, reported as skipped by user', () => {
       const r = cli([...base(), '--no-tsa', '--skip-claim', 'independent_timestamps,harness_frozen_before_runs']);
-      expect(r.code).toBe(0);
+      expect(r.code).toBe(2);
       expect(r.out).toMatch(/^ {2}skipped {7}independent_timestamps +skipped by user \(--skip-claim independent_timestamps\); the pack declares it/m);
       expect(r.out).toMatch(/^ {2}skipped {7}harness_frozen_before_runs +skipped by user/m);
-      expect(r.out).toMatch(/^RESULT: VERIFIED {2}integrity, chain, receipts, run_sequence {2}\(independent_timestamps, harness_frozen_before_runs skipped by user\)$/m);
+      expect(r.out).toMatch(/^RESULT: PARTIAL {2}integrity, chain, receipts, run_sequence {2}\(independent_timestamps, harness_frozen_before_runs skipped by user\)$/m);
       const j = verifyAudit(f.pkg, { ...trustOpts(f), no_tsa: true, skip_claims: ['independent_timestamps', 'harness_frozen_before_runs'] });
       expect(claimStatus(j)).toMatchObject({ independent_timestamps: 'skipped', harness_frozen_before_runs: 'skipped' });
-      expect(j.ok).toBe(true);
+      expect(j.verdict).toBe(PARTIAL);
       expect(VerifyAuditJsonSchema.safeParse(j).success).toBe(true);
     });
     it('skipping one but not the other still blocks; a claim that depends on a skipped one is not checked', () => {
@@ -1694,7 +1714,7 @@ describe('review round 2 (N1–N9): every R-case fails closed', () => {
       expect(claimStatus(r2)).toMatchObject({ receipts: 'skipped', independent_timestamps: 'not_checked', harness_frozen_before_runs: 'not_checked' });
       expect(r2.ok).toBe(false);
       const r3 = verifyAudit(f.pkg, { ...trustOpts(f), skip_claims: ['independent_timestamps', 'harness_frozen_before_runs'] });
-      expect(r3.ok).toBe(true);
+      expect(r3.verdict).toBe(PARTIAL);
     });
     it('--skip-claim of integrity or chain, of a claim also --require\'d, or of an unknown claim: exit 2', () => {
       for (const extra of [['--skip-claim', 'integrity'], ['--skip-claim', 'chain'], ['--skip-claim', 'receipts', '--require', 'receipts'], ['--skip-claim', 'thoroughness']]) {
@@ -1722,7 +1742,8 @@ describe('review round 2 (N1–N9): every R-case fails closed', () => {
     };
     const r = verifyAudit(f.pkg, { ...trustOpts(f), anchor_keys: boom });
     expect(r.checks.find((c) => c.check === 'verifier')).toMatchObject({ status: 'fail', evidence: 'verifier error: boom' });
-    for (const c of r.claims) expect(c.status, c.claim).toBe('fail');
+    // every claim it was checking (the legacy profile checks the declared 0.10.0 claims; the 0.11.0 ones are not declared)
+    for (const c of r.claims) expect(c.status, c.claim).toBe(LEGACY_CLAIMS.includes(c.claim) ? 'fail' : 'not_declared');
     expect(r.claims.find((c) => c.claim === 'integrity')!.evidence).toBe('not finished: the verifier stopped (boom)');
     expect(r.ok).toBe(false);
   });

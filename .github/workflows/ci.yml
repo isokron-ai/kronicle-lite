@@ -23,6 +23,31 @@ jobs:
       # Re-snapshot deliberately with `npm run catalog:snapshot` and commit the diff.
       - run: npm run catalog:check
 
+  # Differential: the evidence pack's RFC 3161 tokens (anchors and SHA256SUMS) against
+  # `openssl ts -verify`, every raw command in VERIFY.md (openssl, jq, shasum, xxd) and
+  # ssh-keygen -Y sign / verify for the human sign-off. Skipped when the runner has no
+  # OpenSSL 3+; with it, KL_REQUIRE_RAW_TOOLS=1 makes a missing tool fail instead of skip.
+  openssl-differential:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - id: tools
+        run: |
+          if openssl version | grep -Eq '^OpenSSL [3-9]\.'; then echo "openssl=yes" >> "$GITHUB_OUTPUT"; else echo "openssl=no" >> "$GITHUB_OUTPUT"; echo "no OpenSSL 3+ on this runner: skipping"; fi
+          openssl version || true
+      - if: steps.tools.outputs.openssl == 'yes'
+        run: npm ci
+      - if: steps.tools.outputs.openssl == 'yes'
+        run: npm run build
+      - if: steps.tools.outputs.openssl == 'yes'
+        run: npx vitest run test/verify-audit-profile.test.ts -t 'openssl differential|differential: ssh-keygen'
+        env:
+          KL_REQUIRE_RAW_TOOLS: '1'
+
   # macOS: no GNU `timeout` (the shim falls back to perl alarm, exit 142),
   # /var -> /private/var symlinks, bash 3.2 as /bin/sh's sibling.
   macos:

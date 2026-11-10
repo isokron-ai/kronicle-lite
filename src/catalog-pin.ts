@@ -4,7 +4,7 @@
  * without pulling in the server.
  */
 
-export const CATALOG_FINGERPRINT = 'e637c91cb88459555de409fdd3b52b1055faef81f116d91c0ecb20e627a276fd';
+export const CATALOG_FINGERPRINT = 'ebd2f0092cb3a7a9e94dae9825384bf6110d464273bd5811e84a1e20c70ed4d6';
 /** Package version the fingerprint above was pinned for. */
 export const CATALOG_VERSION = '0.10.2';
 /** 0.6.0: the `serve --core` catalog (.mcp-catalog/kronicle-lite-core.json). */
