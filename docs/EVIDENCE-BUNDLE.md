@@ -202,6 +202,8 @@ of the audit was committed. Source: `src/audit/package.ts` (`audit stamp`,
 # auditor, after each milestone (harness frozen, runs done, report issued)
 kronicle-lite checkpoint --push                       # anchor [1..head]
 kronicle-lite audit stamp --out stamps/               # RFC 3161 over sha256(receipt), Sectigo + DigiCert
+                                                      #   (0.11.1: pushes the anchor first if the milestone
+                                                      #   is not anchored yet; fails, never pending)
 # at delivery
 kronicle-lite audit package --audit-id A --out pack/ --timestamps stamps/
 # client
@@ -230,7 +232,7 @@ stamp carries a later time.
 | `COMPLETION.txt` | one page: manifest SHA-256, signing key fingerprint, final anchored root, timestamp times, claims |
 | `VERIFY.md` | the one-command check and the raw commands (`shasum`, `openssl`, `jq`) with this pack's file names |
 | `allowed_signers` | (0.11.0) the reproducers' public keys, ssh-keygen ALLOWED SIGNERS format, for `reproduction_signed`; authenticated by `SHA256SUMS` (pin them out of band with `--allowed-signers FILE`) |
-| `anchors/NN-<label>.<tsa>.pending` | (0.11.0) a stamp that was asked for and not obtained (`audit stamp` leaves one per failed TSA); the audit profile fails while one is in the pack |
+| `anchors/NN-<label>.<tsa>.pending` | (0.11.0) a stamp that was asked for and not obtained (0.11.1: only `audit stamp --allow-pending` leaves one per failed TSA; without it a failed TSA is an error and leaves nothing); the audit profile fails while one is in the pack |
 | `SHA256SUMS` | `<sha256>  <path>` for every other file, sorted (`shasum -a 256 -c` format) |
 | `SHA256SUMS.sig` | raw 64-byte Ed25519 signature of `SHA256SUMS` by the auditor key (`openssl pkeyutl -verify -rawin`) |
 | `SHA256SUMS.<tsa>.tsr` | (0.11.0) RFC 3161 reply over `SHA256SUMS` itself (`openssl ts -verify -data SHA256SUMS`); not listed in `SHA256SUMS` |

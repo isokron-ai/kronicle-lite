@@ -5,7 +5,7 @@
  */
 
 const GLOBAL = ['data-dir'];
-const ANCHOR = ['url', 'key', 'insecure-http', 'genesis'];
+const ANCHOR = ['url', 'key', 'anchor-key-file', 'insecure-http', 'genesis'];
 const RANGE = ['from', 'to', 'full'];
 
 export const COMMAND_OPTIONS: Readonly<Record<string, readonly string[]>> = {
@@ -16,7 +16,7 @@ export const COMMAND_OPTIONS: Readonly<Record<string, readonly string[]>> = {
   'audit record': ['audit-id', 'in', 'json', 'actor'],
   'audit query': ['audit-id', 'fingerprint', 'kind', 'finding', 'findings', 'json'],
   'audit export': ['audit-id', 'out'],
-  'audit stamp': ['anchor-id', 'out', 'tsa', 'json'],
+  'audit stamp': ['anchor-id', 'out', 'tsa', 'json', 'allow-pending', ...ANCHOR],
   'audit package': ['audit-id', 'out', 'timestamps', 'tsa-roots', 'anchor-keys', 'genesis', 'allowed-signers', 'tsa', 'no-stamp-sums', 'json'],
   'verify-audit': ['allow-hardlinks', 'allowed-signers', 'anchor-keys', 'genesis', 'json', 'key', 'key-fingerprint', 'max-bytes', 'no-tsa', 'profile', 'require', 'skip-claim', 'tsa-at-gentime', 'tsa-roots'],
   rebuild: [],

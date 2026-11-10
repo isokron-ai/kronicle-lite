@@ -293,7 +293,8 @@ an anchored range is detectable even when it was re-signed locally.
 
 ```sh
 # config: flags > env > <data-dir>/config.json > default
-export KRONICLE_ANCHOR_KEY=KLA_…                 # or {"license_key": "KLA_…"} in config.json (0600)
+export KRONICLE_ANCHOR_KEY_CMD='security find-generic-password -w -s kronicle-anchor'   # key from a command (below)
+# or: export KRONICLE_ANCHOR_KEY=KLA_…          # or {"license_key": "KLA_…"} in config.json (0600)
 # export KRONICLE_ANCHOR_URL=https://anchor.isokron.ai   # the default
 
 kronicle-lite checkpoint --push        # sign a checkpoint, anchor it, store the countersigned receipt
@@ -304,6 +305,38 @@ kronicle-lite anchor status            # last anchor, status, events since (no n
 kronicle-lite anchor keys              # the genesis pin in force and the kept service key list
 ```
 
+- **The license key (0.11.1).** First match wins:
+  1. `--anchor-key-file PATH`: a file holding only the key (mode 0600; a
+     trailing newline is fine). `--key KLA_…` also works but warns, because
+     argv is visible to other users. Do not pass both.
+  2. `KRONICLE_ANCHOR_KEY_CMD`: a command that prints the key on stdout,
+     so the key can stay in the macOS keychain or a password manager and
+     nobody has to export it by hand:
+
+     ```sh
+     # macOS keychain: store it once, then read it on every push
+     security add-generic-password -a "$USER" -s kronicle-anchor -w   # prompts for the key
+     export KRONICLE_ANCHOR_KEY_CMD='security find-generic-password -w -s kronicle-anchor'
+
+     # 1Password CLI (op): a secret reference to the item's field
+     export KRONICLE_ANCHOR_KEY_CMD='op read op://Private/kronicle-anchor/credential'
+     ```
+
+     The command runs without a shell: the string is split into words with
+     sh-style quoting, and a pipe, redirect, `$` or `;` is refused (wrap it
+     in `sh -c '…'` yourself if you need one). It runs with stdin closed and
+     a 30 s timeout (`KRONICLE_ANCHOR_KEY_CMD_TIMEOUT_MS`, for a password
+     manager that waits for an unlock), without `KRONICLE_ANCHOR_KEY` in its
+     environment, and its stderr is never shown. A command that fails, times
+     out or prints more than one line is an error; it never falls through to
+     the next source.
+  3. `KRONICLE_ANCHOR_KEY`.
+  4. `"license_key"` in `<data-dir>/config.json` (0600).
+
+  The key is held in memory for the push only: it is never logged, never
+  written to the data dir or a pack, and never part of an error message.
+  `anchor status` and `doctor` report that a command is configured without
+  running it.
 - **What leaves the box:** the root, range, signature and your public key.
   Never events or content. Details in [FORMAT §9](docs/FORMAT.md#9-hosted-anchors-040-additive)
   and [THREAT-MODEL](docs/THREAT-MODEL.md#what-tamper-evidence-gives-you-here).
@@ -342,8 +375,9 @@ kronicle-lite anchor keys              # the genesis pin in force and the kept s
   vouch for it (the verification page, or `verify-audit` on an Evidence Pack).
   Receipts you hold are checked even when the service stops listing them.
   `http://` URLs are refused unless the host is loopback or you pass
-  `--insecure-http`; prefer `KRONICLE_ANCHOR_KEY` / `config.json` over
-  `--key` (which warns: argv is visible to other users).
+  `--insecure-http`; prefer `KRONICLE_ANCHOR_KEY_CMD`, `--anchor-key-file`,
+  `KRONICLE_ANCHOR_KEY` or `config.json` over `--key` (which warns: argv is
+  visible to other users).
 - Exit codes: 0 ok, 1 divergence, conflict or an untrusted receipt, 2 usage
   or I/O (incl. unreachable and a refused `http://` URL).
 
@@ -365,7 +399,7 @@ applies the 0.10.0 rules and reports `PARTIAL`, or with `npx -y kronicle-lite@0.
 
 ```sh
 # auditor: record harness_frozen with the plan of run IDs, then
-kronicle-lite checkpoint --push              # anchor [1..head]
+kronicle-lite checkpoint --push              # anchor [1..head] (audit stamp also does this when it is not done yet)
 kronicle-lite audit stamp --out stamps/      # RFC 3161 tokens over sha256(receipt), right away; prints the freeze nonce
 # … every run records that nonce; a run that cannot finish is run_abandoned with its reason;
 #   anchor + stamp after the last run, and after the report and audit_closed
@@ -373,6 +407,18 @@ kronicle-lite audit stamp --out stamps/      # RFC 3161 tokens over sha256(recei
 kronicle-lite audit package --audit-id A --out pack/ --timestamps stamps/ --allowed-signers reproducers.allowed
 ```
 
+- **Audit mode (0.11.1): a missing anchor fails, it is never recorded as
+  pending.** `audit stamp` stamps the latest anchor when it commits the
+  latest audit event; otherwise it first pushes a checkpoint over
+  `[1..head]` with the license key above. A missing key, an unreachable
+  anchor service or a TSA that does not answer exits 2 with a message naming
+  the cause, and writes no `.pending` marker (tokens that were obtained are
+  kept; run `audit stamp` again). `checkpoint --push` over a range that holds
+  a `/3` audit's events resolves the key before it stores anything, and says
+  that the milestone anchor was not obtained when the push fails. Only
+  `audit stamp --allow-pending` still writes `<anchor>.<tsa>.pending` for a
+  TSA that failed; `audit package` carries the marker, and the audit profile
+  rejects the pack while it is there.
 - **Profiles.** `verify-audit` checks a pack against the **audit profile** by
   default: every claim below is checked whatever `claims.json` says
   (`claims.json` can add claims, never remove one). The pack must also be
@@ -380,8 +426,8 @@ kronicle-lite audit package --audit-id A --out pack/ --timestamps stamps/ --allo
   anchors must close the freeze (before any run), the last run (before the
   report) and the report (the whole bundle), each stamped by two different
   pinned TSA CAs; `SHA256SUMS` must be stamped by two TSA CAs too; and no
-  stamp may be pending (a `*.pending` marker that `audit stamp` leaves when a
-  TSA fails). `--profile legacy` applies the 0.10.0 rules to packs made
+  stamp may be pending (a `*.pending` marker that `audit stamp --allow-pending`
+  leaves when a TSA fails). `--profile legacy` applies the 0.10.0 rules to packs made
   before 0.11.0: `claims.json` picks the claims, and the best result is
   `PARTIAL`.
 - **Claims.** `integrity`, `chain`, `receipts`, `independent_timestamps`,

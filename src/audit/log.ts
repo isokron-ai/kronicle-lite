@@ -29,6 +29,7 @@ import {
   parseAuditPayload,
   statusEffect,
   transitionAllowed,
+  V3_KINDS,
   type AuditEventInput,
   type AuditKind,
   type FindingStatus,
@@ -365,6 +366,33 @@ export class AuditLog {
   seqsOf(audit_id: string): number[] {
     if (!this.tables()) return [];
     return (this.db.prepare(`SELECT seq FROM audit_events WHERE audit_id = ? ORDER BY seq`).all(audit_id) as { seq: number }[]).map((r) => r.seq);
+  }
+
+  /**
+   * 0.11.1: the audits with an event in [from_seq, to_seq] whose bundle is `/3` (a freeze with a
+   * `plan`, or a run_abandoned / reproduction_signed / audit_closed): an anchor over such a range
+   * is an audit milestone anchor, so a push that fails must fail loudly (audit mode).
+   */
+  profileAuditsIn(from_seq: number, to_seq: number): string[] {
+    if (!this.tables()) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT a.audit_id FROM audit_events a
+          WHERE a.seq BETWEEN ? AND ?
+            AND a.audit_id IN (
+              SELECT b.audit_id FROM audit_events b JOIN events e ON e.seq = b.seq
+               WHERE b.kind IN (${V3_KINDS.map(() => '?').join(', ')})
+                  OR (b.kind = 'harness_frozen' AND json_type(e.payload_canonical, '$.plan') = 'array'))
+          ORDER BY a.audit_id`,
+      )
+      .all(from_seq, to_seq, ...V3_KINDS) as { audit_id: string }[];
+    return rows.map((r) => r.audit_id);
+  }
+
+  /** 0.11.1: seq of the latest audit event in the store (0: none). */
+  lastSeq(): number {
+    if (!this.tables()) return 0;
+    return (this.db.prepare(`SELECT COALESCE(MAX(seq), 0) AS s FROM audit_events`).get() as { s: number }).s;
   }
 
   /** sha256 of the canonical payload (handy for callers comparing a retry). */

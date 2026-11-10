@@ -10,7 +10,10 @@
  * Precedence: explicit arguments (CLI flags) > KRONICLE_ANCHOR_URL /
  * KRONICLE_ANCHOR_KEY > config.json > defaults. A store opened in memory
  * (tests, embedding) has no data dir; it reads env + defaults (keys-cache.ts
- * keeps its records in process).
+ * keeps its records in process). 0.11.1: the license key a push sends is
+ * resolved by key-source.ts (`--key` / `--anchor-key-file` >
+ * KRONICLE_ANCHOR_KEY_CMD > KRONICLE_ANCHOR_KEY > config.json); loadConfig's
+ * `license_key` does not run the command.
  */
 
 import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -59,6 +62,12 @@ export function loadConfig(dataDir: string | null, over: Partial<AnchorConfig> =
     anchor_url: over.anchor_url ?? env('KRONICLE_ANCHOR_URL') ?? file.anchor_url ?? DEFAULT_ANCHOR_URL,
     license_key: over.license_key ?? env('KRONICLE_ANCHOR_KEY') ?? file.license_key ?? null,
   };
+}
+
+/** `license_key` from config.json alone (no env), for key-source.ts. */
+export function configFileLicenseKey(dataDir: string | null): string | null {
+  const j = dataDir ? readConfigFile(dataDir) : null;
+  return typeof j?.['license_key'] === 'string' && j['license_key'].length > 0 ? j['license_key'] : null;
 }
 
 /**

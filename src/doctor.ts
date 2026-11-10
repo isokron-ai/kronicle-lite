@@ -284,7 +284,8 @@ function checkConfig(dataDir: string, env: NodeJS.ProcessEnv): { check: DoctorCh
   const r = readJsonFile(p);
   const envUrl = env['KRONICLE_ANCHOR_URL'];
   const envKey = env['KRONICLE_ANCHOR_KEY'];
-  const envNote = [envUrl ? 'KRONICLE_ANCHOR_URL set' : null, envKey ? 'KRONICLE_ANCHOR_KEY set' : null].filter(Boolean).join(', ');
+  const envCmd = env['KRONICLE_ANCHOR_KEY_CMD'];
+  const envNote = [envUrl ? 'KRONICLE_ANCHOR_URL set' : null, envCmd ? 'KRONICLE_ANCHOR_KEY_CMD set (not run)' : null, envKey ? 'KRONICLE_ANCHOR_KEY set' : null].filter(Boolean).join(', ');
   if (r === null) {
     return {
       check: { id: 'config', status: 'ok', detail: `no config.json (defaults: ${DEFAULT_ANCHOR_URL}, no license key)${envNote ? `; ${envNote}` : ''}` },
@@ -593,7 +594,7 @@ export async function runDoctor(opts: DoctorOptions): Promise<DoctorReport> {
   // 0.5.0: only probe the anchor service when anchoring is configured (a
   // license key, or a non-default URL); the default service is optional.
   const anchorUrl = cfg?.anchorUrl ?? env['KRONICLE_ANCHOR_URL'] ?? DEFAULT_ANCHOR_URL;
-  const anchoring = Boolean(cfg?.licenseInConfig || env['KRONICLE_ANCHOR_KEY'] || env['KRONICLE_ANCHOR_URL'] || anchorUrl !== DEFAULT_ANCHOR_URL);
+  const anchoring = Boolean(cfg?.licenseInConfig || env['KRONICLE_ANCHOR_KEY'] || env['KRONICLE_ANCHOR_KEY_CMD'] || env['KRONICLE_ANCHOR_URL'] || anchorUrl !== DEFAULT_ANCHOR_URL);
   checks.push(
     anchoring
       ? await checkAnchorReachable(anchorUrl, opts)
