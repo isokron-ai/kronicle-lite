@@ -391,7 +391,7 @@ timestamp authorities (Sectigo, DigiCert) on every receipt and on the pack's
 them. A client checks it offline with one command:
 
 ```sh
-npx -y kronicle-lite@0.11.1 verify-audit pack/ --key-fingerprint <SHA-256 of the auditor key, from the statement of work>
+npx -y kronicle-lite@0.11.2 verify-audit pack/ --key-fingerprint <SHA-256 of the auditor key, from the statement of work>
 ```
 
 (Packs made by 0.10.x fail the default audit profile; check them with `--profile legacy`, which

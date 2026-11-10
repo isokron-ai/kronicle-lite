@@ -1,5 +1,5 @@
 /**
- * Release 0.11.1: every place that names the version agrees, and the CHANGELOG has a dated entry
+ * Release 0.11.2: every place that names the version agrees, and the CHANGELOG has a dated entry
  * for it (not [Unreleased]).
  */
 
@@ -14,9 +14,9 @@ import { VERSION } from '../src/version.js';
 const root = join(__dirname, '..');
 const json = (f: string) => JSON.parse(readFileSync(join(root, f), 'utf8')) as Record<string, unknown>;
 
-describe('release 0.11.1', () => {
+describe('release 0.11.2', () => {
   it('package.json, the lockfile, server.json, VERSION, CATALOG_VERSION and the catalog snapshots agree', () => {
-    expect(VERSION).toBe('0.11.1');
+    expect(VERSION).toBe('0.11.2');
     expect(json('package.json')['version']).toBe(VERSION);
     const lock = json('package-lock.json') as { version: string; packages: Record<string, { version?: string }> };
     expect(lock.version).toBe(VERSION);
@@ -58,8 +58,16 @@ describe('release 0.11.1', () => {
     for (const s of ['KRONICLE_ANCHOR_KEY_CMD', '--anchor-key-file', '--allow-pending', '(GL-6, PH-10)']) expect(entry).toContain(s);
   });
 
-  it('README and docs name npx kronicle-lite@0.11.1 for verify-audit', () => {
-    expect(readFileSync(join(root, 'README.md'), 'utf8')).toContain('npx -y kronicle-lite@0.11.1 verify-audit');
-    expect(readFileSync(join(root, 'docs', 'EVIDENCE-BUNDLE.md'), 'utf8')).toContain('npx -y kronicle-lite@0.11.1 verify-audit');
+  it('the CHANGELOG dates 0.11.2 and lists the token-label fix in password_assignment and env_secret', () => {
+    const log = readFileSync(join(root, 'CHANGELOG.md'), 'utf8');
+    expect(log).toMatch(/^## \[0\.11\.2\] — \d{4}-\d{2}-\d{2}$/m);
+    expect(log).not.toMatch(/^## \[Unreleased\].*0\.11\.2/m);
+    const entry = log.slice(log.indexOf('## [0.11.2]'), log.indexOf('\n## ', log.indexOf('## [0.11.2]') + 1));
+    for (const s of ['Tokens: cl100k', '`password_assignment`', '`env_secret`', 'entropy']) expect(entry).toContain(s);
+  });
+
+  it('README and docs name npx kronicle-lite@0.11.2 for verify-audit', () => {
+    expect(readFileSync(join(root, 'README.md'), 'utf8')).toContain('npx -y kronicle-lite@0.11.2 verify-audit');
+    expect(readFileSync(join(root, 'docs', 'EVIDENCE-BUNDLE.md'), 'utf8')).toContain('npx -y kronicle-lite@0.11.2 verify-audit');
   });
 });
