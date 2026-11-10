@@ -15,8 +15,10 @@
  *                  RFC 3161 tokens over it; then it runs verify-audit on what it
  *                  wrote (the audit profile for a /3 bundle, legacy otherwise).
  *
- * A stamp that fails is left as `<anchor_id>.<tsa>.pending` beside the tokens;
- * the package carries it, and the audit profile fails while one is there.
+ * 0.11.1: a stamp that fails is an error and leaves nothing behind (audit
+ * mode). Only with `allow_pending` (`audit stamp --allow-pending`) is it left
+ * as `<anchor_id>.<tsa>.pending` beside the tokens; the package carries it,
+ * and the audit profile fails while one is there.
  */
 
 import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readdirSync, rmSync, writeFileSync, writeSync } from 'node:fs';
@@ -122,7 +124,7 @@ export interface StampResult {
    * token added later changes it.
    */
   nonce: string | null;
-  /** `<anchor_id>.<tsa>.pending` markers left in out_dir for the TSAs that failed. */
+  /** `<anchor_id>.<tsa>.pending` markers left in out_dir for the TSAs that failed (only with `allow_pending`). */
   pending: string[];
 }
 
@@ -144,7 +146,15 @@ async function fetchStamp(message: Buffer | string, t: { name: string; url: stri
 /** RFC 3161 tokens over sha256(receipt) for one anchor (the latest by default), written to `out_dir`. */
 export async function stampAnchor(
   store: KronicleLite,
-  opts: { anchor_id?: string; out_dir: string; tsas?: readonly { name: string; url: string }[]; fetch?: typeof fetch; timeoutMs?: number },
+  opts: {
+    anchor_id?: string;
+    out_dir: string;
+    tsas?: readonly { name: string; url: string }[];
+    fetch?: typeof fetch;
+    timeoutMs?: number;
+    /** 0.11.1: record a TSA that failed as a `.pending` marker (which verify-audit's audit profile rejects). Default: no marker. */
+    allow_pending?: boolean;
+  },
 ): Promise<StampResult> {
   const chainId = chainIdFromPublicKeyPem(store.identity.signer.public_key_pem);
   const mine = store.chain.listAnchors().filter((a) => a.chain_id === chainId);
@@ -176,9 +186,11 @@ export async function stampAnchor(
       out.results.push({ tsa: t.name, url: t.url, ok: true, file, gen_time: got.gen_time, problem: null, existing: false });
     } catch (err) {
       const problem = err instanceof Error ? err.message : String(err);
-      // Leave the failure in the directory: the package carries it and the audit profile fails until it is stamped.
-      writeFileSync(marker, `${t.url}: ${problem}\n`, { mode: 0o644 });
-      out.pending.push(marker);
+      if (opts.allow_pending === true) {
+        // Asked for: leave the failure in the directory; the package carries it and the audit profile fails until it is stamped.
+        writeFileSync(marker, `${t.url}: ${problem}\n`, { mode: 0o644 });
+        out.pending.push(marker);
+      }
       out.results.push({ tsa: t.name, url: t.url, ok: false, file: null, gen_time: null, problem, existing: false });
     }
   }

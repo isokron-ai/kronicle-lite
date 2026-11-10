@@ -88,6 +88,9 @@ export {
   verifyRemote,
   anchorStatus,
   verifyLastAnchor,
+  requireLicenseKey,
+  withLicenseKey,
+  licenseKeySource,
   type PushResult,
   type PushOutcome,
   type VerifyRemoteResult,
@@ -95,6 +98,7 @@ export {
 } from './anchor/anchor.js';
 export { AnchorClient, AnchorApiError, AnchorUnreachableError } from './anchor/client.js';
 export { DEFAULT_ANCHOR_URL, loadConfig as loadAnchorConfig, type AnchorConfig } from './anchor/config.js';
+export { resolveAnchorKey, anchorKeySource, type AnchorKeySource } from './anchor/key-source.js';
 export * as shim from './shim/index.js';
 /**
  * 0.11.0: the audit profile, for recorders (mcp-audit's evidence module) and verifiers: the freeze

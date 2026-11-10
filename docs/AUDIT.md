@@ -138,7 +138,13 @@ A bundle holding a milestone kind is exported as
    (`freezeNonce` in `src/audit/profile.ts`). The tokens are signed by third
    parties at their own time, so nobody, the auditor included, can know the
    nonce before the freeze is stamped. (In `/2` the nonce was the receipt
-   digest alone, which the auditor's own anchor fixes.)
+   digest alone, which the auditor's own anchor fixes.) 0.11.1: `audit
+   stamp` pushes the anchor itself when the freeze is not anchored yet, with
+   the license key from `--anchor-key-file`, `KRONICLE_ANCHOR_KEY_CMD` (a
+   keychain or password-manager read), `KRONICLE_ANCHOR_KEY` or
+   `config.json`. A missing key, an unreachable anchor service or a failed
+   TSA exits 2 and records nothing as pending: fix it and stamp again before
+   the first run.
 2. One `run_completed` per planned run, with `nonce`; a planned run that will
    not finish gets `run_abandoned` with a `reason` instead. Each planned run
    ends exactly once; no other run ID is recorded. Anchor and stamp after the

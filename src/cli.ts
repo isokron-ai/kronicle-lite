@@ -5,7 +5,7 @@
  *   kronicle-lite serve [--data-dir DIR] [--actor ID] [--core]   stdio MCP server (dual-era: 2026-07-28 + 2025 initialize)
  *   kronicle-lite serve --http [--port N] [--host H] [--bearer T | --bearer-file F] [--modern-only]   Streamable HTTP
  *   kronicle-lite verify-chain [--data-dir DIR] [--from N] [--to N]
- *   kronicle-lite checkpoint [--data-dir DIR] [--from N] [--to N] [--push [--key K] [--url U]]
+ *   kronicle-lite checkpoint [--data-dir DIR] [--from N] [--to N] [--push [--anchor-key-file PATH | --key K] [--url U]]
  *   kronicle-lite verify [--remote [--offline] [--url U] [--json]]   local by default (= verify-chain)
  *   kronicle-lite anchor status [--url U] [--json]
  *   kronicle-lite anchor keys [list|add PEM-FILE|remove KEY_ID|reset] [--json]
@@ -95,6 +95,7 @@ const BOOLEAN_FLAGS = new Set([
   'no-tsa',
   'no-stamp-sums',
   'tsa-at-gentime',
+  'allow-pending',
 ]);
 
 function parseArgs(argv: string[]): Args {
@@ -170,8 +171,12 @@ Usage:
   kronicle-lite rebuild      [--data-dir DIR]                     re-derive documents and blocks from a verified chain
   kronicle-lite checkpoint   [--data-dir DIR] [--from N] [--to N] sign a Merkle checkpoint
                  [--push [--url U] [--genesis PIN] [--insecure-http]] …and anchor it off-box (hosted service countersigns);
-                                                                 license key from KRONICLE_ANCHOR_KEY or config.json
-                                                                 (--key K works but warns: argv is visible to other users)
+                 [--anchor-key-file PATH]                        license key from --anchor-key-file, KRONICLE_ANCHOR_KEY_CMD
+                                                                 (a command printing it: keychain, password manager),
+                                                                 KRONICLE_ANCHOR_KEY or config.json, in that order
+                                                                 (--key K works but warns: argv is visible to other users).
+                                                                 Audit mode (the range holds a /3 audit): no key, no push:
+                                                                 exit 2 before anything is stored
   kronicle-lite verify       [--remote [--offline]] [--url U] [--genesis PIN] [--json]
                                                                  local: = verify-chain; --remote: recompute each anchored
                                                                  range from its countersigned receipt (the service's head
@@ -236,10 +241,15 @@ Usage:
                                                                  (missing artifacts fail unless --allow-missing). Without
                                                                  --key the signer is NOT verified (tamper-evidence only);
                                                                  --strict requires --key. Reads at most 1 GiB (--max-bytes)
-  kronicle-lite audit stamp  [--anchor-id ID] --out DIR [--tsa name=url,…] [--json]
+  kronicle-lite audit stamp  [--anchor-id ID] --out DIR [--tsa name=url,…] [--allow-pending] [--json]
+                 [--anchor-key-file PATH] [--url U] [--genesis PIN]
                                                                  RFC 3161 tokens over an anchor receipt (latest by default)
-                                                                 from Sectigo and DigiCert; run right after checkpoint --push.
-                                                                 Prints the derived freeze nonce for runs to record (/3)
+                                                                 from Sectigo and DigiCert; when the latest audit event is
+                                                                 not anchored yet it pushes [1..head] first (anchor key as
+                                                                 for checkpoint --push). Prints the derived freeze nonce
+                                                                 for runs to record (/3). A missing key, an unreachable
+                                                                 service or a failed TSA exits 2 and writes no .pending
+                                                                 marker; --allow-pending writes one (verify-audit rejects it)
   kronicle-lite audit package --audit-id A --out DIR [--timestamps DIR] [--tsa-roots DIR] [--anchor-keys FILE] [--genesis SHA256@VALID_FROM]
                  [--allowed-signers FILE] [--tsa name=url,…] [--no-stamp-sums] [--json]
                                                                  IsoKron Evidence Pack: bundle, anchors inside its range,
@@ -285,8 +295,10 @@ Usage:
 
 Data dir defaults to $KRONICLE_LITE_DATA_DIR or ~/.kronicle-lite. Instruction slugs carry a project key
 (<repo>-<hash8>); $KRONICLE_LITE_PROJECT overrides it.
-Anchor config: flags > KRONICLE_ANCHOR_URL / KRONICLE_ANCHOR_KEY > DIR/config.json {anchor_url, license_key}
-  > https://anchor.isokron.ai. http:// is refused unless the host is localhost/127.0.0.1/[::1] or
+Anchor config: URL from --url > KRONICLE_ANCHOR_URL > DIR/config.json anchor_url > https://anchor.isokron.ai;
+  license key from --anchor-key-file PATH (or --key) > KRONICLE_ANCHOR_KEY_CMD (run without a shell, 30 s
+  timeout, stderr not shown, the key never logged or written) > KRONICLE_ANCHOR_KEY > config.json license_key.
+  http:// is refused unless the host is localhost/127.0.0.1/[::1] or
   --insecure-http is given. Exit codes for anchor commands: 0 ok, 1 divergence/conflict/untrusted receipt,
   2 usage or I/O (including "anchor service unreachable").
 `;
@@ -294,11 +306,12 @@ Anchor config: flags > KRONICLE_ANCHOR_URL / KRONICLE_ANCHOR_KEY > DIR/config.js
 function anchorOpts(flags: Record<string, string | true>): AnchorCallOptions {
   if (str(flags['key']) !== undefined) {
     process.stderr.write(
-      'warning: --key puts the license key on the command line (shell history, `ps` for other users); prefer KRONICLE_ANCHOR_KEY or license_key in <data-dir>/config.json (0600)\n',
+      'warning: --key puts the license key on the command line (shell history, `ps` for other users); prefer --anchor-key-file, KRONICLE_ANCHOR_KEY_CMD (a keychain or password-manager read) or KRONICLE_ANCHOR_KEY\n',
     );
   }
   return {
     ...(str(flags['key']) !== undefined ? { licenseKey: str(flags['key'])! } : {}),
+    ...(str(flags['anchor-key-file']) !== undefined ? { licenseKeyFile: str(flags['anchor-key-file'])! } : {}),
     ...(str(flags['url']) !== undefined ? { anchorUrl: str(flags['url'])! } : {}),
     ...(flags['insecure-http'] === true ? { insecureHttp: true } : {}),
     ...(str(flags['genesis']) !== undefined ? { genesis: str(flags['genesis'])! } : {}),
@@ -509,7 +522,7 @@ async function main(argv: string[]): Promise<number> {
       return verifyAuditCommand(positional, flags, dataDir);
     case 'audit': {
       const { runAuditCli } = await import('./audit/cli.js');
-      return runAuditCli(positional, flags, dataDir);
+      return runAuditCli(positional, flags, dataDir, positional[0] === 'stamp' ? anchorOpts(flags) : {});
     }
     case 'rebuild': {
       const store = new KronicleLite({ dataDir });
@@ -533,6 +546,28 @@ async function main(argv: string[]): Promise<number> {
     }
     case 'checkpoint': {
       const store = new KronicleLite({ dataDir });
+      let opts: AnchorCallOptions = {};
+      // 0.11.1 audit mode: a push whose range holds a /3 audit's events anchors a milestone (freeze,
+      // last run, report). The key is resolved before anything is stored, and a failure says so.
+      let audits: string[] = [];
+      if (flags['push'] === true) {
+        opts = anchorOpts(flags);
+        const from = num(flags['from']) ?? 1;
+        audits = store.audit.profileAuditsIn(from, num(flags['to']) ?? store.chain.head().seq);
+        if (audits.length > 0) {
+          const { withLicenseKey } = await import('./anchor/anchor.js');
+          try {
+            opts = withLicenseKey(store, opts);
+          } catch (err) {
+            store.close();
+            if (!isAnchorIoError(err)) throw err;
+            process.stderr.write(
+              `audit mode (${audits.join(', ')}): refusing to checkpoint --push, the anchor key is not available: ${(err as Error).message}\nNothing was stored or anchored, and nothing is recorded as pending: the audit profile needs this anchor.\n`,
+            );
+            return 2;
+          }
+        }
+      }
       const cp = store.chain.checkpoint(num(flags['from']) ?? 1, num(flags['to']));
       if (flags['push'] !== true) {
         process.stdout.write(JSON.stringify(cp, null, 2) + '\n');
@@ -542,11 +577,15 @@ async function main(argv: string[]): Promise<number> {
       // The checkpoint is stored locally before anything leaves the box; a
       // failed push never undoes it.
       const { tryPushCheckpoint } = await import('./anchor/anchor.js');
-      const anchor = await tryPushCheckpoint(store, { ...anchorOpts(flags), checkpointId: cp.checkpoint_id });
+      const anchor = await tryPushCheckpoint(store, { ...opts, checkpointId: cp.checkpoint_id });
       process.stdout.write(JSON.stringify({ checkpoint: cp, anchor }, null, 2) + '\n');
       store.close();
       if (anchor.error) {
-        process.stderr.write(`checkpoint ${cp.checkpoint_id} stored locally; push failed: ${anchor.message}\n`);
+        process.stderr.write(
+          audits.length > 0
+            ? `audit mode (${audits.join(', ')}): the milestone anchor over [${cp.from_seq}, ${cp.to_seq}] was NOT obtained: ${anchor.message}\nThe local checkpoint ${cp.checkpoint_id} is stored, nothing is anchored and nothing is recorded as pending; verify-audit fails without this anchor. Fix the cause and run checkpoint --push again.\n`
+            : `checkpoint ${cp.checkpoint_id} stored locally; push failed: ${anchor.message}\n`,
+        );
         return 2;
       }
       if (anchor.conflict) {

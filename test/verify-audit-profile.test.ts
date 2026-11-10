@@ -73,6 +73,7 @@ type Tamper =
   | 'unsigned_accepted_finding'
   | 'wrong_run_count'
   | 'tampered_signoff'
+  | 'allow_pending'
   | 'legacy';
 
 interface Golden {
@@ -159,6 +160,11 @@ async function build(tamper?: Tamper): Promise<Golden> {
     rec([{ kind: 'report_issued', event_key: 'report', payload: { report_id: 'R1', report: blob('# Report'), run_count: tamper === 'wrong_run_count' ? 2 : 3 } }]);
     rec([{ kind: 'audit_closed', event_key: 'close', payload: { report_id: 'R1', run_count: 3, findings_digest: findingsDigest([{ finding_id: 'F1', status: 'accepted' }, { finding_id: 'F2', status: 'refuted' }]) } }]);
     await anchor();
+    // 0.11.1: `audit stamp --allow-pending` with a third TSA that does not answer records it as pending
+    if (tamper === 'allow_pending') {
+      const r = await stampAnchor(store, { out_dir: tsDir, tsas: [{ name: 'gamma', url: 'http://127.0.0.1:9/' }], timeoutMs: 2000, allow_pending: true });
+      expect(r.pending).toHaveLength(1);
+    }
   }
 
   const rootsDir = join(work, 'roots');
@@ -382,6 +388,13 @@ describe('the audit profile: a golden pack', () => {
     expectCaught(d, g, 'independent_timestamps', 'pending stamps: 1 stamp(s) pending: anchors/03-audit-closed.gamma.pending');
   });
 
+  it('a pack made after audit stamp --allow-pending (0.11.1): the marker is carried and the audit profile rejects it', async () => {
+    const t = await build('allow_pending');
+    expect(t.pack.check.verdict).toBe('failed');
+    expect(readdirSync(join(t.pkg, 'anchors'))).toContain('03-audit-closed.gamma.pending');
+    expectCaught(t.pkg, t, 'independent_timestamps', 'pending stamps: 1 stamp(s) pending: anchors/03-audit-closed.gamma.pending');
+  });
+
   it('an unsigned accepted finding', async () => {
     const t = await build('unsigned_accepted_finding');
     expectCaught(t.pkg, t, 'reproductions_signed', 'accepted findings: accepted finding(s) without a verified human sign-off (reproduction_signed): F1');
@@ -448,14 +461,30 @@ describe('legacy packs (made before 0.11.0)', () => {
 });
 
 describe('audit stamp: the derived nonce and pending markers', () => {
-  it('prints the freeze nonce over both tokens and leaves a .pending marker for a TSA that failed', async () => {
+  it('0.11.1: a TSA that fails leaves no .pending marker unless allow_pending is set', async () => {
     const store = new KronicleLite({ dataDir: tempDir('kl-vp-stamp-') });
     try {
       store.audit.record(AUDIT, [{ kind: 'harness_frozen', event_key: 'freeze', payload: { harness_id: 'h', fingerprint: H, manifest: store.audit.putBlob(Buffer.from('h'), 'text/plain'), plan: ['run-1'] } }], 'auditor');
       store.chain.checkpoint();
       await pushCheckpoint(store, { anchorUrl: backend.url, licenseKey: STUB_LICENSE });
       const out = tempDir('kl-vp-stamp-out-');
-      const r = await stampAnchor(store, { out_dir: out, tsas: [{ name: 'alpha', url: servers[0]!.url }, { name: 'beta', url: servers[1]!.url }, { name: 'gamma', url: 'http://127.0.0.1:9/' }], timeoutMs: 2000 });
+      const r = await stampAnchor(store, { out_dir: out, tsas: [{ name: 'alpha', url: servers[0]!.url }, { name: 'gamma', url: 'http://127.0.0.1:9/' }], timeoutMs: 2000 });
+      expect(r.results.map((x) => [x.tsa, x.ok])).toEqual([['alpha', true], ['gamma', false]]);
+      expect(r.pending).toEqual([]);
+      expect(readdirSync(out)).toEqual([`${r.anchor_id}.alpha.tsr`]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('prints the freeze nonce over both tokens and, with allow_pending, leaves a .pending marker for a TSA that failed', async () => {
+    const store = new KronicleLite({ dataDir: tempDir('kl-vp-stamp-') });
+    try {
+      store.audit.record(AUDIT, [{ kind: 'harness_frozen', event_key: 'freeze', payload: { harness_id: 'h', fingerprint: H, manifest: store.audit.putBlob(Buffer.from('h'), 'text/plain'), plan: ['run-1'] } }], 'auditor');
+      store.chain.checkpoint();
+      await pushCheckpoint(store, { anchorUrl: backend.url, licenseKey: STUB_LICENSE });
+      const out = tempDir('kl-vp-stamp-out-');
+      const r = await stampAnchor(store, { out_dir: out, tsas: [{ name: 'alpha', url: servers[0]!.url }, { name: 'beta', url: servers[1]!.url }, { name: 'gamma', url: 'http://127.0.0.1:9/' }], timeoutMs: 2000, allow_pending: true });
       expect(r.results.map((x) => [x.tsa, x.ok])).toEqual([['alpha', true], ['beta', true], ['gamma', false]]);
       expect(readdirSync(out).sort()).toEqual([`${r.anchor_id}.alpha.tsr`, `${r.anchor_id}.beta.tsr`, `${r.anchor_id}.gamma.pending`]);
       const toks = ['alpha', 'beta'].map((tsa) => ({ tsa, bytes: readFileSync(join(out, `${r.anchor_id}.${tsa}.tsr`)) }));

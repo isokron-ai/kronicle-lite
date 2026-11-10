@@ -16,7 +16,8 @@ import type { Checkpoint } from '../chain/chain.js';
 import { chainIdFromPublicKeyPem, keyIdFromPublicKey } from '../crypto/keys.js';
 import type { KronicleLite } from '../store.js';
 import { AnchorApiError, AnchorClient, AnchorListingError, AnchorRateLimitedError, AnchorUnreachableError, type RemoteAnchor, type RemoteChain } from './client.js';
-import { AnchorConfigError, assertAnchorTransport, loadConfig, type AnchorConfig } from './config.js';
+import { AnchorConfigError, assertAnchorTransport, configFileLicenseKey, loadConfig, type AnchorConfig } from './config.js';
+import { anchorKeySource, NO_KEY_MESSAGE, resolveAnchorKey, type AnchorKeySource } from './key-source.js';
 import { anchorReceiptJcs, type AnchorReceipt } from './receipt.js';
 import { acceptServiceKeys, anchorGenesis, keptServiceKeys, receiptChainRefusal, ServiceKeyTrustError, verifyReceiptWithKeys, type KeyListCheck, type ServiceKeySet } from './trust.js';
 import { parseWireCheckpoint, type WireCheckpoint } from './wire.js';
@@ -24,8 +25,12 @@ import { parseWireCheckpoint, type WireCheckpoint } from './wire.js';
 export interface AnchorCallOptions {
   /** Overrides KRONICLE_ANCHOR_URL / config.json. */
   anchorUrl?: string;
-  /** Overrides KRONICLE_ANCHOR_KEY / config.json. */
+  /** Overrides every other key source (CLI `--key`). */
   licenseKey?: string;
+  /** 0.11.1: read the license key from this file (CLI `--anchor-key-file`); overrides KRONICLE_ANCHOR_KEY_CMD, KRONICLE_ANCHOR_KEY, config.json. */
+  licenseKeyFile?: string;
+  /** 0.11.1: timeout for KRONICLE_ANCHOR_KEY_CMD (default KRONICLE_ANCHOR_KEY_CMD_TIMEOUT_MS, else 30 s). */
+  keyCommandTimeoutMs?: number;
   /** Allow an http:// anchor_url to a non-loopback host (CLI `--insecure-http`). */
   insecureHttp?: boolean;
   fetch?: typeof fetch;
@@ -41,6 +46,36 @@ function configFor(store: KronicleLite, opts: AnchorCallOptions): AnchorConfig {
     ...(opts.anchorUrl ? { anchor_url: opts.anchorUrl } : {}),
     ...(opts.licenseKey ? { license_key: opts.licenseKey } : {}),
   });
+}
+
+const keyInputs = (store: KronicleLite, opts: AnchorCallOptions) => ({
+  licenseKey: opts.licenseKey,
+  licenseKeyFile: opts.licenseKeyFile,
+  configKey: configFileLicenseKey(store.dataDir),
+  ...(opts.keyCommandTimeoutMs !== undefined ? { commandTimeoutMs: opts.keyCommandTimeoutMs } : {}),
+});
+
+/** Where the license key would come from, without running KRONICLE_ANCHOR_KEY_CMD or reading a key file. */
+export function licenseKeySource(store: KronicleLite, opts: AnchorCallOptions = {}): AnchorKeySource | null {
+  return anchorKeySource(keyInputs(store, opts));
+}
+
+/**
+ * 0.11.1: the license key for a push, from `--key` / `--anchor-key-file` >
+ * KRONICLE_ANCHOR_KEY_CMD > KRONICLE_ANCHOR_KEY > config.json. Throws
+ * AnchorConfigError (never containing the key) when none is configured or the
+ * configured source fails.
+ */
+export function requireLicenseKey(store: KronicleLite, opts: AnchorCallOptions = {}): string {
+  const r = resolveAnchorKey(keyInputs(store, opts));
+  if (!r) throw new AnchorConfigError(NO_KEY_MESSAGE);
+  return r.key;
+}
+
+/** `opts` with the license key resolved once (requireLicenseKey), so later calls run no command and read no file. */
+export function withLicenseKey(store: KronicleLite, opts: AnchorCallOptions = {}): AnchorCallOptions {
+  const { licenseKeyFile: _file, ...rest } = opts;
+  return { ...rest, licenseKey: requireLicenseKey(store, opts) };
 }
 
 /** Every network call goes through here: refuses clear-text transport first. */
@@ -135,11 +170,7 @@ export interface PushResult {
  */
 export async function pushCheckpoint(store: KronicleLite, opts: AnchorCallOptions & { checkpointId?: string } = {}): Promise<PushResult> {
   const cfg = configFor(store, opts);
-  if (!cfg.license_key) {
-    throw new AnchorConfigError(
-      'no license key: pass --key, set KRONICLE_ANCHOR_KEY, or write {"license_key": …} to <data-dir>/config.json',
-    );
-  }
+  const licenseKey = requireLicenseKey(store, opts);
   const local = opts.checkpointId ? store.chain.getCheckpoint(opts.checkpointId) : store.chain.latestCheckpoint();
   if (!local) {
     throw new AnchorConfigError(opts.checkpointId ? `no checkpoint ${opts.checkpointId}` : 'no checkpoints yet: run `kronicle-lite checkpoint` first');
@@ -167,7 +198,7 @@ export async function pushCheckpoint(store: KronicleLite, opts: AnchorCallOption
   // The key list (rollback and chain checks) before anything is sent, as the service's own client does.
   const pins = await fetchKeys(store, cfg, api, opts);
   if (pins.violations.length > 0 || !pins.set) throw new ServiceKeyTrustError(`${pins.violations.join('; ')}; nothing sent`);
-  const resp = await api.push(cfg.license_key, { chain_id, pubkey: pem, checkpoint: cp });
+  const resp = await api.push(licenseKey, { chain_id, pubkey: pem, checkpoint: cp });
   const checked = checkHeldReceipt(store, resp.receipt, pins.set, chain_id);
   if (!checked.ok) throw new Error(`anchor receipt rejected: ${checked.reason}; nothing stored`);
   const receipt = checked.receipt;
@@ -512,7 +543,7 @@ export function anchorStatus(store: KronicleLite, opts: AnchorCallOptions = {}):
     key_id,
     head_seq: head.seq,
     anchor_url: cfg.anchor_url,
-    license_key_configured: cfg.license_key !== null,
+    license_key_configured: licenseKeySource(store, opts) !== null,
     anchors: store.chain.listAnchors().length,
     last: last
       ? {
