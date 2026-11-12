@@ -262,13 +262,90 @@ stamp carries a later time.
 | Result | Exit | Meaning |
 |---|---|---|
 | `VERIFIED` | 0 | the audit profile, every claim checked and passed |
+| `VERIFIED WITH UNWITNESSED WINDOW (FREEZE ANCHORED LATE)` | 0 | the same, for a freeze made with the anchor pending and anchored later: the freeze order is shown by the pack's pending-freeze record instead of a freeze anchor, and the unwitnessed window is printed (see "Late anchor" below); `--strict-freeze` makes it `FAILED` |
 | `PARTIAL` | 2 | every check that ran passed, but the pack does not meet the audit profile: checked under `--profile legacy` (the line after the result names the claims that were not checked), or a claim skipped with `--skip-claim` |
 | `NOT VERIFIED` | 1 | a claim was not checked (for example the timestamp claims under `--no-tsa`) |
 | `FAILED` | 1 | a check failed |
 
 Exit 2 is also a usage error or an unreadable pack (an `error:` line on
-stderr, no `RESULT`). The `--json` output (`kronicle-lite-verify-audit/2`)
-carries `profile` and `verdict`, and `ok` is true only for `verified`.
+stderr, no `RESULT`). The `--json` output (`kronicle-lite-verify-audit/3`)
+carries `profile`, `verdict` and `late_anchor`; `ok` is true for `verified`
+and `verified_late_anchor`, and both exit 0. A script that must tell a plain
+pass from a late-anchored one reads `.verdict` (`verified` is the plain pass)
+or matches `RESULT: VERIFIED` followed by two spaces, never the prefix
+`RESULT: VERIFIED` alone.
+
+### Late anchor: a freeze made with the anchor pending
+
+The audit profile proves "harness frozen before runs" with the **freeze
+anchor**: an anchor that commits the freeze and no run, whose receipt and TSA
+tokens fix the nonce every run carries. When the anchor key is not at hand at
+the freeze, the recorder freezes with the anchor pending
+(mcp-audit `freeze --anchor-pending`) and anchors the chain later. The freeze
+is then shown by a **pending-freeze record** (`isokron/freeze-pending@1`):
+
+| File | What |
+|---|---|
+| `checkpoint.json` | an auditor-signed checkpoint of the chain over seq 1..F (F = the freeze event) |
+| `manifest.json`, `plan-detail.json` | the bytes the `harness_frozen` event's `manifest` and `plan_detail` blobs hold |
+| `SHA256SUMS` | sha256 of those three files |
+| `SHA256SUMS.<tsa>.tsr` | an RFC 3161 token over `SHA256SUMS` from each TSA (two at least) |
+| `freeze-pending.json` | the harness fingerprint, the hashes of the checkpoint, `SHA256SUMS` and each token, and the nonce `freezeNonce(sha256(SHA256SUMS), tokens)` |
+
+The record is in the pack's `freeze-pending/` folder (`audit package
+--freeze-pending DIR`, listed in `SHA256SUMS`), or inside the
+`report_issued` blob when that blob is a ustar archive holding
+`attachments/freeze-pending.<file>` (as mcp-audit's `close` writes it; on
+the chain, so under the bundle root).
+
+A late freeze anchor commits the freeze together with runs, so two checks
+cannot pass: `receipts` / `milestone anchors` ("missing an anchor after the
+freeze (seq F) that commits no run …") and `harness_frozen_before_runs` /
+`harness frozen before runs` ("the freeze event (seq F) is first committed by
+… together with N run(s) …", or, when the chain was anchored after the freeze
+but before the first run, "run seq … carries a nonce that is not the derived
+freeze nonce …"). `verify-audit` replaces them only in exactly that form, and
+only when every check of the record passes (group `Ordering`, subject
+`pending freeze`):
+
+1. **record**: `SHA256SUMS` lists exactly the three files and they hash to
+   it; `freeze-pending.json` names these bytes and every token (a token added
+   later would change the nonce); the nonce re-derives.
+2. **freeze stamped**: every token over `SHA256SUMS` verifies under the pinned
+   TSA CAs, from two different CAs.
+3. **checkpoint**: signed by the pinned auditor key; its root is the bundle's
+   own Merkle root over seq 1..F (the chain up to the freeze was not rewritten
+   after the stamps).
+4. **freeze event**: `harness_frozen` is inside 1..F, names the record's
+   harness fingerprint and the stamped manifest and plan detail.
+5. **runs carry the nonce**: every run (`run_completed` and `call_measured`,
+   the kinds the ordering check counts) comes after the stamped checkpoint
+   and carries the record's nonce (unknown before the tokens) and the frozen
+   harness.
+6. **late anchor**: a verified anchor stamped under two TSA CAs commits the
+   freeze and every run.
+
+The result is `VERIFIED WITH UNWITNESSED WINDOW (FREEZE ANCHORED LATE)` (`verdict:
+verified_late_anchor`, exit 0, `ok: true`), `ordering.basis` is `pending_freeze`, and the
+report prints the **unwitnessed window**: from the freeze tokens to the first
+TSA time of the earliest anchor that commits the freeze. The events recorded
+in it were held only by the auditor's key. Their order after the freeze is
+shown by the nonce they carry; that none was rewritten or replayed inside the
+window rests on the auditor alone. `COMPLETION.txt` and the `audit package`
+summary say so too. `VERIFY.md`'s raw route derives the nonce from the
+record (`sha256` of its `SHA256SUMS`, then its tokens in TSA-name order),
+copying the record out of the report archive first when it is there.
+
+`--strict-freeze` (library: `late_anchor: 'strict'`) does not use the record:
+such a pack then fails the two checks, as 0.11.2 and earlier report it. A
+record that does not hold up is `REJECTED`, and the pack is `FAILED`.
+
+**Which versions read which packs.** Bundle format `/3` (every pack mcp-audit
+makes since 0.11.0) is read by kronicle-lite 0.11.0 and later. 0.10.0–0.10.2
+accept only `/1` and `/2`, and fail a `/3` pack on its manifest ("unknown format
+kronicle-lite-evidence-bundle/3"). 0.9.0 and earlier have no `verify-audit`.
+0.11.0–0.11.2 read a late-anchored `/3` pack but report it `FAILED` on the two
+checks above; the late-anchor mode comes with the next release.
 
 | Claim (0.11.0) | Checks |
 |---|---|

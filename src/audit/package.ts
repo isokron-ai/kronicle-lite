@@ -21,11 +21,12 @@
  * and the audit profile fails while one is there.
  */
 
-import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readdirSync, rmSync, writeFileSync, writeSync } from 'node:fs';
+import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync, writeSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
 import { parseAnchorReceipt } from '../anchor/receipt.js';
 import { keyListOf } from '../anchor/keychain.js';
+import { CHECKPOINT_VERSION } from '../chain/chain.js';
 import { canonicalize } from '../crypto/canonical.js';
 import { sha256Hex } from '../crypto/hash.js';
 import { chainIdFromPublicKeyPem } from '../crypto/keys.js';
@@ -33,6 +34,7 @@ import type { KronicleLite } from '../store.js';
 import { exportBundle } from './bundle.js';
 import { AuditError } from './log.js';
 import { checkTimestampReply, inspectTimestamp, MAX_TSR_BYTES, timestampRequest, verifyTimestamp } from './rfc3161.js';
+import { findFreezePending, FREEZE_PENDING_DIR, FREEZE_PENDING_RECORD, isFreezePendingFile, parseFreezePending, REPORT_ARCHIVE_PREFIX } from './freeze-pending.js';
 import { freezeNonce } from './profile.js';
 import { BUNDLE_FORMAT_V3, kindOfEventType } from './schemas.js';
 import { parseAllowedSigners } from './sshsig.js';
@@ -43,6 +45,8 @@ import {
   ALLOWED_SIGNERS_FILE,
   CLAIMS,
   CLAIMS_FORMAT,
+  formatDuration,
+  LATE_ANCHOR_RESULT,
   LEGACY_CLAIMS,
   listPackFiles,
   PACK_NAME,
@@ -284,6 +288,12 @@ export async function buildAuditPackage(
     genesis?: string;
     /** The reproducers' public keys (allowed-signers text), written as allowed_signers. */
     allowed_signers?: string;
+    /**
+     * A freeze made with the anchor pending (A8): the folder holding its pending-freeze record
+     * (freeze-pending.json, SHA256SUMS, checkpoint.json, manifest.json, plan-detail.json and the
+     * SHA256SUMS.<tsa>.tsr tokens), copied into the pack as freeze-pending/ and listed in SHA256SUMS.
+     */
+    freeze_pending_dir?: string;
     /** Stamp SHA256SUMS with these TSAs (the audit profile needs two). Absent: no tokens over SHA256SUMS. */
     stamp_sums?: { tsas?: readonly { name: string; url: string }[]; fetch?: typeof fetch; timeoutMs?: number };
     fetch?: typeof fetch;
@@ -397,6 +407,16 @@ export async function buildAuditPackage(
     if (as.entries.length === 0) throw new AuditError('invalid_audit_event', `--allowed-signers lists no usable key${as.problems.length ? ` (${as.problems[0]})` : ''}`);
     writeNew(join(out, ALLOWED_SIGNERS_FILE), opts.allowed_signers.endsWith('\n') ? opts.allowed_signers : `${opts.allowed_signers}\n`);
   }
+  if (opts.freeze_pending_dir !== undefined) {
+    const src = opts.freeze_pending_dir;
+    const names = readdirSync(src).filter((f) => isFreezePendingFile(f)).sort();
+    if (!names.includes(FREEZE_PENDING_RECORD)) throw new AuditError('invalid_audit_event', `--freeze-pending ${src} holds no ${FREEZE_PENDING_RECORD}`);
+    const got = new Map(names.map((f) => [f, readBundleFile(join(src, f), 16 * 1024 * 1024, { followLinks: true })] as const));
+    const p = parseFreezePending(got, 'pack_dir');
+    if (typeof p === 'string') throw new AuditError('invalid_audit_event', `--freeze-pending ${src}: ${p}`);
+    mkdirSync(join(out, FREEZE_PENDING_DIR), { mode: 0o755 });
+    for (const [f, b] of got) writeNew(join(out, FREEZE_PENDING_DIR, f), b);
+  }
   const v3 = m.format === BUNDLE_FORMAT_V3;
   const profile: Profile = v3 ? 'audit' : 'legacy';
   const sumsTsas = opts.stamp_sums ? (opts.stamp_sums.tsas ?? DEFAULT_TSAS) : [];
@@ -480,6 +500,13 @@ export async function buildAuditPackage(
         ? ['Milestones', ...anchors.map((a) => `  ${a.file.replace(/\.receipt\.json$/, '').padEnd(26)} seq ${a.from_seq}..${a.to_seq}  ${a.timestamps.length ? a.timestamps.map((t) => `${t.tsa} ${t.gen_time}`).join(', ') : `anchor service ${a.received_at}`}`)]
         : ['Anchors               none (this pack has no anchor receipts)']),
       `Claims                ${claims.claims.join(', ')}`,
+      // A8: a freeze made with the anchor pending says so, with the window no third party saw.
+      ...(probe.late_anchor.status === 'accepted' && probe.late_anchor.window
+        ? [
+            `Freeze anchor         LATE: frozen with the anchor pending (stamped ${probe.late_anchor.freeze_stamped.map((t) => `${t.gen_time ?? '?'} ${t.tsa}`).join(', ')}), anchored later by ${probe.late_anchor.anchor?.file.replace(/\.receipt\.json$/, '') ?? '?'}`,
+            `  unwitnessed window  ${probe.late_anchor.window.from} → ${probe.late_anchor.window.to} (${formatDuration(probe.late_anchor.window.ms)}): ${probe.late_anchor.window.runs} run(s) recorded before any third party held the chain; verify-audit reports ${LATE_ANCHOR_RESULT}`,
+          ]
+        : []),
       '',
       `Verify:  npx -y kronicle-lite@${VERSION} verify-audit <this directory> --key-fingerprint <auditor key fingerprint from your statement of work>${genesisArg}${profile === 'legacy' ? ' --profile legacy' : ''}`,
       '         (this file does not carry the fingerprint: take it from the statement of work, never from the pack)',
@@ -491,6 +518,9 @@ export async function buildAuditPackage(
   const rootOfTsa = new Map<string, string>();
   for (const a of anchors) for (const t of a.timestamps) if (!rootOfTsa.has(t.tsa)) rootOfTsa.set(t.tsa, rootFor.get(t.file) ?? `${t.tsa}.pem`);
   const freezeAnchor = v3 ? anchors.find((a) => a.file.includes('-harness-frozen.')) : undefined;
+  // A freeze made with the anchor pending: the runs carry the record's nonce, not one derived from an
+  // anchor receipt, so VERIFY.md derives that one (from the record's SHA256SUMS and tokens) instead.
+  const pending = v3 ? pendingFreezeForVerifyMd(out, rootFiles) : null;
   writeNew(
     join(out, 'VERIFY.md'),
     verifyMd({
@@ -508,6 +538,8 @@ export async function buildAuditPackage(
       profile,
       sumsTsas: sumsTsas.map((t) => ({ tsa: t.name, root: rootOfTsa.get(t.name) ?? `${t.name}.pem` })),
       freezeAnchor: freezeAnchor ?? null,
+      pending,
+      lateAnchored: probe.late_anchor.status === 'accepted',
       signers: opts.allowed_signers !== undefined,
     }),
   );
@@ -565,6 +597,32 @@ export function packTsaRootFiles(custom: readonly TsaRoot[] = []): { file: strin
 
 const epoch = (iso: string) => Math.floor(Date.parse(iso) / 1000);
 
+/** Where VERIFY.md finds a pending-freeze record, and the pinned root file for each of its tokens. */
+interface PendingForVerifyMd {
+  /** The pack's freeze-pending/ folder, or the report_issued archive blob holding it. */
+  source: 'pack_dir' | 'report_archive';
+  archive: string | null;
+  tokens: { tsa: string; file: string; root: string }[];
+}
+
+function pendingFreezeForVerifyMd(out: string, rootFiles: { file: string; pems: string[] }[]): PendingForVerifyMd | null {
+  const reports: string[] = [];
+  for (const line of readFileSync(join(out, 'bundle', 'events.jsonl'), 'utf8').split('\n')) {
+    if (!line) continue;
+    const e = JSON.parse(line) as { event_type?: unknown; payload?: { report?: { sha256?: unknown } } };
+    if (e.event_type === 'audit.report_issued' && typeof e.payload?.report?.sha256 === 'string') reports.push(e.payload.report.sha256);
+  }
+  const p = findFreezePending(out, reports);
+  if (p === null || 'problem' in p) return null;
+  return {
+    source: p.source,
+    archive: p.archive_sha256 ?? null,
+    tokens: [...p.tokens]
+      .sort((a, b) => (a.tsa < b.tsa ? -1 : a.tsa > b.tsa ? 1 : 0))
+      .map((t) => ({ tsa: t.tsa, file: t.file, root: rootFiles.find((r) => verifyTimestamp(t.bytes, { message: p.sums, roots: r.pems, at: 'gentime' }).ok)?.file ?? `${t.tsa}.pem` })),
+  };
+}
+
 function verifyMd(v: {
   audit_id: string;
   tagline: string;
@@ -580,6 +638,8 @@ function verifyMd(v: {
   profile: Profile;
   sumsTsas: { tsa: string; root: string }[];
   freezeAnchor: PackageAnchor | null;
+  pending: PendingForVerifyMd | null;
+  lateAnchored: boolean;
   signers: boolean;
 }): string {
   const a0 = v.anchors[0];
@@ -614,19 +674,66 @@ function verifyMd(v: {
         ]
       : []),
   ];
-  const nonceSection = v.freezeAnchor && v.freezeAnchor.timestamps.length >= 2
+  const P = v.pending?.source === 'report_archive' ? 'freeze-pending-record' : FREEZE_PENDING_DIR;
+  const pendingSection = v.pending
+    ? [
+        h3('The freeze nonce every run carries (freeze made with the anchor pending)'),
+        '',
+        'The harness was frozen with the anchor pending, so the runs do not carry a nonce derived from an',
+        'anchor receipt: they carry the nonce of the pending-freeze record. That record is an auditor-signed',
+        'checkpoint of the chain up to the freeze, the frozen manifest and plan detail, their `SHA256SUMS`,',
+        'and an RFC 3161 token over that `SHA256SUMS` from each timestamp authority. The nonce is SHA-256',
+        'over the SHA-256 of the record\'s `SHA256SUMS` (32 bytes) followed by every token over it, in byte',
+        'order of the TSA name; nobody could know it before the authorities signed. Each `run_completed`',
+        'and `call_measured` in `bundle/events.jsonl` must record it as `nonce`.',
+        '',
+        ...(v.pending.source === 'report_archive'
+          ? [
+              `The record is inside the report archive \`bundle/blobs/${v.pending.archive}\` (a ustar archive, on the chain),`,
+              `as \`${REPORT_ARCHIVE_PREFIX}<file>\`. The first commands copy it out to \`${P}/\`.`,
+              '',
+            ]
+          : [`The record is in \`${P}/\` (listed in the pack's SHA256SUMS).`, '']),
+        '```sh',
+        ...(v.pending.source === 'report_archive'
+          ? [
+              `mkdir -p ${P}.x ${P} && tar -xf bundle/blobs/${v.pending.archive} -C ${P}.x`,
+              `for f in ${P}.x/${REPORT_ARCHIVE_PREFIX}*; do cp "$f" "${P}/\${f##*/${REPORT_ARCHIVE_PREFIX}}"; done`,
+            ]
+          : []),
+        '# the stamped files match the record\'s SHA256SUMS',
+        `(cd ${P} && shasum -a 256 -c SHA256SUMS)`,
+        '# each authority stamped that SHA256SUMS',
+        ...v.pending.tokens.map((t) => `openssl ts -verify -data ${P}/SHA256SUMS -in ${P}/${t.file} -CAfile tsa-roots/${t.root} -partial_chain`),
+        '# the checkpoint at the freeze is signed by the auditor key',
+        `jq -cjS '{v: ${CHECKPOINT_VERSION}, from_seq, to_seq, leaf_count, root}' ${P}/checkpoint.json > pending-checkpoint-body.bin`,
+        `jq -r .signature ${P}/checkpoint.json | openssl base64 -d -A > pending-checkpoint.sig`,
+        'openssl pkeyutl -verify -pubin -inkey auditor-key.pem -rawin -in pending-checkpoint-body.bin -sigfile pending-checkpoint.sig',
+        '# the nonce, then the nonces the runs carry (one line, the same value)',
+        `D=$(shasum -a 256 ${P}/SHA256SUMS | cut -c1-64)`,
+        `{ printf %s "$D" | xxd -r -p; LC_ALL=C cat ${v.pending.tokens.map((t) => `${P}/${t.file}`).join(' ')}; } | shasum -a 256`,
+        `jq -r 'select(.event_type == "audit.run_completed" or .event_type == "audit.call_measured") | .payload.nonce' bundle/events.jsonl | sort -u`,
+        '```',
+        '',
+        'That the checkpoint root is the bundle\'s own Merkle root over seq 1..F, and that a timestamped',
+        'anchor later commits the freeze and every run, follow kronicle-lite docs/FORMAT.md §2;',
+        '`verify-audit` checks both and prints the window in which only the auditor\'s key held the chain.',
+        '',
+      ]
+    : [];
+  const nonceSection = !v.pending && v.freezeAnchor && v.freezeAnchor.timestamps.length >= 2
     ? [
         h3('The freeze nonce every run carries'),
         '',
         'The nonce is SHA-256 over the freeze receipt digest (32 bytes) followed by every timestamp token',
         'over that receipt, in byte order of the TSA name. The authorities sign the tokens at their own',
-        'time, so nobody could know the nonce before the freeze was stamped. Each `run_completed` in',
-        '`bundle/events.jsonl` must record it as `nonce`.',
+        'time, so nobody could know the nonce before the freeze was stamped. Each `run_completed` and',
+        '`call_measured` in `bundle/events.jsonl` must record it as `nonce`.',
         '',
         '```sh',
         `D=$(shasum -a 256 anchors/${v.freezeAnchor.file} | cut -c1-64)`,
         `{ printf %s "$D" | xxd -r -p; LC_ALL=C cat ${v.freezeAnchor.timestamps.map((t) => `anchors/${t.file}`).join(' ')}; } | shasum -a 256`,
-        `jq -r 'select(.event_type == "audit.run_completed") | .payload.nonce' bundle/events.jsonl | sort -u`,
+        `jq -r 'select(.event_type == "audit.run_completed" or .event_type == "audit.call_measured") | .payload.nonce' bundle/events.jsonl | sort -u`,
         '```',
         '',
       ]
@@ -731,6 +838,15 @@ function verifyMd(v: {
           '`claims.json`, checks every claim of the audit profile (whatever `claims.json` says), and prints',
           'PASS or FAIL for each with its evidence, then the values to compare with the completion letter',
           'you were sent. Exit 0 (VERIFIED) means every claim was checked and passed.',
+          ...(v.lateAnchored
+            ? [
+                '',
+                `This pack's freeze was made with the anchor pending and anchored later: the result is`,
+                `\`${LATE_ANCHOR_RESULT}\` (exit 0), never the plain \`VERIFIED\`, and the`,
+                'report prints the unwitnessed window, in which only the auditor\'s key held the chain.',
+                '`--strict-freeze` refuses such a pack.',
+              ]
+            : []),
         ]
       : [
           '`claims.json`, always checks integrity and chain, then the claims in `claims.json`, and prints',
@@ -747,6 +863,7 @@ function verifyMd(v: {
     ...absent,
     ...tokenSection,
     ...nonceSection,
+    ...pendingSection,
     ...receiptSection,
     ...signersSection,
     ...(stamped.length
@@ -794,7 +911,16 @@ export function renderPackage(r: PackageResult): string {
   const bad = r.check.checks.filter((c) => c.status === 'fail');
   L.push('');
   const passed = r.check.claims.filter((c) => c.status === 'pass').map((c) => c.claim).join(', ');
+  const la = r.check.late_anchor;
   if (r.check.verdict === 'verified') L.push(`verify-audit   VERIFIED (${r.profile} profile)  ${passed}`);
+  else if (r.check.verdict === 'verified_late_anchor') {
+    L.push(`verify-audit   ${LATE_ANCHOR_RESULT} (${r.profile} profile)  ${passed}`);
+    if (la.window) {
+      L.push(
+        `  unwitnessed window  ${la.window.from} → ${la.window.to} (${formatDuration(la.window.ms)}): ${la.window.seqs ? `seq ${la.window.seqs.from}..${la.window.seqs.to} (${la.window.events} event(s), ${la.window.runs} run(s))` : 'no events'} held only by the auditor's key until ${la.anchor?.file.replace(/\.receipt\.json$/, '') ?? 'the late anchor'}`,
+      );
+    }
+  }
   else if (r.check.verdict === 'partial') L.push(`verify-audit   PARTIAL (${r.profile} profile: an older bundle format; verify with --profile legacy)  ${passed}`);
   else {
     L.push(`verify-audit   FAIL (${r.profile} profile, ${r.check.failed} failed check(s))`);

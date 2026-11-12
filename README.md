@@ -445,7 +445,17 @@ kronicle-lite audit package --audit-id A --out pack/ --timestamps stamps/ --allo
   `SHA256SUMS` before it reads `claims.json`, and prints `PASS` / `FAIL` per
   claim with the evidence for every check (hashes, roots, keys, TSA names and
   signed times). `--json` follows `VerifyAuditJsonSchema`
-  (`kronicle-lite-verify-audit/2`, with `profile` and `verdict`).
+  (`kronicle-lite-verify-audit/3`, with `profile`, `verdict` and `late_anchor`).
+- **Late anchor (A8).** A freeze made with the anchor pending and anchored
+  later carries a pending-freeze record: an auditor-signed checkpoint at the
+  freeze, stamped by two TSAs, whose nonce every run carries. `verify-audit`
+  checks it against the pack and reports
+  `VERIFIED WITH UNWITNESSED WINDOW (FREEZE ANCHORED LATE)` (exit 0, never the plain
+  `VERIFIED`) with the **unwitnessed window** (from the freeze stamp to the first
+  anchor that commits the freeze) instead of failing the two freeze-anchor
+  checks. `--strict-freeze` refuses such a pack. `audit package
+  --freeze-pending DIR` puts the record in the pack. See
+  [docs/EVIDENCE-BUNDLE.md](docs/EVIDENCE-BUNDLE.md#late-anchor-a-freeze-made-with-the-anchor-pending).
 - **Reading the result.**
 
   | Result | Exit | Meaning |

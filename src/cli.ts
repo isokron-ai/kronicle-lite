@@ -96,6 +96,7 @@ const BOOLEAN_FLAGS = new Set([
   'no-stamp-sums',
   'tsa-at-gentime',
   'allow-pending',
+  'strict-freeze',
 ]);
 
 function parseArgs(argv: string[]): Args {
@@ -251,7 +252,7 @@ Usage:
                                                                  service or a failed TSA exits 2 and writes no .pending
                                                                  marker; --allow-pending writes one (verify-audit rejects it)
   kronicle-lite audit package --audit-id A --out DIR [--timestamps DIR] [--tsa-roots DIR] [--anchor-keys FILE] [--genesis SHA256@VALID_FROM]
-                 [--allowed-signers FILE] [--tsa name=url,…] [--no-stamp-sums] [--json]
+                 [--allowed-signers FILE] [--freeze-pending DIR] [--tsa name=url,…] [--no-stamp-sums] [--json]
                                                                  IsoKron Evidence Pack: bundle, anchors inside its range,
                                                                  their tokens, keys, TSA roots, the reproducers' allowed
                                                                  signers, claims.json (the claims the store supports),
@@ -260,7 +261,8 @@ Usage:
                                                                  (the audit profile for a /3 bundle). Exit 0 VERIFIED,
                                                                  2 PARTIAL, 1 otherwise
   kronicle-lite verify-audit PACK --key-fingerprint SHA256 | --key PEM-FILE [--profile audit|legacy] [--anchor-keys FILE] [--genesis SHA256@VALID_FROM]
-                 [--tsa-roots DIR] [--allowed-signers FILE] [--no-tsa] [--tsa-at-gentime] [--require CLAIM,…] [--skip-claim CLAIM,…] [--max-bytes N] [--allow-hardlinks] [--json]
+                 [--tsa-roots DIR] [--allowed-signers FILE] [--no-tsa] [--tsa-at-gentime] [--require CLAIM,…] [--skip-claim CLAIM,…] [--strict-freeze]
+                 [--max-bytes N] [--allow-hardlinks] [--json]
                                                                  verify an IsoKron Evidence Pack offline. The auditor key is
                                                                  pinned by its SHA-256 from the statement of work (--key-fingerprint;
                                                                  --key, --anchor-keys, --tsa-roots, --allowed-signers must not
@@ -286,8 +288,14 @@ Usage:
                                                                  fails both). Remembers the newest anchor key list per genesis
                                                                  pin in the data dir and fails on a rollback or a damaged cache. Establishes integrity, ordering
                                                                  and independent time; the audit's depth is described in its
-                                                                 report. Exit 0 VERIFIED, 1 a check failed or a claim was not
-                                                                 checked, 2 PARTIAL, usage or an unreadable pack
+                                                                 report. A freeze made with the anchor pending and anchored
+                                                                 later (a pending-freeze record in the pack) is shown by that
+                                                                 record instead of a freeze anchor: VERIFIED WITH UNWITNESSED
+                                                                 WINDOW (FREEZE ANCHORED LATE), with the window printed (JSON
+                                                                 verdict verified_late_anchor, ok true); --strict-freeze
+                                                                 refuses it (FAILED). Exit 0 VERIFIED (either kind), 1 a check
+                                                                 failed or a claim was not checked, 2 PARTIAL, usage or an
+                                                                 unreadable pack
   kronicle-lite shim install [--dir D] [--commands git,terraform,kubectl,…] [--world "make release,…"] [--mode deny|warn]
   [--git-hook]   | status | ack --operator [--through SEQ] | uninstall   PATH wrappers (+ git pre-push hook) that pulse before
                                                                  world-changing commands (git push, terraform apply, …)
@@ -875,10 +883,10 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
-/** `verify-audit PACKAGE`: exit 0 VERIFIED, 1 a check failed (or a claim was not checked), 2 PARTIAL, usage or an unreadable package / trust input. */
+/** `verify-audit PACKAGE`: exit 0 VERIFIED (or VERIFIED with the freeze anchored late), 1 a check failed (or a claim was not checked), 2 PARTIAL, usage or an unreadable package / trust input. */
 async function verifyAuditCommand(positional: string[], flags: Record<string, string | true>, dataDir: string): Promise<number> {
   const usage =
-    'usage: kronicle-lite verify-audit PACK --key-fingerprint SHA256 | --key PEM-FILE [--profile audit|legacy] [--anchor-keys FILE] [--genesis SHA256@VALID_FROM] [--tsa-roots DIR] [--allowed-signers FILE] [--no-tsa] [--tsa-at-gentime] [--require CLAIM,…] [--skip-claim CLAIM,…] [--max-bytes N] [--allow-hardlinks] [--json]';
+    'usage: kronicle-lite verify-audit PACK --key-fingerprint SHA256 | --key PEM-FILE [--profile audit|legacy] [--anchor-keys FILE] [--genesis SHA256@VALID_FROM] [--tsa-roots DIR] [--allowed-signers FILE] [--no-tsa] [--tsa-at-gentime] [--require CLAIM,…] [--skip-claim CLAIM,…] [--strict-freeze] [--max-bytes N] [--allow-hardlinks] [--json]';
   const dir = positional[0];
   if (!dir) {
     process.stderr.write(`${usage}\n`);
@@ -930,6 +938,7 @@ async function verifyAuditCommand(positional: string[], flags: Record<string, st
       ...(flags['allow-hardlinks'] === true ? { allow_hardlinks: true } : {}),
       ...(require.length ? { require: require as Claim[] } : {}),
       ...(skip.length ? { skip_claims: skip as Claim[] } : {}),
+      ...(flags['strict-freeze'] === true ? { late_anchor: 'strict' as const } : {}),
     };
   } catch (err) {
     process.stderr.write(`error: ${(err as Error).message}\n${usage}\n`);
@@ -944,7 +953,7 @@ async function verifyAuditCommand(positional: string[], flags: Record<string, st
     return 2;
   }
   process.stdout.write(flags['json'] === true ? JSON.stringify(r, null, 2) + '\n' : renderVerifyAudit(r));
-  return r.verdict === 'verified' ? 0 : r.verdict === 'partial' ? 2 : 1;
+  return r.verdict === 'verified' || r.verdict === 'verified_late_anchor' ? 0 : r.verdict === 'partial' ? 2 : 1;
 }
 
 /**

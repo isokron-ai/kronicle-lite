@@ -81,6 +81,7 @@ import { merkleRootHex } from '../chain/merkle.js';
 import { canonicalize } from '../crypto/canonical.js';
 import { sha256Hex } from '../crypto/hash.js';
 import { chainIdFromPublicKeyPem, keyIdFromPublicKey } from '../crypto/keys.js';
+import { findFreezePending, FREEZE_PENDING_RECORD, type FreezePending } from './freeze-pending.js';
 import { finalFindingStatuses, findingsDigest, freezeNonce, REPRODUCTION_NAMESPACE, reproductionStatement } from './profile.js';
 import { MAX_TSR_BYTES, verifyTimestamp } from './rfc3161.js';
 import { BUNDLE_FORMAT_V3, kindOfEventType } from './schemas.js';
@@ -88,7 +89,8 @@ import { MAX_SSHSIG_BYTES, verifySshSignature } from './sshsig.js';
 import { SHIPPED_TSA_EXTRAS, SHIPPED_TSA_ROOTS } from './tsa-roots.js';
 import { DEFAULT_MAX_BUNDLE_BYTES, hashRegularFile, MAX_BUNDLE_BLOB_BYTES, MAX_MANIFEST_BYTES, readBundleFile, verifyBundle } from './verify-bundle.js';
 
-export const VERIFY_AUDIT_FORMAT = 'kronicle-lite-verify-audit/2';
+/** /3 (A8): the verdict verified_late_anchor, ordering basis pending_freeze and the late_anchor report. */
+export const VERIFY_AUDIT_FORMAT = 'kronicle-lite-verify-audit/3';
 export const PACK_NAME = 'IsoKron Evidence Pack';
 export const CLAIMS_FORMAT = 'isokron-evidence-pack-claims/1';
 export const CLAIMS = ['integrity', 'chain', 'receipts', 'independent_timestamps', 'harness_frozen_before_runs', 'run_sequence', 'plan_complete', 'reproductions_signed', 'closed'] as const;
@@ -100,11 +102,57 @@ export type Profile = (typeof PROFILES)[number];
 /** The audit profile checks all of these on every pack; claims.json may add to them, never remove one. */
 export const AUDIT_PROFILE_CLAIMS: readonly Claim[] = CLAIMS;
 /**
- * verified: the audit profile, every claim checked and passed. partial: every check that ran passed,
- * but the audit profile was not met (--profile legacy, or a claim skipped by user): exit 2.
- * not_verified: a claim the pack needs was not checked. failed: a check failed.
+ * verified: the audit profile, every claim checked and passed. verified_late_anchor (A8): the same,
+ * for a freeze made with the anchor pending and anchored later; the two freeze-anchor checks are
+ * shown instead by the pending-freeze record, and the unwitnessed window is reported (exit 0;
+ * --strict-freeze turns it back into FAILED). partial: every check that ran passed, but the audit
+ * profile was not met (--profile legacy, or a claim skipped by user): exit 2. not_verified: a claim
+ * the pack needs was not checked. failed: a check failed.
  */
-export type Verdict = 'verified' | 'partial' | 'not_verified' | 'failed';
+export type Verdict = 'verified' | 'verified_late_anchor' | 'partial' | 'not_verified' | 'failed';
+/**
+ * The RESULT line's verdict for verified_late_anchor. A plain pass is exactly `RESULT: VERIFIED` and
+ * two spaces; this one never is, so a script that keys on the verdict cannot take it for one. Scripts
+ * should read `--json` `.verdict`: `ok` (and exit 0) is true for both.
+ */
+export const LATE_ANCHOR_RESULT = 'VERIFIED WITH UNWITNESSED WINDOW (FREEZE ANCHORED LATE)';
+export const VERDICTS = ['verified', 'verified_late_anchor', 'partial', 'not_verified', 'failed'] as const;
+
+/**
+ * The two audit-profile checks a late freeze anchor cannot pass (its proof is a freeze anchor that
+ * commits no run), matched exactly: anything else in their evidence keeps them failed.
+ */
+export const LATE_ANCHOR_REPLACEABLE: readonly { claim: Claim; check: string; evidence: RegExp }[] = [
+  { claim: 'receipts', check: 'milestone anchors', evidence: /^missing an anchor after the freeze \(seq \d+\) that commits no run(?: \(the first is seq \d+\))? \([^;]*\)$/ },
+  { claim: 'harness_frozen_before_runs', check: 'harness frozen before runs', evidence: /^the freeze event \(seq \d+\) is first committed by \S+ together with \d+ run\(s\) \(seq \d+\.\.\d+\)$/ },
+  // Anchored after the freeze but before the runs: the runs carry the pending-freeze nonce, not the anchor's.
+  { claim: 'harness_frozen_before_runs', check: 'harness frozen before runs', evidence: /^run seq [\d, ]+ carries a nonce that is not the derived freeze nonce sha256\(\S+ receipt digest ‖ its \d+ TSA token\(s\)\) = [0-9a-f]{64}$/ },
+];
+
+/** A freeze made with the anchor pending and anchored later (A8). */
+export interface LateAnchorReport {
+  /**
+   * none: no pending-freeze record (a normal freeze). accepted: the record proves the freeze order and a
+   * later anchor commits the freeze and every run; the two freeze-anchor checks are replaced. not_needed:
+   * a record is there but the freeze anchor commits no run anyway. rejected: the record or its proof
+   * fails. strict: --strict-freeze, the record was not used.
+   */
+  status: 'none' | 'accepted' | 'not_needed' | 'rejected' | 'strict';
+  source: FreezePending['source'] | null;
+  nonce: string | null;
+  checkpoint_to_seq: number | null;
+  /** The RFC 3161 times over the record's SHA256SUMS. */
+  freeze_stamped: { tsa: string; gen_time: string | null; ca: string | null }[];
+  /** The anchor that commits the freeze and every run. */
+  anchor: { file: string; from_seq: number; to_seq: number; received_at: string; first_tsa_time: string } | null;
+  /**
+   * From the freeze stamp to the late anchor's first TSA time: the events after the freeze were held
+   * only by the auditor's key, with no third party, until the late anchor.
+   */
+  window: { from: string; to: string; ms: number; seqs: { from: number; to: number } | null; events: number; runs: number } | null;
+  replaced: { claim: Claim; check: string; evidence: string }[];
+  problem: string | null;
+}
 /** Always checked, whatever claims.json says. */
 const ALWAYS: readonly Claim[] = ['integrity', 'chain'];
 /** Claims that need others to mean anything. */
@@ -237,8 +285,8 @@ export interface AnchorReport {
 
 export interface OrderingReport {
   status: 'pass' | 'fail' | 'not_declared' | 'not_checked';
-  /** freeze_nonce: the freeze receipt digest (/1, /2); derived_nonce: sha256(receipt digest ‖ its TSA tokens) (/3). */
-  basis: 'freeze_nonce' | 'derived_nonce' | null;
+  /** freeze_nonce: the freeze receipt digest (/1, /2); derived_nonce: sha256(receipt digest ‖ its TSA tokens) (/3); pending_freeze: the pending-freeze record's nonce over its TSA tokens (A8). */
+  basis: 'freeze_nonce' | 'derived_nonce' | 'pending_freeze' | null;
   /** The nonce every run must carry, as the verifier computed it. */
   nonce: string | null;
   harness_digest: string | null;
@@ -345,6 +393,7 @@ export interface VerifyAuditResult {
   /** RFC 3161 replies over SHA256SUMS. */
   sums_timestamps: AnchorTimestampReport[];
   timeline: TimelineEntry[];
+  late_anchor: LateAnchorReport;
   final: {
     root: string;
     from_seq: number;
@@ -393,6 +442,12 @@ export interface VerifyAuditOptions {
   rollback?: 'on' | 'off';
   /** Where `genesis` came from, for the report (default 'option'). */
   genesis_source?: 'option' | 'env';
+  /**
+   * A freeze made with the anchor pending and anchored later (A8). accept (default): a valid
+   * pending-freeze record replaces the two freeze-anchor checks (verdict verified_late_anchor).
+   * strict: the record is not used; such a pack FAILS those two checks (--strict-freeze).
+   */
+  late_anchor?: 'accept' | 'strict';
   /** Clock (tests). */
   now?: Date;
   max_bytes?: number;
@@ -717,6 +772,7 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     closed: { status: 'not_declared', seq: null, report_id: null, run_count: null, findings_digest: null, problem: null },
     sums_timestamps: [],
     timeline: [],
+    late_anchor: { status: 'none', source: null, nonce: null, checkpoint_to_seq: null, freeze_stamped: [], anchor: null, window: null, replaced: [], problem: null },
     final: null,
   };
 
@@ -731,6 +787,8 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
   let tsaForKeys: string | null = null;
   /** Every timestamp reply read per receipt (NN-label → replies by TSA label): the /3 freeze nonce is derived from them. */
   const tokenBytes = new Map<string, { tsa: string; bytes: Buffer }[]>();
+  /** The verified anchors the timeline uses (filled by timeline()), for the late-anchor check. */
+  const validAnchors: Valid[] = [];
   /**
    * The policy: authenticated claims.json (or every claim), plus the always-checked ones, the required ones and their
    * dependencies. Under the audit profile every claim is checked: claims.json can add claims, never remove one.
@@ -821,7 +879,9 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
   // user skipped, can at best show that what ran passed: PARTIAL.
   const failedAny = result.failed > 0 || result.claims.some((c) => c.status === 'fail') || result.auditor.source === 'unpinned';
   result.verdict = allPassed ? (auditProfile && AUDIT_PROFILE_CLAIMS.every((c) => result.claims.find((x) => x.claim === c)!.status === 'pass') ? 'verified' : 'partial') : failedAny ? 'failed' : 'not_verified';
-  result.ok = result.verdict === 'verified';
+  // A8: the same pass, but the freeze order rests on the pending-freeze record and a late anchor.
+  if (result.verdict === 'verified' && result.late_anchor.status === 'accepted') result.verdict = 'verified_late_anchor';
+  result.ok = result.verdict === 'verified' || result.verdict === 'verified_late_anchor';
   return result;
 
   function claimSummaries(): Partial<Record<Claim, string>> {
@@ -1208,6 +1268,141 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     }
     if (on('independent_timestamps') && !noTsa) checkSumsTokens(roots, groupOf);
     timeline(result.anchors, full, events !== null, to, vb.root, vb.manifest_sha256, keyEndOk);
+    if (auditProfile && on('harness_frozen_before_runs') && !noTsa && events !== null && vb.ok) checkLateAnchor(full, auditorPem, roots, groupOf);
+  }
+
+  /**
+   * A8: a freeze made with the anchor pending and anchored later. The pending-freeze record must hold
+   * together, its RFC 3161 tokens must verify under two pinned TSA CAs, its auditor-signed checkpoint
+   * must be the bundle's own root over seq 1..F, the freeze event must be inside it and name the stamped
+   * manifest and plan detail, every run must carry its nonce and the frozen harness, and one verified,
+   * timestamped anchor must commit the freeze and every run. Then, and only then, the two freeze-anchor
+   * checks (in exactly the form a late anchor produces) are replaced, and the unwitnessed window is
+   * reported.
+   */
+  function checkLateAnchor(full: BundleEvent[], auditorPem: string, roots: string[], groupOf: Map<string, string>): void {
+    const la = result.late_anchor;
+    const reports = full.filter((e) => e.kind === 'report_issued').map((e) => (isJsonObject(e.payload?.['report']) ? sOrNull((e.payload['report'] as Record<string, unknown>)['sha256']) : null)).filter((x): x is string => x !== null);
+    const found = findFreezePending(dir, reports, allowHardlinks);
+    if (found === null) return;
+    la.source = found.source;
+    const where = found.source === 'pack_dir' ? 'freeze-pending/' : 'the report archive (attachments/freeze-pending.*)';
+    const sub = (check: string, ok: boolean | CheckStatus, evidence: string) => add('ordering', 'harness_frozen_before_runs', 'pending freeze', check, ok, evidence);
+    if ('problem' in found) {
+      la.status = 'rejected';
+      la.problem = found.problem;
+      sub('record', false, `${where}: ${found.problem}`);
+      return;
+    }
+    const p = found;
+    la.nonce = p.nonce;
+    la.checkpoint_to_seq = p.checkpoint.to_seq;
+    if (opts.late_anchor === 'strict') {
+      la.status = 'strict';
+      sub('late anchor', 'not_applicable', `the pack carries a pending-freeze record (${where}); --strict-freeze: not used, the freeze-anchor checks stand`);
+      return;
+    }
+    const problems: string[] = [];
+    const check = (name: string, ok: boolean, evidence: string) => {
+      if (!ok) problems.push(`${name}: ${evidence}`);
+      sub(name, ok, evidence);
+    };
+    check('record', true, `${where}: SHA256SUMS, ${p.tokens.length} token(s) and ${FREEZE_PENDING_RECORD} agree; nonce ${short(p.nonce)} re-derived from SHA256SUMS and the tokens`);
+    // RFC 3161 tokens over the record's SHA256SUMS, under the pinned TSA CAs.
+    const toks = p.tokens.map((t) => {
+      const v = verifyTimestamp(t.bytes, { message: p.sums, roots, at: tsaAt, known_extras: opts.tsa_roots === undefined ? SHIPPED_TSA_EXTRAS.map((x) => x.sha256) : [], ...(opts.now ? { now: opts.now } : {}) });
+      return { t, v, ca: v.ok && v.root_sha256 ? (groupOf.get(v.root_sha256) ?? null) : null };
+    });
+    la.freeze_stamped = toks.map((x) => ({ tsa: x.t.tsa, gen_time: x.v.info?.gen_time ?? null, ca: x.ca }));
+    const cas = new Set(toks.filter((x) => x.v.ok && x.ca).map((x) => x.ca!));
+    const tokOk = toks.every((x) => x.v.ok) && cas.size >= 2;
+    check('freeze stamped', tokOk, `${toks.map((x) => (x.v.ok ? `${x.t.tsa} ${x.v.info!.gen_time} (CA ${x.ca ?? x.v.root})` : `${x.t.tsa}: ${x.v.problem ?? 'does not verify'}`)).join('; ')}${tokOk ? '' : cas.size < 2 ? `; valid tokens under ${cas.size} pinned TSA CA(s), two different CAs are required` : ''}`);
+    // The checkpoint: signed by the pinned auditor key, its root the bundle's own root over 1..F.
+    const F = p.checkpoint.to_seq;
+    const upTo = full.filter((e) => e.seq <= F);
+    const contiguous = upTo.length === F && upTo.every((e, i) => e.seq === i + 1);
+    const root = contiguous ? merkleRootHex(upTo.map((e) => ({ seq: e.seq, this_hash: e.this_hash }))) : null;
+    const sigOk = verifyEd25519Strict(auditorPem, checkpointSigningPayload(p.checkpoint), p.checkpoint.signature);
+    check(
+      'checkpoint',
+      sigOk && root !== null && root === p.checkpoint.root,
+      !sigOk
+        ? 'the checkpoint signature does not verify under the pinned auditor key'
+        : root === null
+          ? `the bundle does not hold seq 1..${F} contiguously`
+          : root !== p.checkpoint.root
+            ? `the checkpoint root ${short(p.checkpoint.root)} is not the bundle's root over seq 1..${F} (${short(root)}): the chain was rewritten after the freeze stamp`
+            : `signed by the pinned auditor key; root ${short(root)} is the bundle's root over seq 1..${F}`,
+    );
+    // The freeze event: inside the checkpoint, naming the stamped manifest and plan detail.
+    const freeze = full.find((e) => e.kind === 'harness_frozen');
+    const ref = (k: string) => (isJsonObject(freeze?.payload?.[k]) ? sOrNull((freeze!.payload![k] as Record<string, unknown>)['sha256']) : null);
+    const fwhy: string[] = [];
+    if (!freeze) fwhy.push('the bundle holds no harness_frozen event');
+    else {
+      if (freeze.seq > F) fwhy.push(`harness_frozen is seq ${freeze.seq}, after the stamped checkpoint (1..${F})`);
+      if (freeze.payload?.['fingerprint'] !== p.record.fingerprint) fwhy.push('it names another harness fingerprint than the record');
+      if (ref('manifest') !== sha256Hex(p.files.get('manifest.json')!)) fwhy.push('its manifest is not the stamped manifest.json');
+      if (ref('plan_detail') !== sha256Hex(p.files.get('plan-detail.json')!)) fwhy.push('its plan detail is not the stamped plan-detail.json');
+    }
+    check('freeze event', fwhy.length === 0, fwhy.length ? fwhy.join('; ') : `harness_frozen seq ${freeze!.seq} inside the checkpoint, harness ${short(p.record.fingerprint)}, manifest and plan detail as stamped`);
+    // Every run (each kind the ordering check counts: run_completed and call_measured) comes after the
+    // stamped checkpoint and carries the record's nonce and the frozen harness.
+    const runs = full.filter((e) => e.kind !== null && RUN_KINDS.has(e.kind));
+    const early = runs.filter((r) => r.seq <= F);
+    const off = runs.filter((r) => r.payload?.['nonce'] !== p.nonce || r.payload?.['fingerprint'] !== p.record.fingerprint);
+    const seqList = (xs: BundleEvent[]) => `${xs.map((r) => `${r.seq} (${r.kind})`).slice(0, 10).join(', ')}${xs.length > 10 ? ` (+${xs.length - 10})` : ''}`;
+    const runWhy = [
+      ...(early.length ? [`run seq ${seqList(early)} ${early.length > 1 ? 'are' : 'is'} inside the stamped checkpoint (seq 1..${F}), recorded before the freeze stamp`] : []),
+      ...(off.length ? [`run seq ${off.map((r) => r.seq).slice(0, 10).join(', ')} do not carry the pending-freeze nonce and harness (${off.map((r) => r.kind).filter((k, i, a) => a.indexOf(k) === i).join(', ')})`] : []),
+    ];
+    const badRuns = new Set([...early, ...off]);
+    check('runs carry the nonce', runWhy.length === 0, runWhy.length ? runWhy.join('; ') : `${runs.length}/${runs.length} run(s) after seq ${F} carry nonce ${short(p.nonce)} (unknown before the freeze tokens) and harness ${short(p.record.fingerprint)}`);
+    // One verified, timestamped anchor commits the freeze and every run.
+    const isRunEnd = (e: BundleEvent) => e.kind !== null && (RUN_KINDS.has(e.kind) || e.kind === 'run_abandoned');
+    const ends = full.filter(isRunEnd);
+    const lastEnd = ends.length ? ends[ends.length - 1]!.seq : 0;
+    const late = freeze ? validAnchors.find((v) => v.clock === 'tsa' && v.from <= freeze.seq && v.to >= Math.max(freeze.seq, lastEnd)) : undefined;
+    check('late anchor', late !== undefined, late ? `${late.base} (received ${late.svc}, stamped ${[...late.tsa.values()].join(', ')}) commits seq ${late.from}..${late.to}: the freeze and every run` : 'no verified anchor stamped under two TSA CAs commits the freeze and every run');
+    if (problems.length) {
+      la.status = 'rejected';
+      la.problem = problems.join('; ');
+      return;
+    }
+    // The two freeze-anchor checks, in exactly the form a late anchor gives them.
+    const hits = checks.filter((c) => c.status === 'fail' && LATE_ANCHOR_REPLACEABLE.some((x) => x.claim === c.claim && x.check === c.check && x.evidence.test(c.evidence)));
+    const fromT = isoMin(la.freeze_stamped.map((x) => x.gen_time).filter((x): x is string => x !== null))!;
+    // The first third party to hold the chain after the freeze: the earliest timestamped anchor that commits it.
+    const witness = validAnchors.filter((v) => v.clock === 'tsa' && v.from <= freeze!.seq && v.to >= freeze!.seq).sort((x, y) => x.to - y.to)[0] ?? late!;
+    la.anchor = { file: `${witness.base}.receipt.json`, from_seq: witness.from, to_seq: witness.to, received_at: witness.svc, first_tsa_time: witness.first };
+    const inWindow = full.filter((e) => e.seq > F && e.seq <= witness.to);
+    la.window = {
+      from: fromT,
+      to: witness.first,
+      ms: Math.max(0, Date.parse(witness.first) - Date.parse(fromT)),
+      seqs: inWindow.length ? { from: inWindow[0]!.seq, to: inWindow[inWindow.length - 1]!.seq } : null,
+      events: inWindow.length,
+      runs: inWindow.filter(isRunEnd).length,
+    };
+    if (hits.length === 0) {
+      la.status = 'not_needed';
+      return;
+    }
+    for (const c of hits) {
+      la.replaced.push({ claim: c.claim!, check: c.check, evidence: c.evidence });
+      c.status = 'pass';
+      c.evidence = `late anchor: the freeze was stamped over the pending-freeze record (${la.freeze_stamped.map((x) => `${x.tsa} ${x.gen_time ?? '?'}`).join(', ')}) and anchored later by ${witness.base}; every run carries its nonce (in place of: ${c.evidence})`;
+    }
+    const o = result.ordering;
+    if (hits.some((c) => c.claim === 'harness_frozen_before_runs')) {
+      o.status = 'pass';
+      o.basis = 'pending_freeze';
+      o.nonce = p.nonce;
+      o.problem = null;
+      o.freeze = { seq: freeze!.seq, event_key: sOrNull(freeze!.payload?.['event_key']), anchor: witness.base, time: isoMax(la.freeze_stamped.map((x) => x.gen_time).filter((x): x is string => x !== null)), clock: 'tsa' };
+      if (o.runs) o.runs.nonce_bound = runs.length - badRuns.size;
+    }
+    la.status = 'accepted';
   }
 
   /** RFC 3161 replies over SHA256SUMS: required (two pinned TSA CAs) by the audit profile; checked when present otherwise. */
@@ -1548,7 +1743,8 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
 
   function timeline(anchors: AnchorReport[], full: BundleEvent[], haveEvents: boolean, to: number | null, bundleRoot: string | null, manifestSha: string | null, keyEndOk: Map<string, boolean> | null): void {
     const useTsa = !noTsa && on('independent_timestamps');
-    const valid: Valid[] = [];
+    const valid: Valid[] = validAnchors;
+    valid.length = 0;
     for (const a of anchors) {
       if (!a.ok || a.from_seq === null || a.to_seq === null || a.received_at === null) continue;
       const base = a.file.slice(0, -'.receipt.json'.length);
@@ -1716,7 +1912,7 @@ export const VerifyAuditJsonSchema = z.strictObject({
   format: z.literal(VERIFY_AUDIT_FORMAT),
   ok: z.boolean(),
   profile: z.enum(PROFILES),
-  verdict: z.enum(['verified', 'partial', 'not_verified', 'failed']),
+  verdict: z.enum(VERDICTS),
   package: z.string(),
   audit_id: z.string().nullable(),
   bundle_format: z.string().nullable(),
@@ -1767,7 +1963,7 @@ export const VerifyAuditJsonSchema = z.strictObject({
   ),
   ordering: z.strictObject({
     status: z.enum(['pass', 'fail', 'not_declared', 'not_checked']),
-    basis: z.enum(['freeze_nonce', 'derived_nonce']).nullable(),
+    basis: z.enum(['freeze_nonce', 'derived_nonce', 'pending_freeze']).nullable(),
     nonce: z.string().nullable(),
     harness_digest: z.string().nullable(),
     freeze: z.strictObject({ seq: z.number().int(), event_key: z.string().nullable(), anchor: z.string().nullable(), time: z.string().nullable(), clock: z.enum(['tsa', 'service']).nullable() }).nullable(),
@@ -1799,6 +1995,17 @@ export const VerifyAuditJsonSchema = z.strictObject({
     problem: z.string().nullable(),
   }),
   sums_timestamps: z.array(TOKEN_REPORT),
+  late_anchor: z.strictObject({
+    status: z.enum(['none', 'accepted', 'not_needed', 'rejected', 'strict']),
+    source: z.enum(['pack_dir', 'report_archive']).nullable(),
+    nonce: z.string().nullable(),
+    checkpoint_to_seq: z.number().int().nullable(),
+    freeze_stamped: z.array(z.strictObject({ tsa: z.string(), gen_time: z.string().nullable(), ca: z.string().nullable() })),
+    anchor: z.strictObject({ file: z.string(), from_seq: z.number().int(), to_seq: z.number().int(), received_at: z.string(), first_tsa_time: z.string() }).nullable(),
+    window: z.strictObject({ from: z.string(), to: z.string(), ms: z.number().int().nonnegative(), seqs: z.strictObject({ from: z.number().int(), to: z.number().int() }).nullable(), events: z.number().int(), runs: z.number().int() }).nullable(),
+    replaced: z.array(z.strictObject({ claim: z.enum(CLAIMS), check: z.string(), evidence: z.string() })),
+    problem: z.string().nullable(),
+  }),
   timeline: z.array(
     z.strictObject({ seq: z.number().int(), kind: z.string(), event_key: z.string().nullable(), measured_at: z.string().nullable(), committed_by: z.string().nullable(), no_later_than: z.string().nullable(), clock: z.enum(['tsa', 'service']).nullable() }),
   ),
@@ -1817,6 +2024,14 @@ export const VerifyAuditJsonSchema = z.strictObject({
 
 const LABEL: Record<CheckStatus | ClaimStatus, string> = { pass: 'PASS', fail: 'FAIL', not_applicable: 'N/A', not_declared: 'not declared', not_checked: 'not checked', skipped: 'skipped' };
 const GROUP_TITLE: Record<CheckGroup, string> = { pack: 'Pack', bundle: 'Evidence bundle', keys: 'Anchor service keys', anchor: 'Anchors', timestamp: 'Anchors', timeline: 'Timeline', ordering: 'Ordering', runs: 'Runs', plan: 'Run plan', signoff: 'Human sign-offs', close: 'Close' };
+
+/** 20h31m, 3h24m, 12m, 45s. */
+export function formatDuration(ms: number): string {
+  const s = Math.round(ms / 1000);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return h > 0 ? `${h}h${String(m).padStart(2, '0')}m` : m > 0 ? `${m}m` : `${s}s`;
+}
 
 /** The human-readable report: claims, one PASS / FAIL / N/A line per check with its evidence, values to compare. */
 export function renderVerifyAudit(r: VerifyAuditResult): string {
@@ -1889,15 +2104,35 @@ export function renderVerifyAudit(r: VerifyAuditResult): string {
   const skippedC = r.claims.filter((c) => c.status === 'skipped').map((c) => c.claim);
   const failedC = r.claims.filter((c) => c.status === 'fail').map((c) => c.claim);
   const notDeclared = r.claims.filter((c) => c.status === 'not_declared').map((c) => c.claim);
+  const la = r.late_anchor;
+  if (la.status !== 'none') {
+    L.push('', 'Late anchor (freeze made with the anchor pending)');
+    if (la.status === 'accepted' || la.status === 'not_needed') {
+      L.push(`  freeze stamped   ${la.freeze_stamped.map((t) => `${t.gen_time ?? '?'} (${t.tsa})`).join(', ')} over the auditor-signed checkpoint of seq 1..${la.checkpoint_to_seq}`);
+      if (la.anchor) L.push(`  anchored later   ${la.anchor.file.replace(/\.receipt\.json$/, '')} (seq ${la.anchor.from_seq}..${la.anchor.to_seq}), first RFC 3161 time ${la.anchor.first_tsa_time}`);
+      if (la.window) {
+        L.push(`  UNWITNESSED WINDOW  ${la.window.from} → ${la.window.to} (${formatDuration(la.window.ms)}): ${la.window.seqs ? `seq ${la.window.seqs.from}..${la.window.seqs.to} (${la.window.events} event(s), ${la.window.runs} run(s))` : 'no events'} were held only by the auditor's key until the late anchor.`);
+        L.push('                      Their order after the freeze is shown by the nonce they carry; that none was rewritten or replayed in this window rests on the auditor alone.');
+      }
+      for (const x of la.replaced) L.push(`  replaced         ${x.claim} / ${x.check}: "${x.evidence}"`);
+      if (la.status === 'accepted') L.push('  --strict-freeze requires a freeze anchor that commits no run (this pack then FAILS those checks).');
+    } else if (la.status === 'strict') L.push('  --strict-freeze: the pending-freeze record in the pack was not used');
+    else L.push(`  REJECTED: ${la.problem ?? 'the pending-freeze proof does not hold'}`);
+  }
   L.push(
     r.verdict === 'verified'
       ? `RESULT: VERIFIED  ${passed.join(', ')}`
+      : r.verdict === 'verified_late_anchor'
+        ? `RESULT: ${LATE_ANCHOR_RESULT}  ${passed.join(', ')}${la.window ? `; unwitnessed window ${formatDuration(la.window.ms)}` : ''}`
       : r.verdict === 'partial'
         ? `RESULT: PARTIAL  ${passed.join(', ')}${skippedC.length ? `  (${skippedC.join(', ')} skipped by user)` : ''}`
         : r.verdict === 'not_verified'
           ? `RESULT: NOT VERIFIED  ${unchecked.join(', ')} not checked${passed.length ? `; passed: ${passed.join(', ')}` : ''}`
           : `RESULT: FAILED  ${failedC.join(', ') || 'pack structure'} (${r.failed} failed check(s))${unchecked.length ? `; not checked: ${unchecked.join(', ')}` : ''}`,
   );
+  if (r.verdict === 'verified_late_anchor') {
+    L.push(`  ${LATE_ANCHOR_RESULT}: every claim passed, with the freeze shown by the pending-freeze record; for ${la.window ? formatDuration(la.window.ms) : 'a window'} after the freeze only the auditor's key held the chain. Exit 0 and JSON ok: true, as for VERIFIED; a plain pass is verdict "verified" (RESULT: VERIFIED and two spaces). --strict-freeze refuses it.`);
+  }
   if (r.verdict === 'partial') {
     const why = r.profile === 'legacy' ? `checked under --profile legacy (the 0.10.0 rules)${notDeclared.length ? `; not checked: ${notDeclared.join(', ')}` : ''}` : `skipped by user: ${skippedC.join(', ')}`;
     L.push(`  PARTIAL: every check that ran passed, but the pack does not meet the audit profile (${why}). Exit 2.`);
