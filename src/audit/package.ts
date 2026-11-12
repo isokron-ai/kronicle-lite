@@ -33,6 +33,7 @@ import type { KronicleLite } from '../store.js';
 import { exportBundle } from './bundle.js';
 import { AuditError } from './log.js';
 import { checkTimestampReply, inspectTimestamp, MAX_TSR_BYTES, timestampRequest, verifyTimestamp } from './rfc3161.js';
+import { FREEZE_PENDING_DIR, FREEZE_PENDING_RECORD, isFreezePendingFile, parseFreezePending } from './freeze-pending.js';
 import { freezeNonce } from './profile.js';
 import { BUNDLE_FORMAT_V3, kindOfEventType } from './schemas.js';
 import { parseAllowedSigners } from './sshsig.js';
@@ -43,6 +44,7 @@ import {
   ALLOWED_SIGNERS_FILE,
   CLAIMS,
   CLAIMS_FORMAT,
+  formatDuration,
   LEGACY_CLAIMS,
   listPackFiles,
   PACK_NAME,
@@ -284,6 +286,12 @@ export async function buildAuditPackage(
     genesis?: string;
     /** The reproducers' public keys (allowed-signers text), written as allowed_signers. */
     allowed_signers?: string;
+    /**
+     * A freeze made with the anchor pending (A8): the folder holding its pending-freeze record
+     * (freeze-pending.json, SHA256SUMS, checkpoint.json, manifest.json, plan-detail.json and the
+     * SHA256SUMS.<tsa>.tsr tokens), copied into the pack as freeze-pending/ and listed in SHA256SUMS.
+     */
+    freeze_pending_dir?: string;
     /** Stamp SHA256SUMS with these TSAs (the audit profile needs two). Absent: no tokens over SHA256SUMS. */
     stamp_sums?: { tsas?: readonly { name: string; url: string }[]; fetch?: typeof fetch; timeoutMs?: number };
     fetch?: typeof fetch;
@@ -397,6 +405,16 @@ export async function buildAuditPackage(
     if (as.entries.length === 0) throw new AuditError('invalid_audit_event', `--allowed-signers lists no usable key${as.problems.length ? ` (${as.problems[0]})` : ''}`);
     writeNew(join(out, ALLOWED_SIGNERS_FILE), opts.allowed_signers.endsWith('\n') ? opts.allowed_signers : `${opts.allowed_signers}\n`);
   }
+  if (opts.freeze_pending_dir !== undefined) {
+    const src = opts.freeze_pending_dir;
+    const names = readdirSync(src).filter((f) => isFreezePendingFile(f)).sort();
+    if (!names.includes(FREEZE_PENDING_RECORD)) throw new AuditError('invalid_audit_event', `--freeze-pending ${src} holds no ${FREEZE_PENDING_RECORD}`);
+    const got = new Map(names.map((f) => [f, readBundleFile(join(src, f), 16 * 1024 * 1024, { followLinks: true })] as const));
+    const p = parseFreezePending(got, 'pack_dir');
+    if (typeof p === 'string') throw new AuditError('invalid_audit_event', `--freeze-pending ${src}: ${p}`);
+    mkdirSync(join(out, FREEZE_PENDING_DIR), { mode: 0o755 });
+    for (const [f, b] of got) writeNew(join(out, FREEZE_PENDING_DIR, f), b);
+  }
   const v3 = m.format === BUNDLE_FORMAT_V3;
   const profile: Profile = v3 ? 'audit' : 'legacy';
   const sumsTsas = opts.stamp_sums ? (opts.stamp_sums.tsas ?? DEFAULT_TSAS) : [];
@@ -480,6 +498,13 @@ export async function buildAuditPackage(
         ? ['Milestones', ...anchors.map((a) => `  ${a.file.replace(/\.receipt\.json$/, '').padEnd(26)} seq ${a.from_seq}..${a.to_seq}  ${a.timestamps.length ? a.timestamps.map((t) => `${t.tsa} ${t.gen_time}`).join(', ') : `anchor service ${a.received_at}`}`)]
         : ['Anchors               none (this pack has no anchor receipts)']),
       `Claims                ${claims.claims.join(', ')}`,
+      // A8: a freeze made with the anchor pending says so, with the window no third party saw.
+      ...(probe.late_anchor.status === 'accepted' && probe.late_anchor.window
+        ? [
+            `Freeze anchor         LATE: frozen with the anchor pending (stamped ${probe.late_anchor.freeze_stamped.map((t) => `${t.gen_time ?? '?'} ${t.tsa}`).join(', ')}), anchored later by ${probe.late_anchor.anchor?.file.replace(/\.receipt\.json$/, '') ?? '?'}`,
+            `  unwitnessed window  ${probe.late_anchor.window.from} → ${probe.late_anchor.window.to} (${formatDuration(probe.late_anchor.window.ms)}): ${probe.late_anchor.window.runs} run(s) recorded before any third party held the chain; verify-audit reports VERIFIED (FREEZE ANCHORED LATE)`,
+          ]
+        : []),
       '',
       `Verify:  npx -y kronicle-lite@${VERSION} verify-audit <this directory> --key-fingerprint <auditor key fingerprint from your statement of work>${genesisArg}${profile === 'legacy' ? ' --profile legacy' : ''}`,
       '         (this file does not carry the fingerprint: take it from the statement of work, never from the pack)',

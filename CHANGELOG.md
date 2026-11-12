@@ -6,6 +6,42 @@ uses semantic versioning once past 0.x.
 
 ## [Unreleased]
 
+### Added — verify-audit accepts a late-anchored freeze, and says so (A8)
+
+- **Late-anchor mode (default).** A pack whose freeze was made with the
+  anchor pending and anchored later (mcp-audit `freeze --anchor-pending`,
+  then `anchor`) failed the audit profile on two checks: `receipts` /
+  `milestone anchors` and `harness_frozen_before_runs`. 5 of the 7
+  Kubernetes series are such packs. `verify-audit` now reads the
+  pending-freeze record (`isokron/freeze-pending@1`) from the pack's
+  `freeze-pending/` folder, or from the `report_issued` archive's
+  `attachments/freeze-pending.*`, as mcp-audit's `close` writes it.
+  - The record is checked against the pack: it holds together (SHA256SUMS,
+    files, every token named, nonce re-derived); its RFC 3161 tokens verify
+    under two pinned TSA CAs; its auditor-signed checkpoint is the bundle's
+    own root over seq 1..F; the freeze event is inside it and names the
+    stamped manifest and plan detail; every run carries its nonce and
+    harness; and a timestamped anchor commits the freeze and every run.
+  - Only then, and only in exactly the form a late anchor gives them, are
+    the two checks replaced. The anchored-before-the-first-run case (runs
+    carry the pending nonce, not the anchor's) is handled the same way.
+  - The result is `RESULT: VERIFIED (FREEZE ANCHORED LATE)` (verdict
+    `verified_late_anchor`, exit 0, `ok: true`), with `ordering.basis:
+    pending_freeze`. The report prints the **unwitnessed window**: from the
+    freeze tokens to the first TSA time of the earliest anchor that commits
+    the freeze, with the seq range and the number of runs recorded in it.
+    `COMPLETION.txt` gets a `Freeze anchor  LATE` line with the window.
+  - A record that does not hold up is reported as rejected, and the pack
+    stays `FAILED`.
+- **`--strict-freeze`** (library: `late_anchor: 'strict'`) keeps the 0.11.2
+  behaviour: the record is not used and such a pack is `FAILED`.
+- **`audit package --freeze-pending DIR`** (library: `freeze_pending_dir`)
+  copies a pending-freeze record into the pack as `freeze-pending/`, listed
+  in `SHA256SUMS`; a record that does not hold together is refused.
+- Library: `findFreezePending`, `parseFreezePending`, `isFreezePendingFile`,
+  `FREEZE_PENDING_*`, `LATE_ANCHOR_REPLACEABLE`, `VERDICTS`,
+  `formatDuration`, the `LateAnchorReport` type.
+
 ### Added — releases by trusted publishing with provenance (B11)
 
 - **`.github/workflows/release.yml`.** A pushed `vX.Y.Z` tag runs the CI
@@ -26,6 +62,14 @@ uses semantic versioning once past 0.x.
 
 ### Changed
 
+- The `--json` format is `kronicle-lite-verify-audit/3`: the verdict
+  `verified_late_anchor`, the ordering basis `pending_freeze` and the
+  `late_anchor` object are new. `ok` is true for `verified` and
+  `verified_late_anchor`.
+- Docs: which versions read bundle format `/3`. 0.11.0 and later read it;
+  0.10.0–0.10.2 accept only `/1` and `/2` (checked against a `/3` pack:
+  "unknown format kronicle-lite-evidence-bundle/3"); 0.9.0 and earlier have
+  no `verify-audit`.
 - package.json `repository.url` names `github.com/isokron-ai/kronicle-lite`,
   where the repository now lives. npm refuses a provenance statement whose
   repository differs from package.json's.

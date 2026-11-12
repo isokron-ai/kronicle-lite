@@ -174,11 +174,12 @@ export async function runAuditCli(positional: string[], flags: Flags, dataDir: s
           ...(keysFile ? { anchor_keys: JSON.parse(readFileSync(keysFile, 'utf8')) as unknown } : {}),
           ...(genesis.genesis !== undefined ? { genesis: genesis.genesis } : {}),
           ...(signers ? { allowed_signers: readFileSync(signers, 'utf8') } : {}),
+          ...(str(flags['freeze-pending']) ? { freeze_pending_dir: str(flags['freeze-pending'])! } : {}),
           // The audit profile needs SHA256SUMS stamped by two TSAs (Sectigo and DigiCert unless --tsa).
           ...(flags['no-stamp-sums'] === true ? {} : { stamp_sums: sumsTsas ? { tsas: sumsTsas } : {} }),
         });
         process.stdout.write(flags['json'] === true ? JSON.stringify(r, null, 2) + '\n' : renderPackage(r));
-        return r.check.verdict === 'verified' ? 0 : r.check.verdict === 'partial' ? 2 : 1;
+        return r.check.verdict === 'verified' || r.check.verdict === 'verified_late_anchor' ? 0 : r.check.verdict === 'partial' ? 2 : 1;
       }
     }
     process.stderr.write(USAGE);
