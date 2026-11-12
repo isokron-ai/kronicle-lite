@@ -4,6 +4,32 @@ All notable changes to kronicle-lite. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses semantic versioning once past 0.x.
 
+## [Unreleased]
+
+### Added — releases by trusted publishing with provenance (B11)
+
+- **`.github/workflows/release.yml`.** A pushed `vX.Y.Z` tag runs the CI
+  gates on the tagged commit (lint, typecheck, tests, catalog check), then
+  publishes from the `npm-publish` environment with npm trusted publishing
+  (OIDC, no npm token anywhere) and `--provenance`. Only the publish job has
+  `id-token: write`; every action is pinned by commit sha. The job packs the
+  tarball first, prints its sha512 integrity, publishes that file, and checks
+  that the registry serves the same integrity with a provenance attestation.
+  A manual run is a dry run by default (build, test, pack; nothing published).
+- **`scripts/release-check.mjs`** (not shipped): the tag names package.json's
+  version, the CHANGELOG entry for it is dated, package.json names this
+  repository, npm is 11.5.1 or later, the packed tarball holds `dist/` and no
+  sources, and the registry serves what was packed.
+- **`docs/RELEASING.md`**: the one-time owner setup (the npm trusted
+  publisher, the `npm-publish` environment, a tag ruleset, then disallowing
+  tokens), the release steps and the post-release checks.
+
+### Changed
+
+- package.json `repository.url` names `github.com/isokron-ai/kronicle-lite`,
+  where the repository now lives. npm refuses a provenance statement whose
+  repository differs from package.json's.
+
 ## [0.11.2] — 2026-11-10
 
 ### Fixed — token-count labels are no longer refused as secrets

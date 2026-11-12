@@ -1,0 +1,125 @@
+# Release: publish kronicle-lite to npm with trusted publishing (OIDC) and provenance (B11).
+#
+# kronicle-lite is the verifier buyers run against an Evidence Pack, so the published tarball must be
+# traceable to this repository, this workflow and a tagged commit. npm trusted publishing gives that:
+# the registry accepts the publish only from the workflow configured on npmjs.com, no long-lived npm
+# token exists anywhere, and npm attaches a signed SLSA provenance statement to the version.
+#
+# Nothing here publishes until the owner has:
+#   1. added this workflow as the package's Trusted Publisher on npmjs.com
+#      (organization isokron-ai, repository kronicle-lite, workflow release.yml, environment npm-publish);
+#   2. created the `npm-publish` environment in the repository settings with a required reviewer.
+# See docs/RELEASING.md for the full steps and the post-release checks.
+#
+# Triggers:
+#   - push of a tag vX.Y.Z (the release itself; waits for the npm-publish environment's approval);
+#   - workflow_dispatch (a dry run by default: builds, tests and packs, prints the integrity, publishes nothing).
+name: release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run: build, test and pack only (no publish)'
+        type: boolean
+        default: true
+
+# Nothing by default; each job asks for what it needs.
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # The same gates as ci.yml, on the exact commit being released.
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Tag, package.json and CHANGELOG agree
+        if: github.event_name == 'push'
+        run: node scripts/release-check.mjs tag "$GITHUB_REF_NAME"
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run catalog:check
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    # The approval gate. Its name must match the environment set on the npm Trusted Publisher.
+    environment: npm-publish
+    permissions:
+      contents: read
+      # Trusted publishing: npm exchanges this job's OIDC token for a one-time publish credential,
+      # and the same token signs the provenance statement. No NPM_TOKEN / NODE_AUTH_TOKEN is used.
+      id-token: write
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          # Built and packed on the Node line the package is tested on.
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+      # Trusted publishing needs npm 11.5.1 or later; Node 22 ships npm 10.
+      - name: npm with trusted publishing support
+        run: |
+          npm install -g npm@11.6.2
+          node scripts/release-check.mjs npm "$(npm --version)"
+      - name: Tag, package.json and CHANGELOG agree
+        if: github.event_name == 'push'
+        run: node scripts/release-check.mjs tag "$GITHUB_REF_NAME"
+      - run: npm ci
+      - run: npm run build
+      - name: Pack and record the integrity
+        id: pack
+        run: |
+          npm pack --json > pack.json
+          node scripts/release-check.mjs pack pack.json >> "$GITHUB_OUTPUT"
+      - name: Dry run (nothing is published)
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        env:
+          PKG_FILE: ${{ steps.pack.outputs.file }}
+          PKG_VERSION: ${{ steps.pack.outputs.version }}
+          PKG_INTEGRITY: ${{ steps.pack.outputs.integrity }}
+        run: |
+          npm publish "$PKG_FILE" --dry-run --access public
+          {
+            echo "### kronicle-lite $PKG_VERSION: dry run, not published"
+            echo ""
+            echo "- tarball: \`$PKG_FILE\`"
+            echo "- integrity: \`$PKG_INTEGRITY\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish with provenance (trusted publishing)
+        if: github.event_name == 'push' || !inputs.dry_run
+        # No token: an NPM_TOKEN / NODE_AUTH_TOKEN here would bypass trusted publishing.
+        env:
+          PKG_FILE: ${{ steps.pack.outputs.file }}
+        run: npm publish "$PKG_FILE" --provenance --access public
+      - name: The registry serves what was packed, with provenance
+        if: github.event_name == 'push' || !inputs.dry_run
+        env:
+          PKG_VERSION: ${{ steps.pack.outputs.version }}
+          PKG_INTEGRITY: ${{ steps.pack.outputs.integrity }}
+        run: |
+          node scripts/release-check.mjs registry "$PKG_VERSION" "$PKG_INTEGRITY"
+          {
+            echo "### kronicle-lite $PKG_VERSION published with provenance"
+            echo ""
+            echo "- integrity (publish this on the verify page): \`$PKG_INTEGRITY\`"
+            echo "- check: \`npm view kronicle-lite@$PKG_VERSION dist.integrity dist.attestations\`"
+          } >> "$GITHUB_STEP_SUMMARY"
