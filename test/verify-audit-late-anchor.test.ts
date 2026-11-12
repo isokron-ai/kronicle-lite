@@ -11,13 +11,14 @@
  * unwitnessed window printed. --strict-freeze: FAILED on exactly those checks. The record is read from
  * the pack's freeze-pending/ (audit package --freeze-pending) or from the report archive, as
  * mcp-audit's close writes it. Every tamper of the record (rewritten chain, one TSA CA, a token added,
- * a run without the nonce) is FAILED.
+ * a run without the nonce, a call_measured before the freeze or inside the window without the nonce)
+ * is FAILED.
  *
  * No network: the anchor service is the in-test stub, the TSAs are throwaway CAs on 127.0.0.1.
  */
 
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
@@ -26,10 +27,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { pushCheckpoint } from '../src/anchor/anchor.js';
 import { checkpointSigningPayload } from '../src/chain/chain.js';
 import { freezePendingFromArchive, readUstar } from '../src/audit/freeze-pending.js';
-import { buildAuditPackage } from '../src/audit/package.js';
+import { buildAuditPackage, renderPackage, type PackageResult } from '../src/audit/package.js';
 import { findingsDigest, freezeNonce } from '../src/audit/profile.js';
 import type { AuditEventInput } from '../src/audit/schemas.js';
-import { verifyAudit, VerifyAuditJsonSchema, type VerifyAuditOptions, type VerifyAuditResult } from '../src/audit/verify-audit.js';
+import { LATE_ANCHOR_RESULT, renderVerifyAudit, verifyAudit, VerifyAuditJsonSchema, type VerifyAuditOptions, type VerifyAuditResult } from '../src/audit/verify-audit.js';
 import { chainIdFromPublicKeyPem } from '../src/crypto/keys.js';
 import { KronicleLite } from '../src/index.js';
 import { startAnchorStub, STUB_LICENSE, type AnchorBackend } from './helpers/anchor-stub.js';
@@ -79,7 +80,8 @@ function tar(entries: { name: string; data: Buffer }[]): Buffer {
   return Buffer.concat(parts);
 }
 
-type Variant = 'pack_dir' | 'report_archive' | 'anchored_before_runs' | 'rewritten_chain' | 'one_ca' | 'token_added' | 'run_without_nonce';
+/** cm_before_freeze, cm_in_window: a call_measured (a run kind with no nonce) before the freeze or inside the window. */
+type Variant = 'cm_before_freeze' | 'cm_in_window' | 'pack_dir' | 'report_archive' | 'anchored_before_runs' | 'rewritten_chain' | 'one_ca' | 'token_added' | 'run_without_nonce';
 
 interface Built {
   dataDir: string;
@@ -89,6 +91,7 @@ interface Built {
   rootsDir: string;
   pendingDir: string;
   nonce: string;
+  packaged: PackageResult;
 }
 
 async function build(variant: Variant): Promise<Built> {
@@ -97,6 +100,8 @@ async function build(variant: Variant): Promise<Built> {
   const tsDir = join(work, 'timestamps');
   mkdirSync(tsDir);
   const store = new KronicleLite({ dataDir });
+  const measured = (event_key: string, extra: Record<string, unknown> = {}) =>
+    rec([{ kind: 'call_measured', event_key, payload: { fingerprint: H, tool: 'probe', status: 'ok', is_error: false, latency_ms: 1, bytes_out: 1, ...extra } }], 'harness');
   const blob = (s: string | Buffer, t = 'text/plain') => store.audit.putBlob(typeof s === 'string' ? Buffer.from(s) : s, t);
   const rec = (events: AuditEventInput[], actor = 'auditor') => store.audit.record(AUDIT, events, actor);
   const anchor = async () => {
@@ -107,6 +112,7 @@ async function build(variant: Variant): Promise<Built> {
     for (const t of tokens) writeFileSync(join(tsDir, `${r.anchor_id}.${t.tsa}.tsr`), t.bytes);
   };
 
+  if (variant === 'cm_before_freeze') measured('cm-early', { measured_at: '2026-01-01T00:00:00Z' });
   // ── freeze with the anchor pending ──
   const plan = ['run-1', 'run-2', 'run-3'];
   const manifestBytes = Buffer.from(JSON.stringify({ format: 'mcp-audit/harness-manifest@2', harness: H }) + '\n');
@@ -138,6 +144,7 @@ async function build(variant: Variant): Promise<Built> {
   );
   if (variant === 'token_added') writeFileSync(join(pendingDir, 'SHA256SUMS.gamma.tsr'), tsas[1]!.stamp(sums));
 
+  if (variant === 'cm_in_window') measured('cm-window');
   // A normal freeze anchor before the runs: the record is then not needed.
   if (variant === 'anchored_before_runs') await anchor();
   // ── runs carrying the pending nonce, then the late anchor over the freeze and every run ──
@@ -163,7 +170,7 @@ async function build(variant: Variant): Promise<Built> {
   const genesis = `${chainIdFromPublicKeyPem(doc.keys[0]!.public_key_pem)}@${doc.keys[0]!.valid_from}`;
   const pkg = join(work, 'package');
   const inPackDir = variant !== 'report_archive';
-  await buildAuditPackage(store, {
+  const packaged = await buildAuditPackage(store, {
     audit_id: AUDIT,
     out: pkg,
     timestamps_dir: tsDir,
@@ -176,7 +183,7 @@ async function build(variant: Variant): Promise<Built> {
   });
   const fp = chainIdFromPublicKeyPem(store.identity.signer.public_key_pem);
   store.close();
-  return { dataDir, pkg, fp, genesis, rootsDir, pendingDir, nonce };
+  return { dataDir, pkg, fp, genesis, rootsDir, pendingDir, nonce, packaged };
 }
 
 const trust = (b: Built, extra: Partial<VerifyAuditOptions> = {}): VerifyAuditOptions => ({ seen_dir: tempDir('kl-late-seen-'), key_fingerprint: b.fp, genesis: b.genesis, tsa_roots: tsas.map((t, k) => ({ name: `tsa-${k}`, pem: t.root.pem })), ...extra });
@@ -184,6 +191,41 @@ function cli(b: Built, extra: string[] = []) {
   const r = spawnSync(process.execPath, [CLI, 'verify-audit', b.pkg, '--key-fingerprint', b.fp, '--genesis', b.genesis, '--tsa-roots', b.rootsDir, ...extra], { encoding: 'utf8', env: cleanEnv({ KRONICLE_LITE_DATA_DIR: tempDir('kl-late-cli-') }) });
   return { code: r.status, out: r.stdout, err: r.stderr };
 }
+/** openssl 3+, jq and xxd: VERIFY.md's raw route can run here. */
+const rawTools = (() => {
+  if (process.platform === 'win32') return false;
+  const o = spawnSync('openssl', ['version'], { encoding: 'utf8' });
+  return o.status === 0 && /^OpenSSL [3-9]\./.test(o.stdout) && spawnSync('jq', ['--version']).status === 0 && spawnSync('xxd', ['-v']).status === 0 && spawnSync('shasum', ['--version']).status === 0;
+})();
+
+/**
+ * VERIFY.md of a pack whose runs carry the pending-freeze nonce: it derives that nonce from the
+ * record's SHA256SUMS and tokens, never from an anchor receipt, and its raw commands (run on a copy
+ * of the pack) print the same nonce the runs carry.
+ */
+function expectPendingVerifyMd(b: Built): void {
+  const md = readFileSync(join(b.pkg, 'VERIFY.md'), 'utf8');
+  expect(md).toMatch(/^### \d+\. The freeze nonce every run carries \(freeze made with the anchor pending\)$/m);
+  expect(md).not.toContain('The freeze nonce every run carries\n');
+  expect(md).not.toMatch(/D=\$\(shasum -a 256 anchors\/[^)]*harness-frozen/);
+  expect(md).toContain(`\`${LATE_ANCHOR_RESULT}\` (exit 0), never the plain \`VERIFIED\``);
+  if (!rawTools) return;
+  const sec = md.slice(md.indexOf('(freeze made with the anchor pending)'));
+  const block = /```sh\n([\s\S]*?)```/.exec(sec)![1]!;
+  const d = tempDir('kl-late-raw-');
+  cpSync(b.pkg, d, { recursive: true });
+  const r = spawnSync('bash', ['-euo', 'pipefail', '-c', block], { cwd: d, encoding: 'utf8' });
+  const all = r.stdout + r.stderr;
+  expect(r.status, all).toBe(0);
+  expect(all).not.toMatch(/FAILED|Failure/);
+  for (const f of ['checkpoint.json', 'manifest.json', 'plan-detail.json']) expect(r.stdout).toContain(`${f}: OK`);
+  expect(r.stdout.match(/^Verification: OK$/gm)).toHaveLength(2);
+  expect(r.stdout).toContain('Signature Verified Successfully');
+  const lines = r.stdout.trim().split('\n');
+  expect(lines).toContain(`${b.nonce}  -`); // the nonce derived by hand
+  expect(lines[lines.length - 1]).toBe(b.nonce); // the one nonce every run carries
+}
+
 const failedChecks = (r: VerifyAuditResult) => r.checks.filter((c) => c.status === 'fail').map((c) => `${c.claim ?? '-'} | ${c.subject ? `${c.subject} ` : ''}${c.check}: ${c.evidence}`);
 
 /**
@@ -217,11 +259,11 @@ describe('verify-audit: a freeze made with the anchor pending and anchored later
     r = verifyAudit(b.pkg, trust(b));
   });
 
-  it('is VERIFIED (FREEZE ANCHORED LATE), exit 0, with the unwitnessed window printed', () => {
+  it('is VERIFIED WITH UNWITNESSED WINDOW (FREEZE ANCHORED LATE), exit 0, with the unwitnessed window printed', () => {
     const c = cli(b);
     expect(c.err).toBe('');
     expect(c.code, c.out).toBe(0);
-    expect(c.out).toMatch(/^RESULT: VERIFIED \(FREEZE ANCHORED LATE\) {2}integrity, chain, receipts, independent_timestamps, harness_frozen_before_runs, run_sequence, plan_complete, reproductions_signed, closed; unwitnessed window 20h0\dm$/m);
+    expect(c.out).toMatch(/^RESULT: VERIFIED WITH UNWITNESSED WINDOW \(FREEZE ANCHORED LATE\) {2}integrity, chain, receipts, independent_timestamps, harness_frozen_before_runs, run_sequence, plan_complete, reproductions_signed, closed; unwitnessed window 20h0\dm$/m);
     expect(c.out).toMatch(/^Late anchor \(freeze made with the anchor pending\)$/m);
     expect(c.out).toMatch(/UNWITNESSED WINDOW {2}\S+ → \S+ \(20h0\dm\): seq 2\.\.4 \(3 event\(s\), 3 run\(s\)\) were held only by the auditor's key until the late anchor\./);
     expect(c.out).toMatch(/replaced {9}receipts \/ milestone anchors: "missing an anchor after the freeze \(seq 1\) that commits no run/);
@@ -254,6 +296,28 @@ describe('verify-audit: a freeze made with the anchor pending and anchored later
     expect(failedChecks(s)).toEqual([expect.stringMatching(/^receipts \| milestone anchors: missing an anchor after the freeze \(seq 1\) that commits no run/), expect.stringMatching(/^harness_frozen_before_runs \| harness frozen before runs: the freeze event \(seq 1\) is first committed by /)]);
   });
 
+  it('the RESULT line is never the plain VERIFIED: a script keyed on the verdict cannot take it for a pass', () => {
+    const out = cli(b).out;
+    const result = out.split('\n').find((l) => l.startsWith('RESULT: '))!;
+    expect(result.startsWith(`RESULT: ${LATE_ANCHOR_RESULT}  `)).toBe(true);
+    expect(result).not.toMatch(/^RESULT: VERIFIED {2}/);
+    expect(result).not.toMatch(/^RESULT: VERIFIED$/);
+    expect(renderVerifyAudit(r)).toContain(result);
+    expect(out).toMatch(/^ {2}VERIFIED WITH UNWITNESSED WINDOW \(FREEZE ANCHORED LATE\): every claim passed, .* for 20h0\dm after the freeze only the auditor's key held the chain\. Exit 0 and JSON ok: true, as for VERIFIED; a plain pass is verdict "verified"/m);
+  });
+
+  it('audit package prints the late verdict and the window, not FAIL (renderPackage)', () => {
+    expect(b.packaged.check.verdict).toBe('verified_late_anchor');
+    const t = renderPackage(b.packaged);
+    expect(t).toMatch(/^verify-audit {3}VERIFIED WITH UNWITNESSED WINDOW \(FREEZE ANCHORED LATE\) \(audit profile\) {2}integrity, chain, receipts, independent_timestamps, harness_frozen_before_runs, run_sequence, plan_complete, reproductions_signed, closed$/m);
+    expect(t).toMatch(/^ {2}unwitnessed window {2}\S+ → \S+ \(20h0\dm\): seq 2\.\.4 \(3 event\(s\), 3 run\(s\)\) held only by the auditor's key until 01-/m);
+    expect(t).not.toMatch(/FAIL/);
+  });
+
+  it("VERIFY.md derives the pending-freeze nonce from the record's tokens, and its raw commands give the runs' nonce", () => {
+    expectPendingVerifyMd(b);
+  });
+
   it('COMPLETION.txt says the freeze was anchored late, with the window', () => {
     const t = readFileSync(join(b.pkg, 'COMPLETION.txt'), 'utf8');
     expect(t).toMatch(/^Freeze anchor {9}LATE: frozen with the anchor pending \(stamped .* alpha, .* beta\), anchored later by 01-/m);
@@ -269,7 +333,10 @@ describe('the record in mcp-audit\'s report archive (attachments/freeze-pending.
     expect(r.verdict).toBe('verified_late_anchor');
     expect(r.late_anchor).toMatchObject({ status: 'accepted', source: 'report_archive' });
     expect(cli(b).code).toBe(0);
-  });
+    // VERIFY.md copies the record out of the archive before deriving the nonce.
+    expect(readFileSync(join(b.pkg, 'VERIFY.md'), 'utf8')).toMatch(/^mkdir -p freeze-pending-record\.x freeze-pending-record && tar -xf bundle\/blobs\/[0-9a-f]{64} -C freeze-pending-record\.x$/m);
+    expectPendingVerifyMd(b);
+  }, 60_000);
 
   it('readUstar and freezePendingFromArchive read only attachments/freeze-pending.* and refuse a non-ustar blob', () => {
     expect(readUstar(Buffer.from('# plain report'))).toBeNull();
@@ -291,6 +358,31 @@ describe('frozen with the anchor pending, anchored before the first run', () => 
     expect(r.late_anchor).toMatchObject({ status: 'accepted', anchor: { from_seq: 1, to_seq: 1 }, window: { seqs: null, events: 0, runs: 0 } });
     expect(r.ordering).toMatchObject({ status: 'pass', basis: 'pending_freeze', nonce: b.nonce });
   });
+});
+
+describe('a call_measured without the nonce is FAILED (every run kind the ordering check counts)', () => {
+  // Before the fix only run_completed was held to the nonce, so these packs were VERIFIED (FREEZE ANCHORED LATE).
+  const cases: [Variant, RegExp][] = [
+    ['cm_before_freeze', /^harness_frozen_before_runs \| pending freeze runs carry the nonce: run seq 1 \(call_measured\) is inside the stamped checkpoint \(seq 1\.\.2\), recorded before the freeze stamp; run seq 1 do not carry the pending-freeze nonce and harness \(call_measured\)$/],
+    ['cm_in_window', /^harness_frozen_before_runs \| pending freeze runs carry the nonce: run seq 2 do not carry the pending-freeze nonce and harness \(call_measured\)$/],
+  ];
+  for (const [variant, why] of cases) {
+    it(`${variant}: FAILED, the record rejected, the freeze-anchor checks stand (exit 1)`, async () => {
+      const b = await build(variant);
+      const r = verifyAudit(b.pkg, trust(b));
+      expect(r.verdict, failedChecks(r).join('\n')).toBe('failed');
+      expect(r.ok).toBe(false);
+      expect(r.late_anchor.status).toBe('rejected');
+      expect(r.late_anchor.replaced).toEqual([]);
+      expect(failedChecks(r)).toContainEqual(expect.stringMatching(why));
+      expect(failedChecks(r).some((x) => x.startsWith('harness_frozen_before_runs | harness frozen before runs: '))).toBe(true);
+      expect(verifyAudit(b.pkg, trust(b, { late_anchor: 'strict' })).verdict).toBe('failed');
+      const c = cli(b);
+      expect(c.code, c.out).toBe(1);
+      expect(c.out).toMatch(/^RESULT: FAILED /m);
+      expect(c.out).not.toContain(LATE_ANCHOR_RESULT);
+    }, 60_000);
+  }
 });
 
 describe('tampered pending-freeze records are FAILED', () => {

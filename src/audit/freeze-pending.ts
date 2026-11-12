@@ -80,6 +80,8 @@ export interface FreezePending {
   tokens: { tsa: string; file: string; bytes: Buffer }[];
   /** freezeNonce(sha256(SHA256SUMS), tokens), re-derived. */
   nonce: string;
+  /** source report_archive: the sha256 of the report_issued blob that holds the record. */
+  archive_sha256?: string;
 }
 
 /** Is this a name the record may hold? */
@@ -223,7 +225,7 @@ export function findFreezePending(packDir: string, reportBlobs: string[], allowH
     const files = freezePendingFromArchive(bytes);
     if (!files) continue;
     const p = parseFreezePending(files, 'report_archive');
-    return typeof p === 'string' ? { problem: p, source: 'report_archive' } : p;
+    return typeof p === 'string' ? { problem: p, source: 'report_archive' } : { ...p, archive_sha256: sha };
   }
   return null;
 }

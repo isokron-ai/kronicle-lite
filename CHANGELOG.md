@@ -25,12 +25,25 @@ uses semantic versioning once past 0.x.
   - Only then, and only in exactly the form a late anchor gives them, are
     the two checks replaced. The anchored-before-the-first-run case (runs
     carry the pending nonce, not the anchor's) is handled the same way.
-  - The result is `RESULT: VERIFIED (FREEZE ANCHORED LATE)` (verdict
-    `verified_late_anchor`, exit 0, `ok: true`), with `ordering.basis:
-    pending_freeze`. The report prints the **unwitnessed window**: from the
+  - Every run kind the ordering check counts (`run_completed` and
+    `call_measured`) must come after the stamped checkpoint and carry the
+    record's nonce and harness; a `call_measured` before the freeze or inside
+    the window without the nonce rejects the record (the pack is `FAILED`).
+  - The result is `RESULT: VERIFIED WITH UNWITNESSED WINDOW (FREEZE ANCHORED
+    LATE)` (verdict `verified_late_anchor`, exit 0, `ok: true`), with
+    `ordering.basis: pending_freeze`. It never reads `RESULT: VERIFIED` and two
+    spaces, the plain pass; the line after it says so. The report prints the **unwitnessed window**: from the
     freeze tokens to the first TSA time of the earliest anchor that commits
     the freeze, with the seq range and the number of runs recorded in it.
-    `COMPLETION.txt` gets a `Freeze anchor  LATE` line with the window.
+    `COMPLETION.txt` gets a `Freeze anchor  LATE` line with the window, and
+    the `audit package` summary prints the late verdict and the window.
+  - `VERIFY.md`'s raw route, for a pack whose runs carry a pending-freeze
+    nonce, derives that nonce from the record (`sha256` of its `SHA256SUMS`,
+    then its tokens in TSA-name order), checks the record's files, tokens and
+    checkpoint signature, and copies the record out of the report archive
+    first when it is there; it no longer derives a nonce from the late
+    anchor's receipt, which the runs do not carry. Its run-nonce `jq` command
+    includes `call_measured`.
   - A record that does not hold up is reported as rejected, and the pack
     stays `FAILED`.
 - **`--strict-freeze`** (library: `late_anchor: 'strict'`) keeps the 0.11.2
@@ -62,10 +75,14 @@ uses semantic versioning once past 0.x.
 
 ### Changed
 
-- The `--json` format is `kronicle-lite-verify-audit/3`: the verdict
-  `verified_late_anchor`, the ordering basis `pending_freeze` and the
-  `late_anchor` object are new. `ok` is true for `verified` and
-  `verified_late_anchor`.
+- The `--json` format is `kronicle-lite-verify-audit/3` (was `/2`): the
+  verdict `verified_late_anchor`, the ordering basis `pending_freeze` and the
+  `late_anchor` object are new. **`ok` is now true for `verified` and
+  `verified_late_anchor`** (in `/2` it was true only for `verified`), and both
+  exit 0. A consumer that must accept only a plain pass checks
+  `.verdict == "verified"`, not `ok` or the exit code; on the text output it
+  matches `RESULT: VERIFIED` followed by two spaces, never the prefix alone.
+  `--strict-freeze` restores the `/2` outcome (such a pack is `FAILED`).
 - Docs: which versions read bundle format `/3`. 0.11.0 and later read it;
   0.10.0–0.10.2 accept only `/1` and `/2` (checked against a `/3` pack:
   "unknown format kronicle-lite-evidence-bundle/3"); 0.9.0 and earlier have

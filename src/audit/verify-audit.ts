@@ -110,6 +110,12 @@ export const AUDIT_PROFILE_CLAIMS: readonly Claim[] = CLAIMS;
  * the pack needs was not checked. failed: a check failed.
  */
 export type Verdict = 'verified' | 'verified_late_anchor' | 'partial' | 'not_verified' | 'failed';
+/**
+ * The RESULT line's verdict for verified_late_anchor. A plain pass is exactly `RESULT: VERIFIED` and
+ * two spaces; this one never is, so a script that keys on the verdict cannot take it for one. Scripts
+ * should read `--json` `.verdict`: `ok` (and exit 0) is true for both.
+ */
+export const LATE_ANCHOR_RESULT = 'VERIFIED WITH UNWITNESSED WINDOW (FREEZE ANCHORED LATE)';
 export const VERDICTS = ['verified', 'verified_late_anchor', 'partial', 'not_verified', 'failed'] as const;
 
 /**
@@ -1340,12 +1346,21 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
       if (ref('plan_detail') !== sha256Hex(p.files.get('plan-detail.json')!)) fwhy.push('its plan detail is not the stamped plan-detail.json');
     }
     check('freeze event', fwhy.length === 0, fwhy.length ? fwhy.join('; ') : `harness_frozen seq ${freeze!.seq} inside the checkpoint, harness ${short(p.record.fingerprint)}, manifest and plan detail as stamped`);
-    // Every run carries the record's nonce and the frozen harness.
-    const runs = full.filter((e) => e.kind === 'run_completed');
+    // Every run (each kind the ordering check counts: run_completed and call_measured) comes after the
+    // stamped checkpoint and carries the record's nonce and the frozen harness.
+    const runs = full.filter((e) => e.kind !== null && RUN_KINDS.has(e.kind));
+    const early = runs.filter((r) => r.seq <= F);
     const off = runs.filter((r) => r.payload?.['nonce'] !== p.nonce || r.payload?.['fingerprint'] !== p.record.fingerprint);
-    check('runs carry the nonce', off.length === 0, off.length ? `run seq ${off.map((r) => r.seq).slice(0, 10).join(', ')} do not carry the pending-freeze nonce and harness` : `${runs.length}/${runs.length} run(s) carry nonce ${short(p.nonce)} (unknown before the freeze tokens) and harness ${short(p.record.fingerprint)}`);
+    const seqList = (xs: BundleEvent[]) => `${xs.map((r) => `${r.seq} (${r.kind})`).slice(0, 10).join(', ')}${xs.length > 10 ? ` (+${xs.length - 10})` : ''}`;
+    const runWhy = [
+      ...(early.length ? [`run seq ${seqList(early)} ${early.length > 1 ? 'are' : 'is'} inside the stamped checkpoint (seq 1..${F}), recorded before the freeze stamp`] : []),
+      ...(off.length ? [`run seq ${off.map((r) => r.seq).slice(0, 10).join(', ')} do not carry the pending-freeze nonce and harness (${off.map((r) => r.kind).filter((k, i, a) => a.indexOf(k) === i).join(', ')})`] : []),
+    ];
+    const badRuns = new Set([...early, ...off]);
+    check('runs carry the nonce', runWhy.length === 0, runWhy.length ? runWhy.join('; ') : `${runs.length}/${runs.length} run(s) after seq ${F} carry nonce ${short(p.nonce)} (unknown before the freeze tokens) and harness ${short(p.record.fingerprint)}`);
     // One verified, timestamped anchor commits the freeze and every run.
-    const ends = full.filter((e) => e.kind === 'run_completed' || e.kind === 'run_abandoned');
+    const isRunEnd = (e: BundleEvent) => e.kind !== null && (RUN_KINDS.has(e.kind) || e.kind === 'run_abandoned');
+    const ends = full.filter(isRunEnd);
     const lastEnd = ends.length ? ends[ends.length - 1]!.seq : 0;
     const late = freeze ? validAnchors.find((v) => v.clock === 'tsa' && v.from <= freeze.seq && v.to >= Math.max(freeze.seq, lastEnd)) : undefined;
     check('late anchor', late !== undefined, late ? `${late.base} (received ${late.svc}, stamped ${[...late.tsa.values()].join(', ')}) commits seq ${late.from}..${late.to}: the freeze and every run` : 'no verified anchor stamped under two TSA CAs commits the freeze and every run');
@@ -1367,7 +1382,7 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
       ms: Math.max(0, Date.parse(witness.first) - Date.parse(fromT)),
       seqs: inWindow.length ? { from: inWindow[0]!.seq, to: inWindow[inWindow.length - 1]!.seq } : null,
       events: inWindow.length,
-      runs: inWindow.filter((e) => e.kind === 'run_completed' || e.kind === 'run_abandoned').length,
+      runs: inWindow.filter(isRunEnd).length,
     };
     if (hits.length === 0) {
       la.status = 'not_needed';
@@ -1385,7 +1400,7 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
       o.nonce = p.nonce;
       o.problem = null;
       o.freeze = { seq: freeze!.seq, event_key: sOrNull(freeze!.payload?.['event_key']), anchor: witness.base, time: isoMax(la.freeze_stamped.map((x) => x.gen_time).filter((x): x is string => x !== null)), clock: 'tsa' };
-      if (o.runs) o.runs.nonce_bound = runs.length - off.length;
+      if (o.runs) o.runs.nonce_bound = runs.length - badRuns.size;
     }
     la.status = 'accepted';
   }
@@ -2108,13 +2123,16 @@ export function renderVerifyAudit(r: VerifyAuditResult): string {
     r.verdict === 'verified'
       ? `RESULT: VERIFIED  ${passed.join(', ')}`
       : r.verdict === 'verified_late_anchor'
-        ? `RESULT: VERIFIED (FREEZE ANCHORED LATE)  ${passed.join(', ')}${la.window ? `; unwitnessed window ${formatDuration(la.window.ms)}` : ''}`
+        ? `RESULT: ${LATE_ANCHOR_RESULT}  ${passed.join(', ')}${la.window ? `; unwitnessed window ${formatDuration(la.window.ms)}` : ''}`
       : r.verdict === 'partial'
         ? `RESULT: PARTIAL  ${passed.join(', ')}${skippedC.length ? `  (${skippedC.join(', ')} skipped by user)` : ''}`
         : r.verdict === 'not_verified'
           ? `RESULT: NOT VERIFIED  ${unchecked.join(', ')} not checked${passed.length ? `; passed: ${passed.join(', ')}` : ''}`
           : `RESULT: FAILED  ${failedC.join(', ') || 'pack structure'} (${r.failed} failed check(s))${unchecked.length ? `; not checked: ${unchecked.join(', ')}` : ''}`,
   );
+  if (r.verdict === 'verified_late_anchor') {
+    L.push(`  ${LATE_ANCHOR_RESULT}: every claim passed, with the freeze shown by the pending-freeze record; for ${la.window ? formatDuration(la.window.ms) : 'a window'} after the freeze only the auditor's key held the chain. Exit 0 and JSON ok: true, as for VERIFIED; a plain pass is verdict "verified" (RESULT: VERIFIED and two spaces). --strict-freeze refuses it.`);
+  }
   if (r.verdict === 'partial') {
     const why = r.profile === 'legacy' ? `checked under --profile legacy (the 0.10.0 rules)${notDeclared.length ? `; not checked: ${notDeclared.join(', ')}` : ''}` : `skipped by user: ${skippedC.join(', ')}`;
     L.push(`  PARTIAL: every check that ran passed, but the pack does not meet the audit profile (${why}). Exit 2.`);

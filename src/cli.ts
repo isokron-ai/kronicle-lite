@@ -290,8 +290,9 @@ Usage:
                                                                  and independent time; the audit's depth is described in its
                                                                  report. A freeze made with the anchor pending and anchored
                                                                  later (a pending-freeze record in the pack) is shown by that
-                                                                 record instead of a freeze anchor: VERIFIED (FREEZE ANCHORED
-                                                                 LATE), with the unwitnessed window printed; --strict-freeze
+                                                                 record instead of a freeze anchor: VERIFIED WITH UNWITNESSED
+                                                                 WINDOW (FREEZE ANCHORED LATE), with the window printed (JSON
+                                                                 verdict verified_late_anchor, ok true); --strict-freeze
                                                                  refuses it (FAILED). Exit 0 VERIFIED (either kind), 1 a check
                                                                  failed or a claim was not checked, 2 PARTIAL, usage or an
                                                                  unreadable pack

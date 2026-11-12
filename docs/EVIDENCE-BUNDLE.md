@@ -262,7 +262,7 @@ stamp carries a later time.
 | Result | Exit | Meaning |
 |---|---|---|
 | `VERIFIED` | 0 | the audit profile, every claim checked and passed |
-| `VERIFIED (FREEZE ANCHORED LATE)` | 0 | the same, for a freeze made with the anchor pending and anchored later: the freeze order is shown by the pack's pending-freeze record instead of a freeze anchor, and the unwitnessed window is printed (see "Late anchor" below); `--strict-freeze` makes it `FAILED` |
+| `VERIFIED WITH UNWITNESSED WINDOW (FREEZE ANCHORED LATE)` | 0 | the same, for a freeze made with the anchor pending and anchored later: the freeze order is shown by the pack's pending-freeze record instead of a freeze anchor, and the unwitnessed window is printed (see "Late anchor" below); `--strict-freeze` makes it `FAILED` |
 | `PARTIAL` | 2 | every check that ran passed, but the pack does not meet the audit profile: checked under `--profile legacy` (the line after the result names the claims that were not checked), or a claim skipped with `--skip-claim` |
 | `NOT VERIFIED` | 1 | a claim was not checked (for example the timestamp claims under `--no-tsa`) |
 | `FAILED` | 1 | a check failed |
@@ -270,7 +270,10 @@ stamp carries a later time.
 Exit 2 is also a usage error or an unreadable pack (an `error:` line on
 stderr, no `RESULT`). The `--json` output (`kronicle-lite-verify-audit/3`)
 carries `profile`, `verdict` and `late_anchor`; `ok` is true for `verified`
-and `verified_late_anchor`.
+and `verified_late_anchor`, and both exit 0. A script that must tell a plain
+pass from a late-anchored one reads `.verdict` (`verified` is the plain pass)
+or matches `RESULT: VERIFIED` followed by two spaces, never the prefix
+`RESULT: VERIFIED` alone.
 
 ### Late anchor: a freeze made with the anchor pending
 
@@ -315,18 +318,23 @@ only when every check of the record passes (group `Ordering`, subject
    after the stamps).
 4. **freeze event**: `harness_frozen` is inside 1..F, names the record's
    harness fingerprint and the stamped manifest and plan detail.
-5. **runs carry the nonce**: every `run_completed` carries the record's nonce
-   (unknown before the tokens) and the frozen harness.
+5. **runs carry the nonce**: every run (`run_completed` and `call_measured`,
+   the kinds the ordering check counts) comes after the stamped checkpoint
+   and carries the record's nonce (unknown before the tokens) and the frozen
+   harness.
 6. **late anchor**: a verified anchor stamped under two TSA CAs commits the
    freeze and every run.
 
-The result is `VERIFIED (FREEZE ANCHORED LATE)` (`verdict:
-verified_late_anchor`, exit 0), `ordering.basis` is `pending_freeze`, and the
+The result is `VERIFIED WITH UNWITNESSED WINDOW (FREEZE ANCHORED LATE)` (`verdict:
+verified_late_anchor`, exit 0, `ok: true`), `ordering.basis` is `pending_freeze`, and the
 report prints the **unwitnessed window**: from the freeze tokens to the first
 TSA time of the earliest anchor that commits the freeze. The events recorded
 in it were held only by the auditor's key. Their order after the freeze is
 shown by the nonce they carry; that none was rewritten or replayed inside the
-window rests on the auditor alone. `COMPLETION.txt` says so too.
+window rests on the auditor alone. `COMPLETION.txt` and the `audit package`
+summary say so too. `VERIFY.md`'s raw route derives the nonce from the
+record (`sha256` of its `SHA256SUMS`, then its tokens in TSA-name order),
+copying the record out of the report archive first when it is there.
 
 `--strict-freeze` (library: `late_anchor: 'strict'`) does not use the record:
 such a pack then fails the two checks, as 0.11.2 and earlier report it. A
