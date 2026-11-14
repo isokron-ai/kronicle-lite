@@ -3,3 +3,5 @@
 * text=auto eol=lf
 *.png binary
 *.tsr binary
+# The published sample Evidence Pack: hashed and signed byte for byte, never normalized.
+packages/verify/test/fixtures/** -text

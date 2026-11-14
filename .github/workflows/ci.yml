@@ -48,6 +48,57 @@ jobs:
         env:
           KL_REQUIRE_RAW_TOOLS: '1'
 
+  # The standalone verifier (packages/verify): verify.mjs against kronicle-lite verify-audit on every
+  # pack format and the published sample pack (differential), the shims against the packages they
+  # replace, the package contents and a byte-identical rebuild. Node 22 is its minimum.
+  verify-package:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run verify:test
+      - name: The single file rebuilds byte for byte (from another directory too)
+        run: |
+          cp packages/verify/dist/verify.mjs "$RUNNER_TEMP/verify.first.mjs"
+          (cd packages/verify && node build.mjs --out "$RUNNER_TEMP/verify.second.mjs")
+          cmp "$RUNNER_TEMP/verify.first.mjs" "$RUNNER_TEMP/verify.second.mjs"
+          sha256sum "$RUNNER_TEMP/verify.first.mjs"
+
+  # verify.mjs on Windows and macOS: the published sample pack, as a buyer runs it.
+  verify-package-smoke:
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run verify:build
+      - name: The sample pack is PARTIAL under --profile legacy (exit 2), and one flipped byte fails it (exit 1)
+        shell: bash
+        run: |
+          P=packages/verify/test/fixtures/isokron-sample-evidence-pack
+          FP=d70b311bf6e25c0c20ec3b4645f806f28b8712e212142720eeb51d2c6fa5072b
+          set +e
+          node packages/verify/dist/verify.mjs "$P" --key-fingerprint "$FP" --profile legacy --tsa-at-gentime --data-dir "$RUNNER_TEMP/kl-a"
+          [ $? -eq 2 ] || exit 1
+          cp -R "$P" "$RUNNER_TEMP/tampered"
+          printf 'x' >> "$RUNNER_TEMP/tampered/claims.json"
+          node packages/verify/dist/verify.mjs "$RUNNER_TEMP/tampered" --key-fingerprint "$FP" --profile legacy --tsa-at-gentime --data-dir "$RUNNER_TEMP/kl-b"
+          [ $? -eq 1 ] || exit 1
+
   # macOS: no GNU `timeout` (the shim falls back to perl alarm, exit 142),
   # /var -> /private/var symlinks, bash 3.2 as /bin/sh's sibling.
   macos:

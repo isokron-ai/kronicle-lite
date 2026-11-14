@@ -37,6 +37,7 @@ import { checkTimestampReply, inspectTimestamp, MAX_TSR_BYTES, timestampRequest,
 import { findFreezePending, FREEZE_PENDING_DIR, FREEZE_PENDING_RECORD, isFreezePendingFile, parseFreezePending, REPORT_ARCHIVE_PREFIX } from './freeze-pending.js';
 import { freezeNonce } from './profile.js';
 import { BUNDLE_FORMAT_V3, kindOfEventType } from './schemas.js';
+import { pemFileNames, pemsFromText } from './pem-files.js';
 import { parseAllowedSigners } from './sshsig.js';
 import { SHIPPED_TSA_ROOTS } from './tsa-roots.js';
 import { VERSION } from '../version.js';
@@ -99,15 +100,9 @@ export function parseTsaList(spec: string): { name: string; url: string }[] {
     });
 }
 
-/** PEM certificates from every *.pem / *.crt file in DIR (several per file allowed); each file is one TSA. */
-/** The certificate files of a TSA roots directory (*.pem, *.crt), sorted. */
-export const pemFileNames = (dir: string): string[] => readdirSync(dir).filter((f) => /\.(pem|crt)$/i.test(f)).sort();
+export { pemFileNames, pemsFromText } from './pem-files.js';
 
-/** The PEM certificates in one file's text, named after the file (one TSA per file). */
-export function pemsFromText(file: string, text: string): { name: string; pem: string }[] {
-  const name = file.replace(/\.(pem|crt)$/i, '');
-  return [...text.matchAll(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g)].map((m) => ({ name, pem: m[0] + '\n' }));
-}
+/** PEM certificates from every *.pem / *.crt file in DIR (several per file allowed); each file is one TSA. */
 
 export function readPemDir(dir: string): { name: string; pem: string }[] {
   const out: { name: string; pem: string }[] = [];

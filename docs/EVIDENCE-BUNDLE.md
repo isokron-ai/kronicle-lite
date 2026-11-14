@@ -491,6 +491,23 @@ no timestamp; `measured_at` and payload values are recorded by the auditor.
   `key list  first seen for this genesis; recorded in <path>` (not a PASS).
   Library callers pass `seen_dir`, or `rollback: 'off'` to skip the check
   explicitly (reported).
+- **An older pack after a key rotation (0.11.3):** a pack carries the list
+  current when it was made, so after a planned rotation an honest older pack
+  lacks the new key. When the kept list is a lawful later state of the pack's
+  list (`keyListRegression(pack, kept)` holds: the same keys, changed only by
+  the allowed status progression, plus later keys), the rollback check passes
+  and the receipts are checked against the **kept** list, the stronger of the
+  two: a key retired since then needs a verified TSA time inside its window,
+  one revoked since then a TSA time before `compromised_since` − 5 min. The
+  kept list is not replaced. The report says
+  `key list  an earlier state of the list seen <date> (<path>); receipts
+  checked against that newer list`, and `--json` has
+  `trust.rollback.list_used: "seen"` (`"given"` otherwise). Each receipt must
+  still be signed by a key the pack's own list names. A list that changes a
+  kept key or forks the chain is still a rollback. One consequence: such a
+  pack fails under `--no-tsa` on a machine that has seen the newer list (its
+  key is retired there, and a retired key needs a verified TSA time), and
+  passes under `--no-tsa` on one that has not.
 - **Receipt times:** the service's `received_at` must be no later than each
   TSA genTime + 5 min and no more than 24 h before it, and a token issued more
   than 5 min after the signing key's `valid_to` invalidates the receipt (the

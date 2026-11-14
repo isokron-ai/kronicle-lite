@@ -1,0 +1,12 @@
+@isokron/verify — Copyright 2026 Stormhaven Enterprises LLC (IsoKron)
+
+Licensed under the Apache License, Version 2.0 (the "License"); see LICENSE.
+
+dist/verify.mjs is built from the kronicle-lite source in
+https://github.com/isokron-ai/kronicle-lite (Apache-2.0, same copyright holder), and includes:
+
+- code adapted from zod 4.6 (https://github.com/colinhacks/zod), MIT License,
+  Copyright (c) 2025 Colin McDonnell. The full MIT notice is reproduced in dist/verify.mjs
+  next to that code (packages/verify/src/shims/zod.ts);
+- code adapted from canonicalize 2.1.0 (https://github.com/erdtman/canonicalize),
+  Apache License 2.0, Copyright Samuel Erdtman (packages/verify/src/shims/canonicalize.ts).

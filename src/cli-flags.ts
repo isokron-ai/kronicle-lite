@@ -173,3 +173,104 @@ export function validateShimFlags(cmd: 'pulse' | 'shim', flags: Record<string, s
   if (!Object.hasOwn(SHIM_OPTIONS, key)) return; // unknown subcommand: the caller prints usage
   checkOptions(key, [...SHIM_OPTIONS[key]!, ...SHIM_GLOBAL], flags, positional, cmd === 'pulse' ? 0 : 1, repeated, booleans, new Set());
 }
+
+// ── argv parsing (moved from cli.ts so the standalone verifier, packages/verify, parses the same way) ──
+
+export interface Args {
+  cmd: string;
+  positional: string[];
+  flags: Record<string, string | true>;
+  /** Single-value options given more than once. */
+  repeated: string[];
+}
+
+/** Flags that never take a value, so `put --from-instructions CLAUDE.md` keeps CLAUDE.md positional. */
+export const BOOLEAN_FLAGS: ReadonlySet<string> = new Set([
+  'http',
+  'json',
+  'push',
+  'remote',
+  'offline',
+  'from-instructions',
+  'stdin-hook',
+  'list',
+  'poll',
+  'once',
+  'bind-git',
+  'no-network',
+  'full',
+  'keep',
+  'all-projects',
+  'include-cosmetic',
+  'include-format-only',
+  'modern-only',
+  'core',
+  'redact-secrets',
+  'findings',
+  'allow-missing',
+  'allow-hardlinks',
+  'strict',
+  'allow-secrets',
+  'insecure-http',
+  'no-tsa',
+  'no-stamp-sums',
+  'tsa-at-gentime',
+  'allow-pending',
+  'strict-freeze',
+]);
+
+export function parseArgs(argv: string[]): Args {
+  const [cmd = 'help', ...rest] = argv;
+  const positional: string[] = [];
+  // null prototype: option names are user input (`--__proto__` stays a key, and is reported as unknown)
+  const flags: Record<string, string | true> = Object.create(null) as Record<string, string | true>;
+  const repeated: string[] = [];
+  const set = (key: string, value: string | true) => {
+    if (Object.hasOwn(flags, key)) {
+      if (REPEATABLE.has(key) && typeof value === 'string' && typeof flags[key] === 'string') {
+        flags[key] = `${flags[key] as string},${value}`;
+        return;
+      }
+      if (!repeated.includes(key)) repeated.push(key);
+    }
+    flags[key] = value;
+  };
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i]!;
+    if (a.startsWith('--')) {
+      const eq = a.indexOf('=');
+      if (eq > 2) {
+        set(a.slice(2, eq), a.slice(eq + 1));
+        continue;
+      }
+      const key = a.slice(2);
+      const next = rest[i + 1];
+      if (!BOOLEAN_FLAGS.has(key) && next !== undefined && !next.startsWith('--')) {
+        set(key, next);
+        i++;
+      } else {
+        set(key, true);
+      }
+    } else {
+      positional.push(a);
+    }
+  }
+  return { cmd, positional, flags, repeated };
+}
+
+export function str(v: string | true | undefined): string | undefined {
+  return typeof v === 'string' ? v : undefined;
+}
+
+export function list(v: string | true | undefined): string[] {
+  const s = str(v);
+  return s === undefined ? [] : s.split(',').map((x) => x.trim()).filter((x) => x.length > 0);
+}
+
+export function num(v: string | true | undefined): number | undefined {
+  const s = str(v);
+  if (s === undefined) return undefined;
+  const n = Number(s);
+  if (!Number.isInteger(n)) throw new Error(`expected an integer, got ${s}`);
+  return n;
+}

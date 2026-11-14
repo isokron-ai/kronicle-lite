@@ -1,0 +1,11 @@
+{
+ "v": 1,
+ "keys": [
+  {
+   "key_id": "anchor-ed25519-3dca1ecf66c2993e",
+   "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAvJAsc6UvXIKrZXFNO6jjSKKnkUKZvh2crVOyvrQqJm4=\n-----END PUBLIC KEY-----\n",
+   "valid_from": "2026-11-01T02:29:25.705Z",
+   "status": "active"
+  }
+ ]
+}

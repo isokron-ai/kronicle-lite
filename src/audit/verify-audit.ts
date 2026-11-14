@@ -73,7 +73,7 @@ import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { z } from 'zod';
 
 import { rawEd25519PublicKey, verifyEd25519Strict } from '../anchor/ed25519-strict.js';
-import { checkKeyChain, checkServiceKey, formatGenesisPin, KEY_TIME_SKEW_MS, keyListOf, keyListRegression, parseGenesisPin, PRODUCTION_GENESIS, type GenesisPin, type ServiceKeyEntry } from '../anchor/keychain.js';
+import { checkKeyChain, checkServiceKey, formatGenesisPin, KEY_TIME_SKEW_MS, keyListOf, keyListRegression, parseGenesisPin, PRODUCTION_GENESIS, type GenesisPin, type KeyChainResult, type ServiceKeyEntry } from '../anchor/keychain.js';
 import { parseAnchorReceipt, verifyAnchorReceiptSignature, type AnchorReceipt } from '../anchor/receipt.js';
 import { isJsonObject } from '../anchor/wire.js';
 import { checkpointSigningPayload } from '../chain/chain.js';
@@ -188,6 +188,21 @@ interface SeenKeysFile {
   lists: Record<string, { seen_at: string; keys: ServiceKeyEntry[] }>;
 }
 const KEY_ENTRY_FIELDS = ['status', 'valid_from', 'valid_to', 'successor_signature', 'signed_by', 'retirement_signature', 'retirement_signed_by', 'compromised_since'] as const;
+/** The key_chain report for a checked list (the pack's, or the kept one it is an earlier state of). */
+function keyChainReport(kc: KeyChainResult, list: readonly ServiceKeyEntry[]): VerifyAuditResult['trust']['key_chain'] {
+  return {
+    status: kc.ok ? 'intact' : kc.usable ? 'revoked_descendants' : 'broken',
+    detail: kc.detail,
+    entries: kc.entries.map((e) => ({
+      key_id: e.key_id,
+      state: e.state,
+      detail: e.detail,
+      compromised_since: e.state === 'revoked' ? (list.find((k) => k.key_id === e.key_id)?.compromised_since ?? null) : null,
+      revoked_ancestor: e.revoked_ancestor ?? null,
+    })),
+  };
+}
+
 /** null when `raw` is a well-formed rollback cache (every slot a canonical pin with a non-empty, well-typed key list); else what is wrong. */
 export function seenKeysProblem(raw: unknown): string | null {
   if (!isJsonObject(raw) || raw['v'] !== 1) return 'has the wrong shape (expected {v: 1, lists: {…}})';
@@ -365,9 +380,12 @@ export interface VerifyAuditResult {
      * The rollback check against the data-dir cache. checked: the list is at least as new as the one
      * kept (or failed against it); first_seen: nothing kept for this pin yet, the list is now recorded
      * (or could not be: recorded false); off: the library caller opted out; not_checked: the list was
-     * not usable, so nothing was compared or kept.
+     * not usable, so nothing was compared or kept. list_used: which list the receipts were checked
+     * against: `given` (the pack's anchor-keys.json, or --anchor-keys), or `seen` when the given list
+     * is an earlier state of the one kept (an honest pack made before a later key rotation, retirement
+     * or revocation): then the kept list, the stronger of the two, is used.
      */
-    rollback: { status: 'checked' | 'first_seen' | 'off' | 'not_checked'; path: string | null; seen_at: string | null; recorded: boolean };
+    rollback: { status: 'checked' | 'first_seen' | 'off' | 'not_checked'; path: string | null; seen_at: string | null; recorded: boolean; list_used: 'given' | 'seen' };
     /**
      * intact: every key verified. revoked_descendants: a key was revoked and the keys after it are
      * untrusted (their receipts fail; earlier keys still count). broken: the list is not usable.
@@ -755,7 +773,7 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
       genesis_sha256: genesis,
       genesis_valid_from: pin.valid_from,
       genesis_source: opts.genesis !== undefined ? (opts.genesis_source ?? 'option') : 'compiled',
-      rollback: { status: rollbackOff ? 'off' : 'not_checked', path: rollbackOff ? null : join(opts.seen_dir!, SEEN_KEYS_FILE), seen_at: null, recorded: false },
+      rollback: { status: rollbackOff ? 'off' : 'not_checked', path: rollbackOff ? null : join(opts.seen_dir!, SEEN_KEYS_FILE), seen_at: null, recorded: false, list_used: 'given' },
       key_chain: { status: 'not_checked', detail: '', entries: [] },
       tsa_roots: noTsa ? 'skipped' : opts.tsa_roots !== undefined ? 'dir' : 'shipped',
       tsa_root_sha256: [],
@@ -1032,24 +1050,16 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
       listDoc = d.ok ? d.value : undefined;
       if (!d.ok) add('keys', 'receipts', null, 'anchor key list', false, `anchor-keys.json: ${d.problem}`);
     } else add('keys', 'receipts', null, 'anchor key list', false, 'anchor-keys.json is missing (or pass --anchor-keys)');
-    const keyList: ServiceKeyEntry[] | null = listDoc === undefined ? null : keyListOf(listDoc);
+    let keyList: ServiceKeyEntry[] | null = listDoc === undefined ? null : keyListOf(listDoc);
     if (listDoc !== undefined && keyList === null) add('keys', 'receipts', null, 'anchor key list', false, `${opts.anchor_keys !== undefined ? '--anchor-keys' : 'anchor-keys.json'} is not a key list ({keys: [{key_id, public_key_pem, …}]})`);
     let listOk = false;
+    /** When the kept list is used: the keys the pack's own list names (a receipt must be signed by one of them). */
+    let givenKeyIds: Set<string> | null = null;
     if (keyList) {
       // The genesis key's valid_from comes from the pin, never from the list (checkKeyChain applies it).
       const kc = checkKeyChain(keyList, pin);
       listOk = kc.usable;
-      result.trust.key_chain = {
-        status: kc.ok ? 'intact' : kc.usable ? 'revoked_descendants' : 'broken',
-        detail: kc.detail,
-        entries: kc.entries.map((e) => ({
-          key_id: e.key_id,
-          state: e.state,
-          detail: e.detail,
-          compromised_since: e.state === 'revoked' ? (keyList!.find((k) => k.key_id === e.key_id)?.compromised_since ?? null) : null,
-          revoked_ancestor: e.revoked_ancestor ?? null,
-        })),
-      };
+      result.trust.key_chain = keyChainReport(kc, keyList);
       const brokenOnes = kc.entries.filter((e) => e.state === 'broken' && !e.revoked_ancestor);
       const untrusted = kc.entries.filter((e) => e.state === 'broken' && e.revoked_ancestor);
       const hint = opts.genesis === undefined && keyList.every((k) => spki(k.public_key_pem) !== genesis) ? ' (for a self-hosted anchor service pass --genesis <sha256>@<valid_from> with its genesis key pin)' : '';
@@ -1064,7 +1074,16 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
           ? `${kc.detail}: ${chainText}; genesis ${formatGenesisPin(pin)}${untrusted.length ? `; untrusted (signed by a revoked key): ${untrusted.map((e) => e.key_id).join(', ')}` : ''}`
           : `${kc.detail}: ${brokenOnes.map((e) => `${e.key_id}: ${e.detail}`).slice(0, 3).join('; ')}${hint}`,
       );
-      if (kc.usable && !rollbackOff) checkRollback(keyList);
+      if (kc.usable && !rollbackOff) {
+        const kept = checkRollback(keyList);
+        if (kept) {
+          // The pack's list is an earlier state of the kept one: the receipts are checked against the kept list.
+          givenKeyIds = new Set(keyList.map((k) => k.key_id));
+          keyList = kept;
+          result.trust.key_chain = keyChainReport(checkKeyChain(kept, pin), kept);
+          result.trust.rollback.list_used = 'seen';
+        }
+      }
     }
 
     // TSA trust: groups by operator (the shipped sectigo / digicert files, or one per --tsa-roots entry).
@@ -1168,9 +1187,14 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
       const sk = listOk ? checkServiceKey(keyList!, r.service_key_id, r.received_at, pin, { revoked: 'tsa', nonHead: 'tsa' }) : null;
       const entry: ServiceKeyEntry | null = sk?.ok ? sk.entry : null;
       const compromisedSince = sk?.ok ? (sk.revoked?.compromised_since ?? null) : null;
+      // Checked against the kept list, a receipt must still be signed by a key the pack's own list names:
+      // a pack made before a rotation cannot hold a receipt of a key that did not exist yet.
+      const notInPack = givenKeyIds !== null && !givenKeyIds.has(r.service_key_id);
       const skProblem = sk === null
         ? 'the anchor key list does not chain to the genesis pin'
-        : !sk.ok
+        : notInPack
+          ? `${r.service_key_id} is not in the pack's anchor-keys.json, which is an earlier state of the list kept in the data dir`
+          : !sk.ok
           ? sk.detail
           : verifyAnchorReceiptSignature(r, sk.entry.public_key_pem)
             ? null
@@ -1440,7 +1464,11 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     }
   }
 
-  function checkRollback(list: ServiceKeyEntry[]): void {
+  /**
+   * The rollback check against the list kept in the data dir. Returns the kept list when the given list
+   * is an earlier state of it (the receipts are then checked against the kept list), otherwise null.
+   */
+  function checkRollback(list: ServiceKeyEntry[]): ServiceKeyEntry[] | null {
     const path = join(opts.seen_dir!, SEEN_KEYS_FILE);
     const rb = result.trust.rollback;
     rb.path = path;
@@ -1457,7 +1485,7 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
         // A damaged cache cannot be the reference, and is never overwritten: the operator decides.
         rb.status = 'checked';
         add('keys', 'receipts', null, 'key list rollback', false, `${path} ${why}, so the key list cannot be checked for rollback; it is left as it is (delete it only if you trust the list in this pack)`);
-        return;
+        return null;
       }
       cache = raw as SeenKeysFile;
     }
@@ -1466,15 +1494,33 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     if (prev) {
       rb.status = 'checked';
       rb.seen_at = prev.seen_at;
-      const rollback = keyListRegression(keyListOf({ keys: prev.keys })!, list);
+      const kept = keyListOf({ keys: prev.keys })!;
+      const rollback = keyListRegression(kept, list);
       if (rollback) {
+        // An Evidence Pack carries the key list current when it was made. After a planned rotation (or a
+        // retirement or revocation) the kept list is newer, and an honest pack made before it lacks the new
+        // key: that is not a rollback when the kept list is a lawful later state of the pack's list (the
+        // reverse keyListRegression holds). The receipts are then checked against the kept list, the stronger
+        // of the two, so what happened since still applies: a retired key's receipts need a verified TSA time
+        // inside its window, a revoked key's one before compromised_since − 5 min. A list that is neither
+        // (it changes a key, or forks the chain) stays a rollback.
+        if (keyListRegression(list, kept) === null) {
+          const kc = checkKeyChain(kept, pin);
+          if (!kc.usable) {
+            add('keys', 'receipts', null, 'key list rollback', false, `the list seen ${prev.seen_at} in ${path} extends anchor-keys.json but does not chain to the genesis pin (${kc.detail}); it is left as it is (delete it only if you trust the list in this pack)`);
+            return null;
+          }
+          add('keys', 'receipts', null, 'key list rollback', true, `an earlier state of the list seen ${prev.seen_at} (${prev.keys.length} key(s), kept in ${path}): ${list.length} key(s) here, none changed except by a later rotation, retirement or revocation; the receipts are checked against the newer list`);
+          rb.recorded = true;
+          return kept;
+        }
         add('keys', 'receipts', null, 'key list rollback', false, `anchor-keys.json is an older or weaker list than the one seen ${prev.seen_at}: ${rollback}`);
-        return;
+        return null;
       }
       add('keys', 'receipts', null, 'key list rollback', true, `at least as new as the list seen ${prev.seen_at} (${prev.keys.length} key(s)), kept in ${path}`);
       if (canonicalize(prev.keys) === canonicalize(list)) {
         rb.recorded = true;
-        return;
+        return null;
       }
     } else rb.status = 'first_seen';
     cache.lists[slot] = { seen_at: (opts.now ?? new Date()).toISOString(), keys: list };
@@ -1488,6 +1534,7 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     } catch {
       rb.recorded = false; // a read-only data dir: reported, the check above still ran
     }
+    return null;
   }
 
   function checkSums(auditorPem: string, keyId: string): boolean {
@@ -1923,7 +1970,7 @@ export const VerifyAuditJsonSchema = z.strictObject({
     genesis_sha256: z.string().regex(/^[0-9a-f]{64}$/),
     genesis_valid_from: z.string(),
     genesis_source: z.enum(['compiled', 'option', 'env']),
-    rollback: z.strictObject({ status: z.enum(['checked', 'first_seen', 'off', 'not_checked']), path: z.string().nullable(), seen_at: z.string().nullable(), recorded: z.boolean() }),
+    rollback: z.strictObject({ status: z.enum(['checked', 'first_seen', 'off', 'not_checked']), path: z.string().nullable(), seen_at: z.string().nullable(), recorded: z.boolean(), list_used: z.enum(['given', 'seen']) }),
     key_chain: z.strictObject({
       status: z.enum(['intact', 'revoked_descendants', 'broken', 'not_checked']),
       detail: z.string(),
@@ -2041,10 +2088,12 @@ export function renderVerifyAudit(r: VerifyAuditResult): string {
   L.push(`audit          ${r.audit_id ?? '?'}${r.bundle_format ? `  (${r.bundle_format})` : ''}`);
   L.push(`profile        ${r.profile === 'audit' ? 'audit (every claim checked; claims.json can add claims, not remove them)' : 'legacy (0.10.0 rules: claims.json picks the claims; PARTIAL at best)'}`);
   L.push(`auditor key    ${r.auditor.key_id ?? '?'}  spki sha256 ${r.auditor.spki_sha256 ?? '?'}  (${r.auditor.source === 'fingerprint' ? 'pinned by --key-fingerprint' : r.auditor.source === 'key_file' ? 'pinned by --key' : 'NOT pinned'})`);
-  L.push(`service keys   genesis ${r.trust.genesis_sha256}@${r.trust.genesis_valid_from} (${r.trust.genesis_source === 'compiled' ? 'compiled pin' : r.trust.genesis_source === 'env' ? 'KRONICLE_ANCHOR_GENESIS' : '--genesis'}); key list from ${r.trust.key_list === 'pack' ? 'anchor-keys.json' : '--anchor-keys'}: ${r.trust.key_chain.status}`);
+  const givenList = r.trust.key_list === 'pack' ? 'anchor-keys.json' : '--anchor-keys';
+  L.push(`service keys   genesis ${r.trust.genesis_sha256}@${r.trust.genesis_valid_from} (${r.trust.genesis_source === 'compiled' ? 'compiled pin' : r.trust.genesis_source === 'env' ? 'KRONICLE_ANCHOR_GENESIS' : '--genesis'}); ${r.trust.rollback.list_used === 'seen' ? `key list kept in the data dir (${givenList} is an earlier state of it)` : `key list from ${givenList}`}: ${r.trust.key_chain.status}`);
   const rb = r.trust.rollback;
   if (rb.status === 'first_seen') L.push(`key list       first seen for this genesis; ${rb.recorded ? `recorded in ${rb.path}` : `could not be recorded in ${rb.path}`} (later lists are checked against it)`);
   else if (rb.status === 'off') L.push('key list       rollback check off (library option rollback: off)');
+  else if (rb.status === 'checked' && rb.seen_at && rb.list_used === 'seen') L.push(`key list       an earlier state of the list seen ${rb.seen_at} (${rb.path}); receipts checked against that newer list`);
   else if (rb.status === 'checked' && rb.seen_at) L.push(`key list       checked against the list seen ${rb.seen_at} (${rb.path})`);
   L.push(`TSA CAs        ${r.trust.tsa_roots === 'skipped' ? 'not used (--no-tsa)' : `${r.trust.tsa_roots === 'shipped' ? 'shipped timestamping CA pins (Sectigo R46, DigiCert G4 TimeStamping)' : '--tsa-roots'}, validity checked at ${r.trust.tsa_time === 'now' ? 'the current time' : 'genTime'}`}`);
   L.push('', 'Claims');

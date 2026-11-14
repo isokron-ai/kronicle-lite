@@ -1,0 +1,1 @@
+{"notice":"IsoKron SAMPLE Evidence Pack. Synthetic demonstration data, not a client audit.","run_seq":2,"scenario":"s2","target":"example-notes-mcp 0.3.1","calls":3,"results":{"empty_query":"error -32602 (expected)","three_terms":"12 hits","long_query":"error -32602 (expected)"},"control":"REST API returned the same 12 hits","latency_ms":{"p50":88,"p95":131},"result":"pass"}
