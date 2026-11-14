@@ -21,6 +21,14 @@ cannot do them.
    - Repository: `kronicle-lite`
    - Workflow filename: `release.yml`
    - Environment name: `npm-publish`
+   - Allowed actions: tick **`npm publish`** (direct publish); leave "Allow npm dist-tag" off.
+     Trusted publishers created after 3 Sep 2026 allow only `npm stage publish` unless direct
+     `npm publish` is ticked, and this workflow publishes directly.
+
+   All fields are case-sensitive, and npm checks them only at publish time. **A new trusted
+   publisher expires if it has not published within 2 days**, so add it when the first release
+   is ready to tag (after steps 1 and 3), not earlier. An expired one has to be deleted and
+   added again.
 3. **Protect the tags.** Repository → Settings → Rules → Rulesets → new tag ruleset for
    `v*.*.*`: restrict creation, update and deletion to the owner.
 4. **After the first release from the workflow succeeds** (and only then):
@@ -30,9 +38,13 @@ cannot do them.
    - revoke any npm automation or publish tokens that were used for earlier releases
      (npmjs.com → Access Tokens).
 
-A dry run needs none of the above: Actions → release → Run workflow (with "Dry run" ticked, the
-default) builds, tests and packs on the default branch and prints the tarball's integrity. It
-publishes nothing.
+A dry run needs none of the above: Actions → release → Run workflow builds, tests and packs on
+the chosen branch and prints the tarball's integrity in the job summary. A manual run never
+publishes; only a pushed `vX.Y.Z` tag does.
+
+The standalone verifier (`packages/verify`, once merged) has its own workflow,
+`release-verify.yml`, with its own tags (`verify/vX.Y.Z`), environment (`npm-publish-verify`)
+and npm trusted publisher. `release.yml` and `v*.*.*` do not match those tags.
 
 ## Each release
 
@@ -46,12 +58,17 @@ publishes nothing.
    git push origin vX.Y.Z
    ```
 3. The workflow runs:
-   - `verify`: the tag names package.json's version, the CHANGELOG entry is dated and
+   - `verify` (no token): the tag names package.json's version and its commit is on `main`, the
+     CHANGELOG entry is dated and
      package.json's `repository.url` names this repository (`scripts/release-check.mjs tag`);
-     then lint, typecheck, the test suite and the catalog check;
-   - `publish` (waits for the `npm-publish` approval): npm 11.5.1+, `npm pack`, the integrity
-     of that tarball, `npm publish <tarball> --provenance`, then a check that the registry serves
-     the same integrity with a provenance attestation. The job summary shows the integrity.
+     then lint, typecheck, the test suite and the catalog check; then `npm pack` of the tested
+     build, its integrity, `npm publish --dry-run`, and the tarball handed on as an artifact.
+     Dependency install scripts run only in this job;
+   - `publish` (waits for the `npm-publish` approval; holds the OIDC token): npm 11.5.1+ on
+     Node 22.14.0+, the tag check again, a check that the downloaded tarball has the integrity
+     `verify` recorded, `npm publish <tarball> --provenance --access public --ignore-scripts`, then a check that
+     the registry serves the same integrity with a provenance attestation. It installs no
+     project dependencies. The job summary shows the integrity.
 4. Approve the `npm-publish` deployment when the `verify` job is green.
 
 ## After a release
@@ -71,11 +88,19 @@ publishes nothing.
 ## If the publish step fails
 
 - `E404`/`E403` on publish: the trusted publisher on npmjs.com does not match this workflow
-  (organization, repository, workflow file name and environment must all match exactly).
+  (organization, repository, workflow file name and environment must all match exactly), or
+  its "Allowed actions" do not include direct `npm publish`.
+- The registry check fails after the publish step succeeded: the registry was slow. Check by
+  hand with `npm view kronicle-lite@X.Y.Z dist.integrity dist.attestations`; do not re-run the
+  publish (a version cannot be published twice).
+- `… is not on main`: the tag points at a commit that is not on `main`.
 - `E422 … repository.url`: package.json `repository.url` does not name
   `github.com/isokron-ai/kronicle-lite`; the provenance statement names the repository the
   workflow ran in, and npm refuses a mismatch.
 - `npm 10.x cannot publish with trusted publishing`: the npm upgrade step did not run.
+- `ENEEDAUTH` / "Unable to authenticate": usually the same mismatch as `E404`; npm does not
+  validate the trusted publisher form when it is saved, only at publish time. All fields are
+  case-sensitive. A new trusted publisher must see its first successful publish within 2 days.
 
 Do not add an `NPM_TOKEN` secret to make a failing publish pass: a token bypasses trusted
 publishing and drops the provenance guarantee.

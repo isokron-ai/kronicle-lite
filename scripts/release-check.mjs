@@ -4,7 +4,8 @@
  *
  *   release-check.mjs tag vX.Y.Z           the tag names package.json's version, and CHANGELOG.md has a
  *                                          dated `## [X.Y.Z] — YYYY-MM-DD` entry
- *   release-check.mjs npm 11.6.2           the npm CLI supports trusted publishing (11.5.1 or later)
+ *   release-check.mjs npm 11.21.1 [NODE]   npm and Node support trusted publishing (npm 11.5.1 and
+ *                                          Node 22.14.0 or later; NODE defaults to this process's)
  *   release-check.mjs pack pack.json       reads `npm pack --json`; prints file=, version=, integrity=
  *                                          lines for $GITHUB_OUTPUT
  *   release-check.mjs registry X.Y.Z SRI   the registry serves X.Y.Z with that integrity and a provenance
@@ -52,9 +53,10 @@ function checkTag(tag) {
   process.stdout.write(`tag ${tag} = package.json ${p.version}; CHANGELOG entry dated; repository ${repo}\n`);
 }
 
-function checkNpm(version) {
+function checkNpm(version, node = process.versions.node) {
   if (!version || !atLeast(version, '11.5.1')) fail(`npm ${version} cannot publish with trusted publishing (needs 11.5.1 or later)`);
-  process.stdout.write(`npm ${version}: trusted publishing supported\n`);
+  if (!atLeast(node, '22.14.0')) fail(`Node ${node} cannot publish with trusted publishing (needs 22.14.0 or later)`);
+  process.stdout.write(`npm ${version} on Node ${node}: trusted publishing supported\n`);
 }
 
 function readPack(file) {
@@ -78,7 +80,8 @@ function readPack(file) {
 async function checkRegistry(version, integrity) {
   if (!version || !integrity) fail('registry needs VERSION and INTEGRITY');
   let last = '';
-  for (let i = 0; i < 10; i++) {
+  // About 5 minutes: a slow registry must not read as a failed publish (a version cannot be republished).
+  for (let i = 0; i < 20; i++) {
     try {
       const out = execFileSync('npm', ['view', `${NAME}@${version}`, 'dist', '--json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
       const dist = JSON.parse(out);
@@ -89,11 +92,11 @@ async function checkRegistry(version, integrity) {
       }
       last = 'no provenance attestation yet';
     } catch (e) {
-      last = e.message.split('\n')[0];
+      last = (e.stderr?.toString().trim() || e.message).split('\n')[0];
     }
     await new Promise((r) => setTimeout(r, 15_000));
   }
-  fail(`${NAME}@${version}: ${last}`);
+  fail(`${NAME}@${version}: ${last}. The publish step succeeded; check by hand with \`npm view ${NAME}@${version} dist.integrity dist.attestations\` before doing anything else (do not re-run the publish).`);
 }
 
 const [cmd, ...args] = process.argv.slice(2);
@@ -102,7 +105,7 @@ switch (cmd) {
     checkTag(args[0]);
     break;
   case 'npm':
-    checkNpm(args[0]);
+    checkNpm(args[0], args[1]);
     break;
   case 'pack':
     readPack(args[0]);
