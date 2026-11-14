@@ -24,7 +24,7 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { build } from 'esbuild';
@@ -64,6 +64,8 @@ const builtinsOnly = {
   name: 'builtins-only',
   setup(b) {
     b.onResolve({ filter: /^[^./]/ }, (args) => {
+      // An absolute path (the entry point, and on Windows any `D:\…` path) is not a package import.
+      if (args.kind === 'entry-point' || isAbsolute(args.path)) return undefined;
       if (args.path.startsWith('node:')) return { path: args.path, external: true };
       if (Object.hasOwn(SHIMS, args.path)) return { path: SHIMS[args.path] };
       return { errors: [{ text: `"${args.path}" (imported by ${relative(repo, args.importer)}) is not allowed in the standalone verifier: Node built-ins (node:*) and src/shims only` }] };
