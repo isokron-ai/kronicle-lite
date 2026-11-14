@@ -4,7 +4,8 @@
  *
  *   release-check.mjs tag vX.Y.Z           the tag names package.json's version, and CHANGELOG.md has a
  *                                          dated `## [X.Y.Z] — YYYY-MM-DD` entry
- *   release-check.mjs npm 11.6.2           the npm CLI supports trusted publishing (11.5.1 or later)
+ *   release-check.mjs npm 11.21.1 [NODE]   npm and Node support trusted publishing (npm 11.5.1 and
+ *                                          Node 22.14.0 or later; NODE defaults to this process's)
  *   release-check.mjs pack pack.json       reads `npm pack --json`; prints file=, version=, integrity=
  *                                          lines for $GITHUB_OUTPUT
  *   release-check.mjs registry X.Y.Z SRI   the registry serves X.Y.Z with that integrity and a provenance
@@ -52,9 +53,10 @@ function checkTag(tag) {
   process.stdout.write(`tag ${tag} = package.json ${p.version}; CHANGELOG entry dated; repository ${repo}\n`);
 }
 
-function checkNpm(version) {
+function checkNpm(version, node = process.versions.node) {
   if (!version || !atLeast(version, '11.5.1')) fail(`npm ${version} cannot publish with trusted publishing (needs 11.5.1 or later)`);
-  process.stdout.write(`npm ${version}: trusted publishing supported\n`);
+  if (!atLeast(node, '22.14.0')) fail(`Node ${node} cannot publish with trusted publishing (needs 22.14.0 or later)`);
+  process.stdout.write(`npm ${version} on Node ${node}: trusted publishing supported\n`);
 }
 
 function readPack(file) {
@@ -102,7 +104,7 @@ switch (cmd) {
     checkTag(args[0]);
     break;
   case 'npm':
-    checkNpm(args[0]);
+    checkNpm(args[0], args[1]);
     break;
   case 'pack':
     readPack(args[0]);

@@ -276,7 +276,7 @@ re-hashes the chain from there produces a file that imports and verifies.
 For evidence another party must trust, use the signed bundle
 (`audit export` + `verify-bundle --key`; audit events only for now) or
 anchor a checkpoint off-box. Signed exports are planned
-([#34](https://github.com/rafe-walker/kronicle-lite/issues/34)).
+([#34](https://github.com/isokron-ai/kronicle-lite/issues/34)).
 
 In an agent session the loop is: `get_system_state` → work → `recall` (keep
 the receipts) → `verify` before building on an old receipt → write with your
@@ -886,4 +886,4 @@ Apache-2.0. See `LICENSE` and `NOTICE`.
 
 ---
 
-Built and maintained by [IsoKron](https://isokron.ai).
+Built and maintained by [IsoKron](https://isokron.ai/?utm_source=npm&utm_medium=readme&utm_campaign=kronicle-lite), which tests MCP servers for write safety.

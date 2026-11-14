@@ -31,9 +31,12 @@ function job(name: string): string {
 }
 
 describe('release workflow (B11)', () => {
-  it('runs on a vX.Y.Z tag or by hand (a dry run by default)', () => {
+  it('runs on a vX.Y.Z tag, or by hand as a dry run that cannot publish', () => {
     expect(wf).toMatch(/push:\n\s+tags: \['v\*\.\*\.\*'\]/);
-    expect(wf).toMatch(/workflow_dispatch:[\s\S]*dry_run:[\s\S]*default: true/);
+    // No inputs: a manual run has no switch that turns it into a publish.
+    expect(wf).toMatch(/^ {2}workflow_dispatch:\n\n/m);
+    expect(wf).not.toMatch(/inputs\./);
+    expect(job('publish')).toMatch(/^ {4}if: github\.event_name == 'push' && startsWith\(github\.ref, 'refs\/tags\/v'\)$/m);
   });
 
   it('grants no permission by default, and id-token: write only to the publish job', () => {
@@ -47,7 +50,21 @@ describe('release workflow (B11)', () => {
     const p = job('publish');
     expect(p).toMatch(/^ {4}environment: npm-publish$/m);
     expect(p).toMatch(/^ {4}needs: verify$/m);
-    expect(p).toMatch(/npm publish "\$PKG_FILE" --provenance --access public/);
+    expect(p).toMatch(/npm publish "release\/\$PKG_FILE" --provenance --access public --ignore-scripts/);
+  });
+
+  it('publishes the tarball the verify job tested and packed, and installs nothing while holding the OIDC token', () => {
+    const v = job('verify');
+    expect(v).toContain('npm pack --json --ignore-scripts > pack.json');
+    expect(v).toMatch(/uses: actions\/upload-artifact@[0-9a-f]{40}/);
+    const p = job('publish');
+    expect(p).toMatch(/uses: actions\/download-artifact@[0-9a-f]{40}/);
+    expect(p).toContain('openssl dgst -sha512 -binary "release/$PKG_FILE"');
+    expect(p).toContain('[ "$got" = "$PKG_INTEGRITY" ]');
+    // The one install is npm itself, with lifecycle scripts off.
+    const code = p.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
+    expect(code).not.toMatch(/npm (ci|run|test|rebuild|exec)\b|npx /);
+    expect([...code.matchAll(/npm (?:install|i)\b[^\n]*/g)].map((m) => m[0])).toEqual(['npm install -g --ignore-scripts npm@11.21.1']);
   });
 
   it('uses no npm token or other secret (trusted publishing only)', () => {
@@ -62,7 +79,7 @@ describe('release workflow (B11)', () => {
     expect(wf.match(/actions\/checkout@/g)!.length).toBe(wf.match(/persist-credentials: false/g)!.length);
   });
 
-  it('runs the CI gates before publishing, and checks the tag in both jobs', () => {
+  it('runs the CI gates before packing, and checks the tag in both jobs', () => {
     const v = job('verify');
     for (const s of ['npm ci', 'npm run lint', 'npm run typecheck', 'npm test', 'npm run catalog:check']) expect(v).toContain(`run: ${s}`);
     expect(v).toContain('release-check.mjs tag "$GITHUB_REF_NAME"');
@@ -118,9 +135,16 @@ describe('scripts/release-check.mjs', () => {
   it('npm: needs 11.5.1 or later', () => {
     expect(check(['npm', '10.9.2']).status).toBe(1);
     expect(check(['npm', '11.5.0']).status).toBe(1);
-    expect(check(['npm', '11.5.1']).status).toBe(0);
-    expect(check(['npm', '11.6.2']).status).toBe(0);
-    expect(check(['npm', '12.0.0']).status).toBe(0);
+    expect(check(['npm', '11.5.1', '22.14.0']).status).toBe(0);
+    expect(check(['npm', '11.6.2', '22.14.0']).status).toBe(0);
+    expect(check(['npm', '12.0.0', '22.14.0']).status).toBe(0);
+  });
+
+  it('npm: needs Node 22.14.0 or later', () => {
+    expect(check(['npm', '11.21.1', '20.19.0']).err).toMatch(/Node 20\.19\.0 cannot publish/);
+    expect(check(['npm', '11.21.1', '22.13.1']).status).toBe(1);
+    expect(check(['npm', '11.21.1', '22.14.0']).status).toBe(0);
+    expect(check(['npm', '11.21.1', '24.0.0']).status).toBe(0);
   });
 
   it('pack: refuses a tarball of another package, version, or one that ships sources', () => {

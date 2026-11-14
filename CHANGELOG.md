@@ -61,13 +61,16 @@ uses semantic versioning once past 0.x.
   gates on the tagged commit (lint, typecheck, tests, catalog check), then
   publishes from the `npm-publish` environment with npm trusted publishing
   (OIDC, no npm token anywhere) and `--provenance`. Only the publish job has
-  `id-token: write`; every action is pinned by commit sha. The job packs the
-  tarball first, prints its sha512 integrity, publishes that file, and checks
-  that the registry serves the same integrity with a provenance attestation.
-  A manual run is a dry run by default (build, test, pack; nothing published).
+  `id-token: write`; every action is pinned by commit sha. The tokenless
+  `verify` job packs the tested build, prints its sha512 integrity and hands
+  the tarball on; the publish job installs no dependencies (no package code
+  runs while it holds the OIDC token), checks the tarball's integrity,
+  publishes that file, and checks that the registry serves the same integrity
+  with a provenance attestation. A manual run is a dry run (build, test,
+  pack) and cannot publish.
 - **`scripts/release-check.mjs`** (not shipped): the tag names package.json's
   version, the CHANGELOG entry for it is dated, package.json names this
-  repository, npm is 11.5.1 or later, the packed tarball holds `dist/` and no
+  repository, npm is 11.5.1 or later on Node 22.14.0 or later, the packed tarball holds `dist/` and no
   sources, and the registry serves what was packed.
 - **`docs/RELEASING.md`**: the one-time owner setup (the npm trusted
   publisher, the `npm-publish` environment, a tag ruleset, then disallowing
@@ -89,7 +92,10 @@ uses semantic versioning once past 0.x.
   no `verify-audit`.
 - package.json `repository.url` names `github.com/isokron-ai/kronicle-lite`,
   where the repository now lives. npm refuses a provenance statement whose
-  repository differs from package.json's.
+  repository differs from package.json's. `bugs` names it too, and so do the
+  repository links in server.json, the MCP server's `websiteUrl`, the README
+  and the threat model. package.json `homepage` and server.json `websiteUrl`
+  point to isokron.ai/open-source.
 
 ## [0.11.2] — 2026-11-10
 
