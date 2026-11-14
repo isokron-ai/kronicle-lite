@@ -6,6 +6,29 @@ uses semantic versioning once past 0.x.
 
 ## [Unreleased]
 
+### Fixed — an honest older pack verifies after an anchor-key rotation (keyListRegression)
+
+- **verify-audit rejected an honest older pack once it had seen a newer key
+  list.** An Evidence Pack carries the anchor key list current when it was
+  made; after a planned rotation (R retired, S added) the data dir keeps the
+  newer list, and `keyListRegression(kept, pack)` reported "S is in the key
+  list seen earlier but missing now", so the pack failed `key list rollback`.
+  Now, when the kept list is a lawful later state of the pack's list
+  (`keyListRegression(pack, kept)` is null), the check passes and the receipts
+  are checked against the kept list, the stronger one: what happened since
+  (retirement, revocation, an earlier `compromised_since`) still applies, so a
+  pack that keeps an old list to escape a later revocation still fails, on the
+  receipt times. A list that changes a kept key or forks the chain is still a
+  rollback. The kept list is not replaced. The vendored service code
+  (`src/anchor/service-core/`) and the anchor client's own rollback guard are
+  unchanged: a live service serving an older list is still a rollback.
+- `--json`: `trust.rollback.list_used` (`given` | `seen`) says which list the
+  receipts were checked against (format `kronicle-lite-verify-audit/3`, still
+  unreleased); the text report's `key list` line says so too.
+- Tests that encoded the old behaviour now assert the new one, and new tests
+  cover the honest older pack, a pack stamped after the rotation, a back-dated
+  `received_at`, a changed key, and `--no-tsa`.
+
 ### Added — verify-audit accepts a late-anchored freeze, and says so (A8)
 
 - **Late-anchor mode (default).** A pack whose freeze was made with the

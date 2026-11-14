@@ -766,18 +766,72 @@ describe('review probes P3/P4a: the anchor key chain and the receipt times', () 
     expect(file.out).toContain('RESULT: PARTIAL');
   });
 
-  it('rollback: a shorter key list than one seen before fails (cache in the data dir)', () => {
-    const seen = tempDir('kl-va-seen-');
+  describe('keyListRegression after a planned rotation: an honest pack made before it is not a rollback', () => {
+    // The data dir has seen R → S (R retired a day ago). A pack made two days ago carries the list current
+    // then: R alone, active. Before 0.11.3 that pack failed "key list rollback" (S is missing), so a buyer
+    // who had verified any newer pack could no longer verify an honest older one.
     const vf = iso(now - 86400e3);
-    const newer = run(rotated(R, '2026-01-01T00:00:00.000Z', S, vf), S, R, recent, undefined, { seen_dir: seen });
-    expect(failedChecks(newer)).toEqual([]);
-    // N7: a first list is recorded and said so, but it is not a PASS
-    expect(newer.checks.find((c) => c.check === 'key list rollback')).toBeUndefined();
-    expect(newer.trust.rollback).toEqual({ status: 'first_seen', path: join(seen, 'anchor-keys.seen.json'), seen_at: null, recorded: true });
-    expect(renderVerifyAudit(newer)).toContain(`key list       first seen for this genesis; recorded in ${join(seen, 'anchor-keys.seen.json')}`);
-    const older = run([ent(R, { status: 'active', valid_from: '2026-01-01T00:00:00.000Z' })], R, R, (i) => iso(now - 2 * 86400e3 + i * 1e3), (i) => new Date(now - 2 * 86400e3 + 60e3 + i * 1e3), { seen_dir: seen });
-    expect(older.checks.find((c) => c.check === 'key list rollback')).toMatchObject({ status: 'fail', evidence: expect.stringMatching(/older or weaker list than the one seen .*: anchor-ed25519-[0-9a-f]{16} is in the key list seen earlier but missing now/) });
-    expect(older.ok).toBe(false);
+    const rotatedList = () => rotated(R, '2026-01-01T00:00:00.000Z', S, vf);
+    const oldList = () => [ent(R, { status: 'active', valid_from: '2026-01-01T00:00:00.000Z' })];
+    const twoDaysAgo = (i: number) => iso(now - 2 * 86400e3 + i * 1e3);
+    const stampedTwoDaysAgo = (i: number) => new Date(now - 2 * 86400e3 + 60e3 + i * 1e3);
+    const seenAfterRotation = () => {
+      const seen = tempDir('kl-va-seen-');
+      const newer = run(rotatedList(), S, R, recent, undefined, { seen_dir: seen });
+      expect(failedChecks(newer)).toEqual([]);
+      // N7: a first list is recorded and said so, but it is not a PASS
+      expect(newer.checks.find((c) => c.check === 'key list rollback')).toBeUndefined();
+      expect(newer.trust.rollback).toEqual({ status: 'first_seen', path: join(seen, 'anchor-keys.seen.json'), seen_at: null, recorded: true, list_used: 'given' });
+      expect(renderVerifyAudit(newer)).toContain(`key list       first seen for this genesis; recorded in ${join(seen, 'anchor-keys.seen.json')}`);
+      return seen;
+    };
+
+    it('the older pack verifies against the newer list kept, and the kept list is not replaced', () => {
+      const seen = seenAfterRotation();
+      const kept = readFileSync(join(seen, SEEN_KEYS_FILE), 'utf8');
+      const older = run(oldList(), R, R, twoDaysAgo, stampedTwoDaysAgo, { seen_dir: seen });
+      expect(failedChecks(older)).toEqual([]);
+      expect(older.verdict).toBe(PARTIAL);
+      expect(older.checks.find((c) => c.check === 'key list rollback')).toMatchObject({ status: 'pass', evidence: expect.stringMatching(/^an earlier state of the list seen .* \(2 key\(s\), kept in .*\): 1 key\(s\) here, none changed except by a later rotation, retirement or revocation; the receipts are checked against the newer list$/) });
+      expect(older.trust.rollback).toMatchObject({ status: 'checked', recorded: true, list_used: 'seen' });
+      // the receipts were judged under the kept list: R is retired there, so its TSA times had to fall inside R's window
+      expect(older.trust.key_chain.entries.map((e) => [e.key_id, e.state])).toEqual([[S.id, 'verified'], [R.id, 'genesis']]);
+      expect(older.checks.filter((c) => c.check === 'stamped within key validity').map((c) => c.status)).toEqual(['pass', 'pass', 'pass']);
+      expect(renderVerifyAudit(older)).toMatch(/^key list {7}an earlier state of the list seen .*; receipts checked against that newer list$/m);
+      expect(readFileSync(join(seen, SEEN_KEYS_FILE), 'utf8')).toBe(kept);
+    });
+
+    it('a pack that keeps the old list but was stamped after the rotation fails: the retirement in the kept list applies', () => {
+      const seen = seenAfterRotation();
+      const forged = run(oldList(), R, R, recent, undefined, { seen_dir: seen });
+      expect(forged.trust.rollback.list_used).toBe('seen');
+      // received_at after R's valid_to: R did not vouch for anything then
+      expect(forged.checks.filter((c) => c.check === 'service signature' && c.status === 'fail').map((c) => c.evidence)).toEqual(Array(3).fill(expect.stringMatching(/is after anchor-ed25519-[0-9a-f]{16} valid_to/)));
+      expect(claimStatus(forged).receipts).toBe('fail');
+      expect(forged.ok).toBe(false);
+      // received_at back-dated inside R's window, but the TSA times are after it ended: the TSA time decides
+      const backdated = run(oldList(), R, R, twoDaysAgo, (i) => new Date(now - 60e3 + i * 1e3), { seen_dir: seen });
+      expect(backdated.trust.rollback.list_used).toBe('seen');
+      expect(backdated.checks.filter((c) => c.check === 'stamped within key validity' && c.status === 'fail')).toHaveLength(3);
+      expect(backdated.ok).toBe(false);
+      // and without a list kept, the same pack has nothing to contradict it (first seen): the cache is what protects
+      expect(run(oldList(), R, R, recent).trust.rollback.status).toBe('first_seen');
+    });
+
+    it('a list that changes a kept key (not an earlier state of it) is still a rollback', () => {
+      const seen = seenAfterRotation();
+      const moved = run([ent(R, { status: 'active', valid_from: '2025-06-01T00:00:00.000Z' })], R, R, twoDaysAgo, stampedTwoDaysAgo, { seen_dir: seen });
+      expect(moved.checks.find((c) => c.check === 'key list rollback')).toMatchObject({ status: 'fail', evidence: expect.stringMatching(/older or weaker list than the one seen .*: anchor-ed25519-[0-9a-f]{16} (is in the key list seen earlier but missing now|valid_from was)/) });
+      expect(moved.trust.rollback.list_used).toBe('given');
+      expect(moved.ok).toBe(false);
+    });
+
+    it('under --no-tsa the older pack fails: a retired key needs a verified TSA time', () => {
+      const seen = seenAfterRotation();
+      const r = run(oldList(), R, R, twoDaysAgo, stampedTwoDaysAgo, { seen_dir: seen, no_tsa: true });
+      expect(r.checks.find((c) => c.check === 'key list rollback')!.status).toBe('pass');
+      expect(claimStatus(r).receipts).toBe('fail');
+    });
   });
 });
 
@@ -859,13 +913,19 @@ describe('a revoked anchor service key: only a verified TSA time before compromi
     expect(claimStatus(r2).receipts).toBe('fail');
   });
 
-  it('rollback: a list that drops the revocation, or moves compromised_since later, is refused against the data-dir cache', () => {
+  it('rollback: a list that drops the revocation, or moves compromised_since later, does not escape it: the kept revocation applies', () => {
+    // The data dir has seen R revoked, compromised an hour ago. A pack signed by R since then cannot
+    // escape that by carrying an earlier state of the list (R active, or compromised later): the
+    // kept list is the stronger one and the receipts are judged under it.
     const seen = tempDir('kl-va-seen-');
-    const cs = iso(now + 3600e3);
+    const cs = iso(now - 3600e3);
     const first = run(cs, recent, undefined, { seen_dir: seen });
     expect(first.trust.rollback.status).toBe('first_seen');
+    expect(claimStatus(first).receipts).toBe('fail');
     const later = run(iso(now + 7200e3), recent, undefined, { seen_dir: seen });
-    expect(later.checks.find((c) => c.check === 'key list rollback')).toMatchObject({ status: 'fail', evidence: expect.stringMatching(/compromised_since was .* in the list seen earlier and is .* now/) });
+    expect(later.trust.rollback.list_used).toBe('seen');
+    expect(later.trust.key_chain.entries[0]).toMatchObject({ key_id: R.id, state: 'revoked', compromised_since: cs });
+    expect(stampCheck(later).every((c) => c.status === 'fail')).toBe(true);
     expect(later.ok).toBe(false);
     const d = copyPkg(f);
     resignReceipts(d, f, R, recent);
@@ -873,7 +933,15 @@ describe('a revoked anchor service key: only a verified TSA time before compromi
     setClaims(d, noOrdering);
     resign(d, f.dataDir);
     const unrevoked = verifyAudit(d, { ...trustOpts(f), genesis: `${R.fp}@${GENESIS_FROM}`, seen_dir: seen });
-    expect(unrevoked.checks.find((c) => c.check === 'key list rollback')).toMatchObject({ status: 'fail', evidence: expect.stringMatching(/was revoked in the list seen earlier and is active now/) });
+    expect(unrevoked.trust.rollback.list_used).toBe('seen');
+    expect(stampCheck(unrevoked).every((c) => c.status === 'fail')).toBe(true);
+    expect(claimStatus(unrevoked).receipts).toBe('fail');
+    // receipts stamped before the kept compromised_since still count under an earlier list (an honest older pack)
+    const seen2 = tempDir('kl-va-seen-');
+    run(iso(now + 3600e3), recent, undefined, { seen_dir: seen2 });
+    const honest = verifyAudit(d, { ...trustOpts(f), genesis: `${R.fp}@${GENESIS_FROM}`, seen_dir: seen2 });
+    expect(failedChecks(honest)).toEqual([]);
+    expect(honest.trust.rollback.list_used).toBe('seen');
   });
 });
 
@@ -1401,17 +1469,21 @@ describe('review round 2 (N1–N9): every R-case fails closed', () => {
   });
 
   describe('R3 / R7b (N4, N5, N7): the rollback cache', () => {
-    const revokedList = () => revokeKey([{ key_id: R.id, public_key_pem: R.pem, valid_from: GF, status: 'active' }], R, R, iso(now + 3600e3), iso(now + 7200e3));
+    // R revoked, compromised an hour ago: the receipts below (stamped a minute ago) fail under this list. The
+    // `rolled` pack carries the earlier state (R active); with this list kept it is judged under the revocation.
+    const revokedList = () => revokeKey([{ key_id: R.id, public_key_pem: R.pem, valid_from: GF, status: 'active' }], R, R, iso(now - 3600e3), iso(now + 7200e3));
     const activeList = () => [{ key_id: R.id, public_key_pem: R.pem, valid_from: GF, status: 'active' }];
     const rollbackCheck = (r: ReturnType<typeof verifyAudit>) => r.checks.find((c) => c.check === 'key list rollback');
-    it('R3: the pin spelled five ways is one cache slot: the rolled-back list fails under each', () => {
+    it('R3: the pin spelled five ways is one cache slot: the rolled-back list is judged under the kept revocation under each', () => {
       const revoked = keyPack(revokedList(), R, recent, null);
       const rolled = keyPack(activeList(), R, recent, null);
       for (const v of [pinR, `${R.fp.toUpperCase()}@${GF}`, `${R.fp}@2026-01-01T00:00:00Z`, `${R.fp}@2026-01-01T00:00:00.0Z`, `${R.fp.match(/../g)!.join(':')}@${GF}`]) {
         const seen = tempDir('kl-va-seen-');
-        expect(verifyAudit(revoked, { ...trustOpts(f), genesis: pinR, seen_dir: seen }).verdict).toBe(PARTIAL);
+        expect(verifyAudit(revoked, { ...trustOpts(f), genesis: pinR, seen_dir: seen }).trust.rollback).toMatchObject({ status: 'first_seen', recorded: true });
         const b = verifyAudit(rolled, { ...trustOpts(f), genesis: v, seen_dir: seen });
-        expect(rollbackCheck(b)).toMatchObject({ status: 'fail', evidence: expect.stringMatching(/was revoked in the list seen earlier and is active now/) });
+        expect(rollbackCheck(b)).toMatchObject({ status: 'pass', evidence: expect.stringMatching(/^an earlier state of the list seen /) });
+        expect(b.trust.rollback.list_used).toBe('seen');
+        expect(b.checks.filter((c) => c.check === 'stamped before compromise' && c.status === 'fail')).toHaveLength(3);
         expect(b.trust.genesis_valid_from).toBe(GF);
         expect(b.ok).toBe(false);
       }
@@ -1463,11 +1535,14 @@ describe('review round 2 (N1–N9): every R-case fails closed', () => {
       const rolled = keyPack(activeList(), R, recent, null);
       const dd = tempDir('kl-va-dd-');
       const base = ['--profile', 'legacy', '--key-fingerprint', f.fp, '--tsa-roots', f.rootsDir];
-      expect(cli(['verify-audit', revoked, ...base, '--genesis', pinR], { KRONICLE_LITE_DATA_DIR: dd }).code).toBe(2);
+      const first = cli(['verify-audit', revoked, ...base, '--genesis', pinR], { KRONICLE_LITE_DATA_DIR: dd });
+      expect(first.code).toBe(1); // R was compromised before these receipts were stamped
+      expect(first.out).toMatch(/^key list {7}first seen for this genesis; recorded in /m);
       const e = cli(['verify-audit', rolled, ...base], { KRONICLE_LITE_DATA_DIR: dd, KRONICLE_ANCHOR_GENESIS: `${R.fp}@2026-01-01T00:00:00Z` });
       expect(e.code).toBe(1);
       expect(e.out).toMatch(/^service keys {3}genesis [0-9a-f]{64}@2026-01-01T00:00:00\.000Z \(KRONICLE_ANCHOR_GENESIS\)/m);
-      expect(e.out).toMatch(/FAIL +key list rollback +anchor-keys\.json is an older or weaker list/);
+      expect(e.out).toMatch(/^key list {7}an earlier state of the list seen .*; receipts checked against that newer list$/m);
+      expect(e.out).toMatch(/FAIL +stamped before compromise/);
       const other = cli(['verify-audit', rolled, ...base, '--genesis', pinR]);
       expect(other.code).toBe(2);
       expect(other.out).toContain('RESULT: PARTIAL');
