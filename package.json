@@ -59,7 +59,7 @@
     "type": "git",
     "url": "git+https://github.com/isokron-ai/kronicle-lite.git"
   },
-  "homepage": "https://isokron.ai/open-source?utm_source=npm&utm_medium=package&utm_campaign=kronicle-lite",
+  "homepage": "https://isokron.ai/open-source/kronicle-lite?utm_source=npm&utm_medium=package&utm_campaign=kronicle-lite",
   "bugs": {
     "url": "https://github.com/isokron-ai/kronicle-lite/issues"
   },

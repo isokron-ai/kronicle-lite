@@ -80,7 +80,8 @@ function readPack(file) {
 async function checkRegistry(version, integrity) {
   if (!version || !integrity) fail('registry needs VERSION and INTEGRITY');
   let last = '';
-  for (let i = 0; i < 10; i++) {
+  // About 5 minutes: a slow registry must not read as a failed publish (a version cannot be republished).
+  for (let i = 0; i < 20; i++) {
     try {
       const out = execFileSync('npm', ['view', `${NAME}@${version}`, 'dist', '--json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
       const dist = JSON.parse(out);
@@ -91,11 +92,11 @@ async function checkRegistry(version, integrity) {
       }
       last = 'no provenance attestation yet';
     } catch (e) {
-      last = e.message.split('\n')[0];
+      last = (e.stderr?.toString().trim() || e.message).split('\n')[0];
     }
     await new Promise((r) => setTimeout(r, 15_000));
   }
-  fail(`${NAME}@${version}: ${last}`);
+  fail(`${NAME}@${version}: ${last}. The publish step succeeded; check by hand with \`npm view ${NAME}@${version} dist.integrity dist.attestations\` before doing anything else (do not re-run the publish).`);
 }
 
 const [cmd, ...args] = process.argv.slice(2);

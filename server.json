@@ -7,7 +7,7 @@
     "source": "github"
   },
   "version": "0.11.2",
-  "websiteUrl": "https://isokron.ai/open-source?utm_source=mcp-registry&utm_medium=package&utm_campaign=kronicle-lite",
+  "websiteUrl": "https://isokron.ai/open-source/kronicle-lite?utm_source=mcp-registry&utm_medium=package&utm_campaign=kronicle-lite",
   "packages": [
     {
       "registryType": "npm",

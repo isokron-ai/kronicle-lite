@@ -34,7 +34,8 @@ describe('release workflow (B11)', () => {
   it('runs on a vX.Y.Z tag, or by hand as a dry run that cannot publish', () => {
     expect(wf).toMatch(/push:\n\s+tags: \['v\*\.\*\.\*'\]/);
     // No inputs: a manual run has no switch that turns it into a publish.
-    expect(wf).toMatch(/^ {2}workflow_dispatch:\n\n/m);
+    expect(wf).toMatch(/^ {2}workflow_dispatch:\s*$/m);
+    expect(wf).not.toMatch(/^\s+inputs:/m);
     expect(wf).not.toMatch(/inputs\./);
     expect(job('publish')).toMatch(/^ {4}if: github\.event_name == 'push' && startsWith\(github\.ref, 'refs\/tags\/v'\)$/m);
   });
@@ -87,11 +88,23 @@ describe('release workflow (B11)', () => {
     expect(job('publish')).toContain('release-check.mjs registry "$PKG_VERSION" "$PKG_INTEGRITY"');
   });
 
-  it('does not interpolate step outputs into shell scripts', () => {
+  it('does not interpolate expressions into shell scripts (values reach run: through env:)', () => {
     for (const block of wf.split(/\n\s+- /)) {
       const run = /run: [|]?([\s\S]*)/.exec(block)?.[1] ?? '';
-      expect(run).not.toMatch(/\$\{\{\s*steps\./);
+      expect(run).not.toMatch(/\$\{\{/);
     }
+  });
+
+  it('uses no dependency cache and writes no token-reading .npmrc (no setup-node registry-url)', () => {
+    const code = wf.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
+    expect(code).not.toMatch(/^\s+cache:/m);
+    expect(code).not.toMatch(/registry-url/);
+  });
+
+  it('refuses a tag whose commit is not on main', () => {
+    const v = job('verify');
+    expect(v).toMatch(/fetch-depth: 0/);
+    expect(v).toContain('git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD');
   });
 
   it('package.json names the repository the provenance will name', () => {

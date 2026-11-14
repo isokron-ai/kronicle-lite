@@ -16,7 +16,7 @@
 #            tarball and hands it on as an artifact. Dependency install scripts run only here.
 #   publish  tag pushes only, behind the npm-publish environment: checks the artifact is the tarball
 #            verify packed, publishes that file with provenance, then checks the registry. It installs
-#            no dependencies, so no package code runs while the job holds the OIDC token.
+#            no project dependencies and runs no package scripts while it holds the OIDC token.
 #
 # Triggers:
 #   - push of a tag vX.Y.Z (the release itself; waits for the npm-publish environment's approval).
@@ -52,13 +52,20 @@ jobs:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
         with:
           persist-credentials: false
+          # Full history, for the "tag is on main" check.
+          fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
-          cache: npm
+          # No dependency cache in a release build: npm ci fetches from the registry.
       - name: Tag, package.json and CHANGELOG agree
         if: github.event_name == 'push'
         run: node scripts/release-check.mjs tag "$GITHUB_REF_NAME"
+      - name: The tagged commit is on main
+        if: github.event_name == 'push'
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD || { echo "$GITHUB_REF_NAME ($GITHUB_SHA) is not on main"; exit 1; }
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
@@ -102,7 +109,7 @@ jobs:
       # and the same token signs the provenance statement. No NPM_TOKEN / NODE_AUTH_TOKEN is used.
       id-token: write
     steps:
-      # Only for package.json, CHANGELOG.md and scripts/release-check.mjs (no dependencies, no install).
+      # Only for package.json, CHANGELOG.md and scripts/release-check.mjs (no project dependencies are installed).
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
         with:
           persist-credentials: false
@@ -110,7 +117,8 @@ jobs:
         with:
           # Trusted publishing needs Node 22.14.0 or later (checked below).
           node-version: 22
-          registry-url: 'https://registry.npmjs.org'
+          # No registry-url: it would write an .npmrc reading NODE_AUTH_TOKEN and export a placeholder
+          # token. npm publishes to registry.npmjs.org by default and authenticates with OIDC.
       # Trusted publishing needs npm 11.5.1 or later; Node 22 ships npm 10.
       - name: npm with trusted publishing support
         run: |
