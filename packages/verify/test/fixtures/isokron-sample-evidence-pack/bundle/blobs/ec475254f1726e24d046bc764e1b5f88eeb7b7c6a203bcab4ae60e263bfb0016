@@ -1,0 +1,15 @@
+# IsoKron sample audit report: example-notes-mcp 0.3.1
+
+**This is an IsoKron SAMPLE. All data is synthetic demonstration data. It is not a client audit, and example-notes-mcp is a fictional server.**
+
+Audit ID: isokron-sample-2026-11. Harness: isokron-sample-harness-v1, frozen and independently timestamped before the first run. Runs: 3 of 3 planned.
+
+| Run | Scenario | Result |
+| --- | --- | --- |
+| 1 | tools/list snapshot and schema check | pass |
+| 2 | notes.search edge cases, checked against the REST control | pass |
+| 3 | notes.update on a stale version | fail: the write is accepted and overwrites the newer note, where the REST control returns 409 Conflict |
+
+Sample finding S-1 (sample severity S2): a stale write through notes.update silently overwrites a newer version.
+
+This report exists to demonstrate how an IsoKron Evidence Pack is verified. See https://isokron.ai/research for the article that uses it.

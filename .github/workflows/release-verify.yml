@@ -1,0 +1,192 @@
+# Release the standalone Evidence Pack verifier (packages/verify) to npm with trusted publishing
+# (OIDC) and provenance, and attach the single-file build (verify.mjs) to a GitHub release with a
+# build-provenance attestation.
+#
+# The package name is packages/verify/package.json "name" (@isokron/verify unless the owner changes
+# it); the workflow reads it from there.
+#
+# NOTHING RUNS until the owner has set up the npm side and then set the repository variable
+# VERIFY_NPM_TRUSTED_PUBLISHER to "configured" (Settings → Secrets and variables → Actions →
+# Variables). Every job checks it. The exact npm and GitHub settings are in packages/verify/README.md
+# ("Publishing"):
+#   npm trusted publisher: organization isokron-ai, repository kronicle-lite,
+#                          workflow release-verify.yml, environment npm-publish-verify
+#
+# Triggers:
+#   - push of a tag verify/vX.Y.Z (X.Y.Z = packages/verify/package.json version); the main package's
+#     release.yml (tags vX.Y.Z) does not match it, and this workflow does not match those;
+#   - workflow_dispatch: a dry run by default (build, test, pack; nothing published or released).
+name: release-verify
+
+on:
+  push:
+    tags: ['verify/v*.*.*']
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run: build, test and pack only (no publish, no GitHub release)'
+        type: boolean
+        default: true
+
+# Nothing by default; each job asks for what it needs.
+permissions: {}
+
+concurrency:
+  group: release-verify-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # The verifier's gates on the exact commit being released: the differential test against
+  # kronicle-lite verify-audit, the shim tests, the package checks, lint and typecheck.
+  verify:
+    if: vars.VERIFY_NPM_TRUSTED_PUBLISHER == 'configured'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Tag and packages/verify/package.json agree
+        if: github.event_name == 'push'
+        run: node packages/verify/scripts/release-check.mjs tag "$GITHUB_REF_NAME"
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run verify:test
+
+  publish:
+    needs: verify
+    if: vars.VERIFY_NPM_TRUSTED_PUBLISHER == 'configured'
+    runs-on: ubuntu-latest
+    # The approval gate. Its name must match the environment set on the npm trusted publisher.
+    environment: npm-publish-verify
+    permissions:
+      contents: read
+      # Trusted publishing: npm exchanges this job's OIDC token for a one-time publish credential,
+      # and the same token signs the npm provenance statement and the verify.mjs attestation.
+      id-token: write
+      attestations: write
+    outputs:
+      version: ${{ steps.pack.outputs.version }}
+      integrity: ${{ steps.pack.outputs.integrity }}
+      sha256: ${{ steps.pack.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+      # Trusted publishing needs npm 11.5.1 or later; Node 22 ships npm 10.
+      - name: npm with trusted publishing support
+        run: |
+          npm install -g npm@11.6.2
+          node packages/verify/scripts/release-check.mjs npm "$(npm --version)"
+      - name: Tag and packages/verify/package.json agree
+        if: github.event_name == 'push'
+        run: node packages/verify/scripts/release-check.mjs tag "$GITHUB_REF_NAME"
+      # The repository's dev dependencies (esbuild) build the file; the package itself has none.
+      - run: npm ci
+      - name: Build verify.mjs
+        run: node packages/verify/build.mjs
+      - name: Pack and record the integrity
+        id: pack
+        working-directory: packages/verify
+        run: |
+          npm pack --json > pack.json
+          node scripts/release-check.mjs pack pack.json >> "$GITHUB_OUTPUT"
+      - name: Attest verify.mjs (build provenance)
+        if: github.event_name == 'push' || !inputs.dry_run
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: packages/verify/dist/verify.mjs
+      - name: Keep verify.mjs for the GitHub release
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verify-mjs
+          path: packages/verify/dist/verify.mjs
+          if-no-files-found: error
+      - name: Dry run (nothing is published)
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        working-directory: packages/verify
+        env:
+          PKG_FILE: ${{ steps.pack.outputs.file }}
+          PKG_NAME: ${{ steps.pack.outputs.name }}
+          PKG_VERSION: ${{ steps.pack.outputs.version }}
+          PKG_INTEGRITY: ${{ steps.pack.outputs.integrity }}
+          FILE_SHA256: ${{ steps.pack.outputs.sha256 }}
+        run: |
+          npm publish "$PKG_FILE" --dry-run --access public
+          {
+            echo "### $PKG_NAME $PKG_VERSION: dry run, not published"
+            echo ""
+            echo "- tarball: \`$PKG_FILE\` (integrity \`$PKG_INTEGRITY\`)"
+            echo "- verify.mjs sha256: \`$FILE_SHA256\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish with provenance (trusted publishing)
+        if: github.event_name == 'push' || !inputs.dry_run
+        working-directory: packages/verify
+        # No token: an NPM_TOKEN / NODE_AUTH_TOKEN here would bypass trusted publishing.
+        env:
+          PKG_FILE: ${{ steps.pack.outputs.file }}
+        run: npm publish "$PKG_FILE" --provenance --access public
+      - name: The registry serves what was packed, with provenance
+        if: github.event_name == 'push' || !inputs.dry_run
+        env:
+          PKG_NAME: ${{ steps.pack.outputs.name }}
+          PKG_VERSION: ${{ steps.pack.outputs.version }}
+          PKG_INTEGRITY: ${{ steps.pack.outputs.integrity }}
+          FILE_SHA256: ${{ steps.pack.outputs.sha256 }}
+        run: |
+          node packages/verify/scripts/release-check.mjs registry "$PKG_VERSION" "$PKG_INTEGRITY"
+          {
+            echo "### $PKG_NAME $PKG_VERSION published with provenance"
+            echo ""
+            echo "- npm integrity: \`$PKG_INTEGRITY\`"
+            echo "- verify.mjs sha256 (publish this on the verify page): \`$FILE_SHA256\`"
+            echo "- check: \`npm view $PKG_NAME@$PKG_VERSION dist.integrity dist.attestations\`, \`gh attestation verify verify.mjs --repo isokron-ai/kronicle-lite\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The single file, on the GitHub release for the tag: what a buyer downloads, reads and runs.
+  github-release:
+    needs: publish
+    if: vars.VERIFY_NPM_TRUSTED_PUBLISHER == 'configured' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: verify-mjs
+          path: dist
+      - name: Create the release with verify.mjs and its SHA-256
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.publish.outputs.version }}
+          FILE_SHA256: ${{ needs.publish.outputs.sha256 }}
+          INTEGRITY: ${{ needs.publish.outputs.integrity }}
+        run: |
+          cd dist
+          echo "$FILE_SHA256  verify.mjs" | sha256sum -c -
+          echo "$FILE_SHA256  verify.mjs" > verify.mjs.sha256
+          {
+            echo "Standalone Evidence Pack verifier $VERSION: one file, Node.js 22+, no dependencies."
+            echo ""
+            echo '```sh'
+            echo "curl -LO https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/verify.mjs"
+            echo "echo '$FILE_SHA256  verify.mjs' | shasum -a 256 -c -"
+            echo "gh attestation verify verify.mjs --repo $GITHUB_REPOSITORY   # optional: built by this workflow from this tag"
+            echo "node verify.mjs PACK --key-fingerprint <from your statement of work>"
+            echo '```'
+            echo ""
+            echo "- verify.mjs sha256: \`$FILE_SHA256\`"
+            echo "- npm: integrity \`$INTEGRITY\`"
+          } > notes.md
+          gh release create "$TAG" verify.mjs verify.mjs.sha256 --repo "$GITHUB_REPOSITORY" --title "verify $VERSION" --notes-file notes.md --verify-tag

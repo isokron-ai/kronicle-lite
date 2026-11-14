@@ -36,12 +36,14 @@
     "build": "tsup",
     "pretest": "npm run build",
     "test": "vitest run",
-    "lint": "eslint src test",
+    "lint": "eslint src test packages/verify/src packages/verify/test",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run build",
     "serve": "node dist/cli.js serve",
     "catalog:snapshot": "mcp-catalog-snap snapshot",
-    "catalog:check": "mcp-catalog-snap check"
+    "catalog:check": "mcp-catalog-snap check",
+    "verify:build": "node packages/verify/build.mjs",
+    "verify:test": "npm run build && node packages/verify/build.mjs && vitest run --config packages/verify/vitest.config.ts"
   },
   "keywords": [
     "mcp",
@@ -74,6 +76,7 @@
     "@types/node": "^22.19.0",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
+    "esbuild": "0.27.7",
     "eslint": "^9.39.0",
     "mcp-catalog-snap": "^0.1.0",
     "tsup": "^8.5.0",

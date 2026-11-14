@@ -33,10 +33,9 @@ import { text as readStreamText } from 'node:stream/consumers';
 import { basename, join } from 'node:path';
 
 import type { AnchorCallOptions } from './anchor/anchor.js';
-import type { Claim, VerifyAuditOptions } from './audit/verify-audit.js';
 import { DB_FILE, defaultDataDir } from './db/open.js';
 import { checkWriters, describeWriters } from './db/writers.js';
-import { REPEATABLE, validateFlags } from './cli-flags.js';
+import { BOOLEAN_FLAGS, list, num, parseArgs, str, validateFlags } from './cli-flags.js';
 import { isValidSlug, SLUG_RULE, type DocumentSource } from './docs/documents.js';
 import { describeProjection } from './docs/integrity.js';
 import type { LineageRef } from './docs/documents.js';
@@ -56,104 +55,6 @@ import { VERSION } from './version.js';
 // commands that use them: `orient` and the hooks stay cheap to start.
 const DEFAULT_HTTP_PORT = 7417; // = http.ts DEFAULT_HTTP_PORT (guarded by test)
 
-interface Args {
-  cmd: string;
-  positional: string[];
-  flags: Record<string, string | true>;
-  /** Single-value options given more than once. */
-  repeated: string[];
-}
-
-/** Flags that never take a value, so `put --from-instructions CLAUDE.md` keeps CLAUDE.md positional. */
-const BOOLEAN_FLAGS = new Set([
-  'http',
-  'json',
-  'push',
-  'remote',
-  'offline',
-  'from-instructions',
-  'stdin-hook',
-  'list',
-  'poll',
-  'once',
-  'bind-git',
-  'no-network',
-  'full',
-  'keep',
-  'all-projects',
-  'include-cosmetic',
-  'include-format-only',
-  'modern-only',
-  'core',
-  'redact-secrets',
-  'findings',
-  'allow-missing',
-  'allow-hardlinks',
-  'strict',
-  'allow-secrets',
-  'insecure-http',
-  'no-tsa',
-  'no-stamp-sums',
-  'tsa-at-gentime',
-  'allow-pending',
-  'strict-freeze',
-]);
-
-function parseArgs(argv: string[]): Args {
-  const [cmd = 'help', ...rest] = argv;
-  const positional: string[] = [];
-  // null prototype: option names are user input (`--__proto__` stays a key, and is reported as unknown)
-  const flags: Record<string, string | true> = Object.create(null) as Record<string, string | true>;
-  const repeated: string[] = [];
-  const set = (key: string, value: string | true) => {
-    if (Object.hasOwn(flags, key)) {
-      if (REPEATABLE.has(key) && typeof value === 'string' && typeof flags[key] === 'string') {
-        flags[key] = `${flags[key] as string},${value}`;
-        return;
-      }
-      if (!repeated.includes(key)) repeated.push(key);
-    }
-    flags[key] = value;
-  };
-  for (let i = 0; i < rest.length; i++) {
-    const a = rest[i]!;
-    if (a.startsWith('--')) {
-      const eq = a.indexOf('=');
-      if (eq > 2) {
-        set(a.slice(2, eq), a.slice(eq + 1));
-        continue;
-      }
-      const key = a.slice(2);
-      const next = rest[i + 1];
-      if (!BOOLEAN_FLAGS.has(key) && next !== undefined && !next.startsWith('--')) {
-        set(key, next);
-        i++;
-      } else {
-        set(key, true);
-      }
-    } else {
-      positional.push(a);
-    }
-  }
-  return { cmd, positional, flags, repeated };
-}
-
-function str(v: string | true | undefined): string | undefined {
-  return typeof v === 'string' ? v : undefined;
-}
-
-function list(v: string | true | undefined): string[] {
-  const s = str(v);
-  return s === undefined ? [] : s.split(',').map((x) => x.trim()).filter((x) => x.length > 0);
-}
-
-function num(v: string | true | undefined): number | undefined {
-  const s = str(v);
-  if (s === undefined) return undefined;
-  const n = Number(s);
-  if (!Number.isInteger(n)) throw new Error(`expected an integer, got ${s}`);
-  return n;
-}
 
 const HELP = `kronicle-lite ${VERSION} — hash-chained document store with signed receipts and an orient protocol
 
@@ -527,7 +428,7 @@ async function main(argv: string[]): Promise<number> {
       return r.ok ? 0 : 1;
     }
     case 'verify-audit':
-      return verifyAuditCommand(positional, flags, dataDir);
+      return (await import('./audit/verify-audit-cli.js')).verifyAuditCommand(positional, flags, dataDir);
     case 'audit': {
       const { runAuditCli } = await import('./audit/cli.js');
       return runAuditCli(positional, flags, dataDir, positional[0] === 'stamp' ? anchorOpts(flags) : {});
@@ -881,79 +782,6 @@ async function main(argv: string[]): Promise<number> {
       process.stderr.write(`unknown command: ${cmd}\n\n${HELP}`);
       return 2;
   }
-}
-
-/** `verify-audit PACKAGE`: exit 0 VERIFIED (or VERIFIED with the freeze anchored late), 1 a check failed (or a claim was not checked), 2 PARTIAL, usage or an unreadable package / trust input. */
-async function verifyAuditCommand(positional: string[], flags: Record<string, string | true>, dataDir: string): Promise<number> {
-  const usage =
-    'usage: kronicle-lite verify-audit PACK --key-fingerprint SHA256 | --key PEM-FILE [--profile audit|legacy] [--anchor-keys FILE] [--genesis SHA256@VALID_FROM] [--tsa-roots DIR] [--allowed-signers FILE] [--no-tsa] [--tsa-at-gentime] [--require CLAIM,…] [--skip-claim CLAIM,…] [--strict-freeze] [--max-bytes N] [--allow-hardlinks] [--json]';
-  const dir = positional[0];
-  if (!dir) {
-    process.stderr.write(`${usage}\n`);
-    return 2;
-  }
-  const { verifyAudit, renderVerifyAudit, VerifyAuditUsageError, CLAIMS, PROFILES, genesisFromCli, readTrustInput, refuseInsidePack } = await import('./audit/verify-audit.js');
-  const { pemFileNames, pemsFromText } = await import('./audit/package.js');
-  let opts: VerifyAuditOptions;
-  try {
-    const key = str(flags['key']);
-    const fingerprint = str(flags['key-fingerprint']);
-    const genesis = genesisFromCli(str(flags['genesis']));
-    const keys = str(flags['anchor-keys']);
-    // Trust inputs from inside the pack pin nothing: whoever made the pack wrote them. Each is opened
-    // once, checked by the identity of the open file and read from it (T8: no check-then-reopen race).
-    const keyPem = key ? readTrustInput(dir, key, '--key', 64 * 1024).toString('utf8') : undefined;
-    const keysDoc = keys ? readTrustInput(dir, keys, '--anchor-keys', 1024 * 1024).toString('utf8') : undefined;
-    const signersFile = str(flags['allowed-signers']);
-    const allowedSigners = signersFile ? readTrustInput(dir, signersFile, '--allowed-signers', 64 * 1024).toString('utf8') : undefined;
-    const profile = str(flags['profile']);
-    if (flags['profile'] !== undefined && (profile === undefined || !(PROFILES as readonly string[]).includes(profile))) throw new Error(`--profile must be one of ${PROFILES.join(', ')}`);
-    const roots = str(flags['tsa-roots']);
-    let tsaRoots: { name: string; pem: string }[] | undefined;
-    if (roots) {
-      refuseInsidePack(dir, roots, '--tsa-roots');
-      const { join } = await import('node:path');
-      tsaRoots = [];
-      for (const f of pemFileNames(roots)) tsaRoots.push(...pemsFromText(f, readTrustInput(dir, join(roots, f), '--tsa-roots', 1024 * 1024).toString('utf8')));
-      if (tsaRoots.length === 0) throw new Error(`${roots} holds no PEM certificates (*.pem, *.crt)`);
-    }
-    const maxBytes = num(flags['max-bytes']);
-    if (maxBytes !== undefined && maxBytes <= 0) throw new Error('--max-bytes must be a positive integer');
-    const require = list(flags['require']);
-    for (const c of require) if (!(CLAIMS as readonly string[]).includes(c)) throw new Error(`--require: unknown claim ${c} (one of ${CLAIMS.join(', ')})`);
-    const skip = list(flags['skip-claim']);
-    if (flags['no-tsa'] === true && (roots !== undefined || flags['tsa-at-gentime'] === true)) throw new Error('--no-tsa cannot be combined with --tsa-roots or --tsa-at-gentime');
-    opts = {
-      ...(profile !== undefined ? { profile: profile as 'audit' | 'legacy' } : {}),
-      ...(allowedSigners !== undefined ? { allowed_signers: allowedSigners } : {}),
-      ...(keyPem !== undefined ? { key_pem: keyPem } : {}),
-      ...(fingerprint ? { key_fingerprint: fingerprint } : {}),
-      ...genesis,
-      seen_dir: dataDir,
-      ...(keysDoc !== undefined ? { anchor_keys: JSON.parse(keysDoc) as unknown } : {}),
-      ...(tsaRoots ? { tsa_roots: tsaRoots } : {}),
-      ...(flags['no-tsa'] === true ? { no_tsa: true } : {}),
-      ...(flags['tsa-at-gentime'] === true ? { tsa_at: 'gentime' as const } : {}),
-      ...(maxBytes !== undefined ? { max_bytes: maxBytes } : {}),
-      ...(flags['allow-hardlinks'] === true ? { allow_hardlinks: true } : {}),
-      ...(require.length ? { require: require as Claim[] } : {}),
-      ...(skip.length ? { skip_claims: skip as Claim[] } : {}),
-      ...(flags['strict-freeze'] === true ? { late_anchor: 'strict' as const } : {}),
-    };
-  } catch (err) {
-    process.stderr.write(`error: ${(err as Error).message}\n${usage}\n`);
-    return 2;
-  }
-  let r;
-  try {
-    r = verifyAudit(dir, opts);
-  } catch (err) {
-    if (!(err instanceof VerifyAuditUsageError)) throw err;
-    process.stderr.write(`error: ${err.message}\n`);
-    return 2;
-  }
-  process.stdout.write(flags['json'] === true ? JSON.stringify(r, null, 2) + '\n' : renderVerifyAudit(r));
-  return r.verdict === 'verified' || r.verdict === 'verified_late_anchor' ? 0 : r.verdict === 'partial' ? 2 : 1;
 }
 
 /**

@@ -1,0 +1,19 @@
+IsoKron Evidence Pack: isokron-sample-2026-11
+Tamper-evident, independently timestamped audit evidence.
+
+Audit ID              isokron-sample-2026-11
+Manifest SHA-256      45905afc920359eaac8516bd57f0a056b6d216267d08b80110d804df29000587
+Signing key           ed25519-d70b311bf6e25c0c (compare its SPKI SHA-256 with the fingerprint in your report or SOW)
+Final anchored root   e5f727cfe1462aa4a7c7dd3f3d82c0c87eaf5c221450a0ac398560f33e71a863
+  covering            seq 1..5 (5 audit event(s), 5 artifact(s))
+  anchor              03-report-issued, 01a1c0a2-a5ce-76a3-a4ee-1cb0b582e316, received 2026-11-09T14:07:27.182Z
+  timestamps          2026-11-09T14:07:29.000Z (digicert), 2026-11-09T14:07:28.000Z (sectigo)
+Milestones
+  01-harness-frozen          seq 1..1  digicert 2026-11-09T14:07:20.000Z, sectigo 2026-11-09T14:07:19.000Z
+  02-run-completed           seq 1..4  digicert 2026-11-09T14:07:24.000Z, sectigo 2026-11-09T14:07:24.000Z
+  03-report-issued           seq 1..5  digicert 2026-11-09T14:07:29.000Z, sectigo 2026-11-09T14:07:28.000Z
+Claims                integrity, chain, receipts, independent_timestamps, harness_frozen_before_runs, run_sequence
+
+Verify:  npx -y kronicle-lite@0.10.1 verify-audit <this directory> --key-fingerprint <auditor key fingerprint from your report or SOW>
+         (this file does not carry the fingerprint: take it from the report or SOW)
+Raw commands without kronicle-lite: VERIFY.md

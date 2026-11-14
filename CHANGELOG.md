@@ -29,6 +29,30 @@ uses semantic versioning once past 0.x.
   cover the honest older pack, a pack stamped after the rotation, a back-dated
   `received_at`, a changed key, and `--no-tsa`.
 
+### Added — a standalone verifier: `packages/verify` (unreleased)
+
+- **`verify.mjs`**: `kronicle-lite verify-audit` built into one readable ES
+  module from the same source files, with Node built-ins only (no
+  dependencies, no native code, no network module). `zod`, `canonicalize` and
+  `@noble/hashes` are replaced in that build by small built-in-only modules
+  (`packages/verify/src/shims/`) checked against the packages on a corpus of
+  valid and mutated inputs. Same report, `--json` and exit codes, proven by a
+  differential test (both tools on `/1`, `/2`, `/3` and late-anchored `/3`
+  packs, the published sample pack, tampers, usage errors, the rollback cache
+  and the rotation case). The build is deterministic.
+- Package `@isokron/verify` (name set once in `packages/verify/package.json`),
+  0.1.0, not published. `.github/workflows/release-verify.yml` publishes it on
+  a `verify/vX.Y.Z` tag with npm trusted publishing and provenance, attests
+  `verify.mjs` and attaches it to the GitHub release, and runs only after the
+  owner sets the repository variable `VERIFY_NPM_TRUSTED_PUBLISHER`
+  (`packages/verify/README.md`, "Publishing").
+- Refactor for it, no behaviour change: the verify-audit command line moved
+  from `src/cli.ts` to `src/audit/verify-audit-cli.ts`, argv parsing
+  (`parseArgs`, `BOOLEAN_FLAGS`, `str`, `list`, `num`) to `src/cli-flags.ts`,
+  and `pemFileNames` / `pemsFromText` to `src/audit/pem-files.ts` (still
+  exported from `src/audit/package.ts`). `esbuild` is now a direct, exact dev
+  dependency (it was tsup's).
+
 ### Added — verify-audit accepts a late-anchored freeze, and says so (A8)
 
 - **Late-anchor mode (default).** A pack whose freeze was made with the

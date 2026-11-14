@@ -397,6 +397,11 @@ npx -y kronicle-lite@0.11.2 verify-audit pack/ --key-fingerprint <SHA-256 of the
 (Packs made by 0.10.x fail the default audit profile; check them with `--profile legacy`, which
 applies the 0.10.0 rules and reports `PARTIAL`, or with `npx -y kronicle-lite@0.10.2 verify-audit`.)
 
+The same check without installing kronicle-lite: **[`packages/verify`](packages/verify/README.md)**
+builds `verify-audit` into one readable file, `verify.mjs` (Node.js 22+, Node built-ins only, no
+dependencies), with the same report and exit codes, proven by a differential test on every pack
+format. Unreleased; its package name and first release are the owner's call.
+
 ```sh
 # auditor: record harness_frozen with the plan of run IDs, then
 kronicle-lite checkpoint --push              # anchor [1..head] (audit stamp also does this when it is not done yet)

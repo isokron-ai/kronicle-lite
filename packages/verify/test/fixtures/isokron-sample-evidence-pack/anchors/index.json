@@ -1,0 +1,65 @@
+[
+ {
+  "file": "01-harness-frozen.receipt.json",
+  "anchor_id": "01a1c0a2-8192-7f52-b0ac-e43c4d3a6e58",
+  "from_seq": 1,
+  "to_seq": 1,
+  "root": "9ceac115bbc69da83c6b844e5c24651dd147d0e28dd63cfe7774732eeee1b746",
+  "received_at": "2026-11-09T14:07:17.906Z",
+  "receipt_sha256": "95c3b7bc5171184cefbe39607ece34534ab3a6e3dd3cb4f9c56f8eec9ffea9c8",
+  "timestamps": [
+   {
+    "file": "01-harness-frozen.digicert.tsr",
+    "tsa": "digicert",
+    "gen_time": "2026-11-09T14:07:20.000Z"
+   },
+   {
+    "file": "01-harness-frozen.sectigo.tsr",
+    "tsa": "sectigo",
+    "gen_time": "2026-11-09T14:07:19.000Z"
+   }
+  ]
+ },
+ {
+  "file": "02-run-completed.receipt.json",
+  "anchor_id": "01a1c0a2-94d9-7e9e-98e6-7edc7c3ec047",
+  "from_seq": 1,
+  "to_seq": 4,
+  "root": "4f5ecec2eef4e89c2ccf4a997b89e1e63e5141587db940d9a0f7f2b8f715ac06",
+  "received_at": "2026-11-09T14:07:22.841Z",
+  "receipt_sha256": "dfc42709cc6871ed81e4347ba153dcd1f7938f88fa446f752d0392b3a574a4c8",
+  "timestamps": [
+   {
+    "file": "02-run-completed.digicert.tsr",
+    "tsa": "digicert",
+    "gen_time": "2026-11-09T14:07:24.000Z"
+   },
+   {
+    "file": "02-run-completed.sectigo.tsr",
+    "tsa": "sectigo",
+    "gen_time": "2026-11-09T14:07:24.000Z"
+   }
+  ]
+ },
+ {
+  "file": "03-report-issued.receipt.json",
+  "anchor_id": "01a1c0a2-a5ce-76a3-a4ee-1cb0b582e316",
+  "from_seq": 1,
+  "to_seq": 5,
+  "root": "e5f727cfe1462aa4a7c7dd3f3d82c0c87eaf5c221450a0ac398560f33e71a863",
+  "received_at": "2026-11-09T14:07:27.182Z",
+  "receipt_sha256": "afe8de451e0c0b88226488b8214e7f21251956a043f561a4b1cfb21a5c124bb8",
+  "timestamps": [
+   {
+    "file": "03-report-issued.digicert.tsr",
+    "tsa": "digicert",
+    "gen_time": "2026-11-09T14:07:29.000Z"
+   },
+   {
+    "file": "03-report-issued.sectigo.tsr",
+    "tsa": "sectigo",
+    "gen_time": "2026-11-09T14:07:28.000Z"
+   }
+  ]
+ }
+]

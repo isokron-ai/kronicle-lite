@@ -1,0 +1,9 @@
+IsoKron SAMPLE harness manifest. Synthetic demonstration data, not a client audit.
+harness_id: isokron-sample-harness-v1
+target: example-notes-mcp 0.3.1 (fictional MCP server, test tenant notes.example.com)
+scenarios:
+  s1  tools/list snapshot and schema check
+  s2  notes.search with an empty query, a 3-term query and a 2,000-character query
+  s3  notes.update on a stale version (expects a conflict, not a silent overwrite)
+runs_planned: 3
+control: the same operations through the fictional REST API at api.notes.example.com

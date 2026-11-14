@@ -1,0 +1,42 @@
+{
+  "name": "@isokron/verify",
+  "version": "0.1.0",
+  "description": "Verify an IsoKron Evidence Pack offline: one file, Node.js built-ins only, the same checks and exit codes as kronicle-lite verify-audit.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "isokron-verify": "dist/verify.mjs"
+  },
+  "files": [
+    "dist/verify.mjs",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "isokron",
+    "evidence-pack",
+    "audit",
+    "verify",
+    "rfc3161",
+    "ed25519",
+    "hash-chain"
+  ],
+  "author": "IsoKron (https://isokron.ai)",
+  "homepage": "https://isokron.ai/verify",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/isokron-ai/kronicle-lite.git",
+    "directory": "packages/verify"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "node build.mjs"
+  }
+}

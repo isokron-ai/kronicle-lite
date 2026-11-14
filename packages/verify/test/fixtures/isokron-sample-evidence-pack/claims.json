@@ -1,0 +1,21 @@
+{
+ "format": "isokron-evidence-pack-claims/1",
+ "audit_id": "isokron-sample-2026-11",
+ "claims": [
+  "integrity",
+  "chain",
+  "receipts",
+  "independent_timestamps",
+  "harness_frozen_before_runs",
+  "run_sequence"
+ ],
+ "runs": {
+  "count": 3,
+  "seqs": [
+   1,
+   2,
+   3
+  ],
+  "interruptions": []
+ }
+}
