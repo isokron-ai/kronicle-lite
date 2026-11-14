@@ -11,6 +11,8 @@
  *           unreadable pack / trust input
  */
 
+import './node-version.js';
+
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -94,18 +96,12 @@ process.stdout.on('error', (err: NodeJS.ErrnoException) => {
   throw err;
 });
 
-const [major] = process.versions.node.split('.').map(Number);
-if ((major ?? 0) < 22) {
-  process.stderr.write(`error: ${__VERIFY_NAME__} needs Node.js 22 or later (this is ${process.version})\n`);
-  process.exitCode = 2;
-} else {
-  main(process.argv.slice(2)).then(
-    (code) => {
-      process.exitCode = code;
-    },
-    (err: unknown) => {
-      process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`);
-      process.exitCode = 1;
-    },
-  );
-}
+main(process.argv.slice(2)).then(
+  (code) => {
+    process.exitCode = code;
+  },
+  (err: unknown) => {
+    process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.exitCode = 1;
+  },
+);

@@ -48,10 +48,12 @@ const REPLACED = {
 
 /** The commit the build is from (GITHUB_SHA in CI), marked when the tree has changes. */
 function sourceCommit() {
-  if (process.env.GITHUB_SHA) return process.env.GITHUB_SHA;
+  if (process.env.GITHUB_ACTIONS === 'true' && process.env.GITHUB_SHA) return process.env.GITHUB_SHA;
   try {
     const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim();
-    const dirty = execFileSync('git', ['status', '--porcelain', '--', 'src', 'packages/verify'], { cwd: repo, encoding: 'utf8' }).trim() !== '';
+    // Everything that decides the bytes: the source, the build config, and which esbuild is installed.
+    const inputs = ['src', 'packages/verify', 'tsconfig.json', 'package.json', 'package-lock.json'];
+    const dirty = execFileSync('git', ['status', '--porcelain', '--', ...inputs], { cwd: repo, encoding: 'utf8' }).trim() !== '';
     return dirty ? `${sha}+local-changes` : sha;
   } catch {
     return 'unknown';
@@ -81,6 +83,8 @@ const builtinsOnly = {
 export async function bundle({ entry = join(here, 'src', 'cli.ts'), source = 'unknown' } = {}) {
   const result = await build({
     entryPoints: [entry],
+    // Paths in the metafile and the `// src/…` comments are relative to the repository, wherever it runs from.
+    absWorkingDir: repo,
     bundle: true,
     platform: 'node',
     format: 'esm',

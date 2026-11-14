@@ -1,11 +1,15 @@
 /**
- * Differential: `node verify.mjs` and `kronicle-lite verify-audit` (dist/cli.js) on the same packs
+ * Differential (parity): `node verify.mjs` and `kronicle-lite verify-audit` (dist/cli.js) on the same packs
  * with the same arguments and the same data dir give the same stdout (text and --json), the same
  * exit code, the same stderr (up to the program name) and leave the same rollback cache.
  *
  * Packs: one of each bundle format (/1, /2, /3, /3 with a late-anchored freeze) made by kronicle-lite
  * itself, the published sample pack (packages/verify/test/fixtures, real Sectigo and DigiCert tokens),
  * a tampered copy of each, the usage errors, the rollback cache, and the key-rotation case.
+ *
+ * Both run the same src/audit/verify-audit.ts, so this proves that the standalone build (its CLI
+ * wrapper and the shims it is built with) changes nothing; whether verify-audit's verdicts are right
+ * is the job of test/verify-audit*.test.ts.
  *
  * KL_VERIFY_EXTRA_PACKS=<file.json> adds packs from disk ([{ "name", "dir", "args": [...] }]), for
  * real-world packs that cannot be committed.
@@ -23,7 +27,9 @@ import { startAnchorStub, type AnchorBackend } from '../../../test/helpers/ancho
 import { cleanEnv, tempDir } from '../../../test/helpers/fs.js';
 import { makeTsa, serveTsa, type TestTsa } from '../../../test/helpers/tsa.js';
 import { sign as edSign } from 'node:crypto';
-import { KRONICLE_CLI, PKG_DIR, VERIFY } from './helpers.js';
+import { KRONICLE_CLI, PKG_DIR, REPO, VERIFY } from './helpers.js';
+
+const listTs = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? listTs(join(dir, e.name)) : e.name.endsWith('.ts') ? [join(dir, e.name)] : []));
 import { buildPack, newServiceKey, resignPack, type Format, type Pack, type ServiceKey } from './packs.js';
 
 const SAMPLE = join(PKG_DIR, 'test', 'fixtures', 'isokron-sample-evidence-pack');
@@ -130,7 +136,10 @@ let servers: { url: string; stop(): Promise<void> }[];
 const packs = new Map<Format, Pack>();
 
 beforeAll(async () => {
+  // The reference must be built from the source under test (npm run verify:test builds it first).
   if (!existsSync(KRONICLE_CLI)) throw new Error(`${KRONICLE_CLI} is missing: run npm run build first`);
+  const newestSrc = Math.max(...listTs(join(REPO, 'src')).map((f) => statSync(f).mtimeMs));
+  if (statSync(KRONICLE_CLI).mtimeMs < newestSrc) throw new Error(`${KRONICLE_CLI} is older than src/: run npm run build first (or npm run verify:test)`);
   // verify.mjs from this tree (the build is deterministic for a given tree)
   const build = await exec(join(PKG_DIR, 'build.mjs'), [], cleanEnv());
   if (build.code !== 0) throw new Error(`build.mjs failed: ${build.err}`);
@@ -195,17 +204,19 @@ describe('the published sample pack (format /2, real Sectigo and DigiCert tokens
   it('as published, and tampered', async () => {
     const audit = await expectSame('sample', 'default (audit profile)', [SAMPLE, '--key-fingerprint', SAMPLE_FP]);
     expect(audit.code).toBe(1); // a /2 pack does not meet the 0.11 audit profile
-    const legacy = await expectSame('sample', '--profile legacy', [SAMPLE, '--key-fingerprint', SAMPLE_FP, '--profile', 'legacy']);
+    await expectSame('sample', '--profile legacy', [SAMPLE, '--key-fingerprint', SAMPLE_FP, '--profile', 'legacy']);
+    // The expected verdict is asserted with the TSA certificates checked at the token time, so it
+    // does not change when the real Sectigo / DigiCert certificates expire (the comparison above does not care).
+    const legacy = await expectSame('sample', '--profile legacy --tsa-at-gentime', [SAMPLE, '--key-fingerprint', SAMPLE_FP, '--profile', 'legacy', '--tsa-at-gentime']);
     expect(legacy.code).toBe(2);
     expect(legacy.out).toMatch(/^RESULT: PARTIAL {2}integrity, chain, receipts, independent_timestamps, harness_frozen_before_runs, run_sequence$/m);
     await expectSame('sample', '--json', [SAMPLE, '--key-fingerprint', SAMPLE_FP, '--json']);
     await expectSame('sample', '--profile legacy --json', [SAMPLE, '--key-fingerprint', SAMPLE_FP, '--profile', 'legacy', '--json']);
-    await expectSame('sample', '--profile legacy --tsa-at-gentime', [SAMPLE, '--key-fingerprint', SAMPLE_FP, '--profile', 'legacy', '--tsa-at-gentime']);
     await expectSame('sample', 'wrong --key-fingerprint', [SAMPLE, '--key-fingerprint', 'ab'.repeat(32), '--profile', 'legacy']);
     for (const [name, tamper] of TAMPERS) {
       const d = copyOf(SAMPLE);
       tamper(d);
-      const r = await expectSame('sample', `tamper: ${name}`, [d, '--key-fingerprint', SAMPLE_FP, '--profile', 'legacy']);
+      const r = await expectSame('sample', `tamper: ${name}`, [d, '--key-fingerprint', SAMPLE_FP, '--profile', 'legacy', '--tsa-at-gentime']);
       expect(r.code, name).toBe(1);
     }
   });

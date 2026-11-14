@@ -1053,6 +1053,8 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     let keyList: ServiceKeyEntry[] | null = listDoc === undefined ? null : keyListOf(listDoc);
     if (listDoc !== undefined && keyList === null) add('keys', 'receipts', null, 'anchor key list', false, `${opts.anchor_keys !== undefined ? '--anchor-keys' : 'anchor-keys.json'} is not a key list ({keys: [{key_id, public_key_pem, …}]})`);
     let listOk = false;
+    /** When the kept list is used: the keys the pack's own list names (a receipt must be signed by one of them). */
+    let givenKeyIds: Set<string> | null = null;
     if (keyList) {
       // The genesis key's valid_from comes from the pin, never from the list (checkKeyChain applies it).
       const kc = checkKeyChain(keyList, pin);
@@ -1076,6 +1078,7 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
         const kept = checkRollback(keyList);
         if (kept) {
           // The pack's list is an earlier state of the kept one: the receipts are checked against the kept list.
+          givenKeyIds = new Set(keyList.map((k) => k.key_id));
           keyList = kept;
           result.trust.key_chain = keyChainReport(checkKeyChain(kept, pin), kept);
           result.trust.rollback.list_used = 'seen';
@@ -1184,9 +1187,14 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
       const sk = listOk ? checkServiceKey(keyList!, r.service_key_id, r.received_at, pin, { revoked: 'tsa', nonHead: 'tsa' }) : null;
       const entry: ServiceKeyEntry | null = sk?.ok ? sk.entry : null;
       const compromisedSince = sk?.ok ? (sk.revoked?.compromised_since ?? null) : null;
+      // Checked against the kept list, a receipt must still be signed by a key the pack's own list names:
+      // a pack made before a rotation cannot hold a receipt of a key that did not exist yet.
+      const notInPack = givenKeyIds !== null && !givenKeyIds.has(r.service_key_id);
       const skProblem = sk === null
         ? 'the anchor key list does not chain to the genesis pin'
-        : !sk.ok
+        : notInPack
+          ? `${r.service_key_id} is not in the pack's anchor-keys.json, which is an earlier state of the list kept in the data dir`
+          : !sk.ok
           ? sk.detail
           : verifyAnchorReceiptSignature(r, sk.entry.public_key_pem)
             ? null
@@ -2080,7 +2088,8 @@ export function renderVerifyAudit(r: VerifyAuditResult): string {
   L.push(`audit          ${r.audit_id ?? '?'}${r.bundle_format ? `  (${r.bundle_format})` : ''}`);
   L.push(`profile        ${r.profile === 'audit' ? 'audit (every claim checked; claims.json can add claims, not remove them)' : 'legacy (0.10.0 rules: claims.json picks the claims; PARTIAL at best)'}`);
   L.push(`auditor key    ${r.auditor.key_id ?? '?'}  spki sha256 ${r.auditor.spki_sha256 ?? '?'}  (${r.auditor.source === 'fingerprint' ? 'pinned by --key-fingerprint' : r.auditor.source === 'key_file' ? 'pinned by --key' : 'NOT pinned'})`);
-  L.push(`service keys   genesis ${r.trust.genesis_sha256}@${r.trust.genesis_valid_from} (${r.trust.genesis_source === 'compiled' ? 'compiled pin' : r.trust.genesis_source === 'env' ? 'KRONICLE_ANCHOR_GENESIS' : '--genesis'}); key list from ${r.trust.key_list === 'pack' ? 'anchor-keys.json' : '--anchor-keys'}: ${r.trust.key_chain.status}`);
+  const givenList = r.trust.key_list === 'pack' ? 'anchor-keys.json' : '--anchor-keys';
+  L.push(`service keys   genesis ${r.trust.genesis_sha256}@${r.trust.genesis_valid_from} (${r.trust.genesis_source === 'compiled' ? 'compiled pin' : r.trust.genesis_source === 'env' ? 'KRONICLE_ANCHOR_GENESIS' : '--genesis'}); ${r.trust.rollback.list_used === 'seen' ? `key list kept in the data dir (${givenList} is an earlier state of it)` : `key list from ${givenList}`}: ${r.trust.key_chain.status}`);
   const rb = r.trust.rollback;
   if (rb.status === 'first_seen') L.push(`key list       first seen for this genesis; ${rb.recorded ? `recorded in ${rb.path}` : `could not be recorded in ${rb.path}`} (later lists are checked against it)`);
   else if (rb.status === 'off') L.push('key list       rollback check off (library option rollback: off)');

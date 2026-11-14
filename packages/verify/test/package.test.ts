@@ -93,7 +93,7 @@ describe('verify.mjs', () => {
     }
     expect(expected.startsWith(home)).toBe(true);
     const sample = join(PKG_DIR, 'test', 'fixtures', 'isokron-sample-evidence-pack');
-    const r = spawnSync(process.execPath, [VERIFY, sample, '--key-fingerprint', 'd70b311bf6e25c0c20ec3b4645f806f28b8712e212142720eeb51d2c6fa5072b', '--profile', 'legacy'], { encoding: 'utf8', env: cleanEnv({ HOME: home, USERPROFILE: home }) });
+    const r = spawnSync(process.execPath, [VERIFY, sample, '--key-fingerprint', 'd70b311bf6e25c0c20ec3b4645f806f28b8712e212142720eeb51d2c6fa5072b', '--profile', 'legacy', '--tsa-at-gentime'], { encoding: 'utf8', env: cleanEnv({ HOME: home, USERPROFILE: home }) });
     expect(r.status, r.stdout + r.stderr).toBe(2);
     expect(r.stdout).toContain(`recorded in ${expected}`);
   });
@@ -109,15 +109,17 @@ describe('release-verify.yml', () => {
     return next < 0 ? rest : rest.slice(0, next + 1);
   }
 
-  it('runs on a verify/vX.Y.Z tag or by hand (a dry run by default), never on kronicle-lite tags', () => {
+  it('runs on a verify/vX.Y.Z tag, or by hand as a dry run (publish and release only for a verify/ tag push); never on kronicle-lite tags', () => {
     expect(wf).toMatch(/push:\n\s+tags: \['verify\/v\*\.\*\.\*'\]/);
-    expect(wf).toMatch(/workflow_dispatch:[\s\S]*dry_run:[\s\S]*default: true/);
+    expect(wf).toMatch(/^ {2}workflow_dispatch:$/m);
+    expect(wf).not.toMatch(/dry_run/);
+    for (const j of ['publish', 'github-release']) expect(job(j), j).toMatch(/^ {4}if: .*github\.event_name == 'push' && startsWith\(github\.ref, 'refs\/tags\/verify\/v'\)$/m);
     const main = readFileSync(join(REPO, '.github', 'workflows', 'release.yml'), 'utf8');
     expect(main).toMatch(/tags: \['v\*\.\*\.\*'\]/); // a GitHub tag glob's * does not match '/', so verify/v1.2.3 is not v*.*.*
   });
 
   it('does nothing until the owner sets VERIFY_NPM_TRUSTED_PUBLISHER=configured', () => {
-    for (const j of ['verify', 'publish', 'github-release']) expect(job(j), j).toMatch(/^ {4}if: vars\.VERIFY_NPM_TRUSTED_PUBLISHER == 'configured'/m);
+    for (const j of ['build', 'publish', 'github-release']) expect(job(j), j).toMatch(/^ {4}if: vars\.VERIFY_NPM_TRUSTED_PUBLISHER == 'configured'/m);
   });
 
   it('grants nothing by default; id-token only to the publish job; publishes from npm-publish-verify with --provenance', () => {
@@ -126,9 +128,12 @@ describe('release-verify.yml', () => {
     const p = job('publish');
     expect(p).toContain('id-token: write');
     expect(p).toMatch(/^ {4}environment: npm-publish-verify$/m);
-    expect(p).toMatch(/^ {4}needs: verify$/m);
-    expect(p).toMatch(/npm publish "\$PKG_FILE" --provenance --access public/);
-    expect(job('verify')).not.toContain('id-token');
+    expect(p).toMatch(/^ {4}needs: build$/m);
+    expect(p).toMatch(/npm publish "release\/\$PKG_FILE" --provenance --access public/);
+    // no package code runs while the job holds the OIDC token: no install, no build, no test
+    expect(p).not.toMatch(/npm (ci|install(?! -g --ignore-scripts npm@)|run|test)|build\.mjs/);
+    expect(p).toMatch(/sha256sum -c -/);
+    expect(job('build')).not.toContain('id-token');
     expect(job('github-release')).not.toContain('id-token');
   });
 

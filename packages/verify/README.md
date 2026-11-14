@@ -110,20 +110,28 @@ Now, when the kept list is a lawful later state of the pack's list (the same key
 a later rotation, retirement or revocation), that is not a rollback. The receipts are checked
 against the kept list, which is the stronger of the two. A key retired since then needs a verified
 TSA time inside its window, and a key revoked since then needs one before `compromised_since`
-minus 5 minutes. A list that changes a kept key or forks the chain is still a rollback.
-`trust.rollback.list_used` (`given` or `seen`) and the `key list` line of the report say which list
-was used. The fix is in the shared source, so `kronicle-lite verify-audit` behaves the same way.
+minus 5 minutes. A list that changes a kept key or forks the chain is still a rollback. Each receipt must still be
+signed by a key the pack's own list names. `trust.rollback.list_used` (`given` or `seen`) and the
+`service keys` and `key list` lines of the report say which list was used.
 
-## How "the same results" is proven
+One consequence: on a machine that has seen the newer list, such an older pack fails under
+`--no-tsa`. Its signing key is retired in the kept list, and a retired key's receipt counts only with
+a verified TSA time. On a machine that has seen no newer list, the same pack passes under `--no-tsa`.
+
+The fix is in the shared source, so `kronicle-lite verify-audit` behaves the same way.
+
+## How "the same results" is shown
 
 `npm run verify:test` (from the repository root, after `npm ci`) runs:
 
-- **`test/differential.test.ts`**: `node verify.mjs` and `kronicle-lite verify-audit` on the same
+- **`test/differential.test.ts`** (parity): `node verify.mjs` and `kronicle-lite verify-audit` on the same
   packs with the same arguments and the same data dir. stdout (text and `--json`), stderr (up to the
   program name), the exit code and the rollback cache must all be identical. The packs are one of each
   format (`/1`, `/2`, `/3`, `/3` with a late-anchored freeze) made by kronicle-lite, the published
   sample pack, eight tampers of each, the usage errors, the rollback cache, and the rotation case.
-  `KL_VERIFY_EXTRA_PACKS=list.json` adds packs from disk.
+  `KL_VERIFY_EXTRA_PACKS=list.json` adds packs from disk. Both tools run the same `verify-audit.ts`,
+  so this shows the standalone build changes nothing. Whether verify-audit's verdicts are right is
+  tested by kronicle-lite's own suite (`test/verify-audit*.test.ts`).
 - **`test/shims.test.ts`**: the three replaced modules (zod, canonicalize and @noble/hashes, all in
   `src/shims/`) give the same results as the packages on a corpus of valid and mutated inputs: every
   payload schema, `claims.json`, canonical JSON and SHA-256.
@@ -133,7 +141,8 @@ was used. The fix is in the shared source, so `kronicle-lite verify-audit` behav
 ## Publishing (owner setup, once)
 
 Nothing publishes until all of this is done. `.github/workflows/release-verify.yml` does not run
-before step 5.
+before step 5. Once it does run, Actions → release-verify → Run workflow is a dry run: it builds,
+tests and packs, and publishes nothing. Only a pushed `verify/vX.Y.Z` tag publishes.
 
 1. **npm scope.** The `@isokron` organization on npmjs.com must exist and own the name in
    `package.json` (`@isokron/verify`).
@@ -144,8 +153,9 @@ before step 5.
    - Workflow filename: `release-verify.yml`
    - Environment name: `npm-publish-verify`
 
-   If npmjs.com only offers this for a package that already exists, see "First publish" below. A
-   new trusted publisher has to complete its first publish within 2 days, so set it up right before
+   If npmjs.com only offers this for a package that already exists, see "First publish" below.
+   npm's trusted-publisher page (read 14 Nov 2026) also said a new configuration must complete its
+   first publish within 2 days. Check that against the npm UI, and set the publisher up right before
    the first tag.
 3. **GitHub environment.** Repository → Settings → Environments → `npm-publish-verify`: required
    reviewer = the owner; deployment branches and tags = selected, tag rule `verify/v*.*.*`; no
@@ -164,9 +174,14 @@ and then do steps 2 to 6. Every later version then comes only from the workflow.
 
 **Each release.** Bump `version` in `packages/verify/package.json` in a PR and merge it with CI green.
 Then `git tag -s verify/vX.Y.Z && git push origin verify/vX.Y.Z` and approve the
-`npm-publish-verify` deployment. The workflow runs the verifier's tests, packs the package, attests
-`verify.mjs`, publishes with `--provenance`, checks that the registry serves the packed integrity
-with a provenance attestation, and creates the GitHub release with `verify.mjs` and its SHA-256.
+`npm-publish-verify` deployment. The workflow works in three jobs:
+
+- The `build` job holds no token. It installs, runs the verifier's tests, builds `verify.mjs` and
+  packs it.
+- The `publish` job installs nothing. It checks that the artifact is what `build` packed, attests
+  `verify.mjs`, publishes the tarball with `--provenance`, and checks that the registry serves the
+  packed integrity with a provenance attestation.
+- The `github-release` job creates the GitHub release with `verify.mjs` and its SHA-256.
 
 The `verify/` tag prefix keeps this separate from kronicle-lite's own `vX.Y.Z` releases
 (`release.yml`). Neither workflow matches the other's tags.

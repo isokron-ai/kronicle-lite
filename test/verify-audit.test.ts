@@ -826,6 +826,38 @@ describe('review probes P3/P4a: the anchor key chain and the receipt times', () 
       expect(moved.ok).toBe(false);
     });
 
+    it('checked against the kept list, a receipt must still be signed by a key the pack itself lists', () => {
+      const seen = seenAfterRotation();
+      // a pack listing only R whose receipts S signed (S is in the kept list, not in the pack's)
+      const r = run(oldList(), S, R, recent, undefined, { seen_dir: seen });
+      expect(r.trust.rollback.list_used).toBe('seen');
+      expect(r.checks.filter((c) => c.check === 'service signature' && c.status === 'fail').map((c) => c.evidence)).toEqual(Array(3).fill(expect.stringMatching(/is not in the pack's anchor-keys\.json, which is an earlier state of the list kept in the data dir/)));
+      expect(renderVerifyAudit(r)).toMatch(/^service keys .*; key list kept in the data dir \(anchor-keys\.json is an earlier state of it\): intact$/m);
+      expect(r.ok).toBe(false);
+    });
+
+    it('a fork (the same predecessor, another successor) is still a rollback', () => {
+      const seen = seenAfterRotation();
+      const S2 = newKey();
+      const forked = run(rotated(R, '2026-01-01T00:00:00.000Z', S2, vf), S2, R, recent, undefined, { seen_dir: seen });
+      expect(forked.checks.find((c) => c.check === 'key list rollback')).toMatchObject({ status: 'fail', evidence: expect.stringMatching(/older or weaker list than the one seen/) });
+      expect(forked.trust.rollback.list_used).toBe('given');
+      expect(forked.ok).toBe(false);
+    });
+
+    it('a kept list that extends the pack\'s but does not chain to the pin fails, and is left as it is', () => {
+      const seen = tempDir('kl-va-seen-');
+      const X = newKey();
+      const bogus = { ...ent(X, { status: 'active', valid_from: vf }), successor_signature: 'AAAA', signed_by: R.id };
+      const body = JSON.stringify({ v: 1, lists: { [`${R.fp}@2026-01-01T00:00:00.000Z`]: { seen_at: iso(now - 3600e3), keys: [...oldList(), bogus] } } });
+      writeFileSync(join(seen, SEEN_KEYS_FILE), body);
+      const r = run(oldList(), R, R, twoDaysAgo, stampedTwoDaysAgo, { seen_dir: seen });
+      expect(r.checks.find((c) => c.check === 'key list rollback')).toMatchObject({ status: 'fail', evidence: expect.stringMatching(/extends anchor-keys\.json but does not chain to the genesis pin/) });
+      expect(r.trust.rollback.list_used).toBe('given');
+      expect(readFileSync(join(seen, SEEN_KEYS_FILE), 'utf8')).toBe(body);
+      expect(r.ok).toBe(false);
+    });
+
     it('under --no-tsa the older pack fails: a retired key needs a verified TSA time', () => {
       const seen = seenAfterRotation();
       const r = run(oldList(), R, R, twoDaysAgo, stampedTwoDaysAgo, { seen_dir: seen, no_tsa: true });

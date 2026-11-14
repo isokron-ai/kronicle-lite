@@ -19,7 +19,8 @@ uses semantic versioning once past 0.x.
   (retirement, revocation, an earlier `compromised_since`) still applies, so a
   pack that keeps an old list to escape a later revocation still fails, on the
   receipt times. A list that changes a kept key or forks the chain is still a
-  rollback. The kept list is not replaced. The vendored service code
+  rollback. Each receipt must still be signed by a key the pack's own list
+  names. The kept list is not replaced. The vendored service code
   (`src/anchor/service-core/`) and the anchor client's own rollback guard are
   unchanged: a live service serving an older list is still a rollback.
 - `--json`: `trust.rollback.list_used` (`given` | `seen`) says which list the
@@ -27,7 +28,8 @@ uses semantic versioning once past 0.x.
   unreleased); the text report's `key list` line says so too.
 - Tests that encoded the old behaviour now assert the new one, and new tests
   cover the honest older pack, a pack stamped after the rotation, a back-dated
-  `received_at`, a changed key, and `--no-tsa`.
+  `received_at`, a changed key, a fork, a receipt of a key the pack does not
+  list, a kept list that does not chain, and `--no-tsa`.
 
 ### Added — a standalone verifier: `packages/verify` (unreleased)
 
@@ -36,15 +38,16 @@ uses semantic versioning once past 0.x.
   dependencies, no native code, no network module). `zod`, `canonicalize` and
   `@noble/hashes` are replaced in that build by small built-in-only modules
   (`packages/verify/src/shims/`) checked against the packages on a corpus of
-  valid and mutated inputs. Same report, `--json` and exit codes, proven by a
-  differential test (both tools on `/1`, `/2`, `/3` and late-anchored `/3`
+  valid and mutated inputs. Same report, `--json` and exit codes, shown by a
+  parity (differential) test (both tools on `/1`, `/2`, `/3` and late-anchored `/3`
   packs, the published sample pack, tampers, usage errors, the rollback cache
   and the rotation case). The build is deterministic.
 - Package `@isokron/verify` (name set once in `packages/verify/package.json`),
   0.1.0, not published. `.github/workflows/release-verify.yml` publishes it on
-  a `verify/vX.Y.Z` tag with npm trusted publishing and provenance, attests
-  `verify.mjs` and attaches it to the GitHub release, and runs only after the
-  owner sets the repository variable `VERIFY_NPM_TRUSTED_PUBLISHER`
+  a `verify/vX.Y.Z` tag with npm trusted publishing and provenance (the
+  publishing job installs and runs no package code), attests `verify.mjs` and
+  attaches it to the GitHub release, and runs only after the owner sets the
+  repository variable `VERIFY_NPM_TRUSTED_PUBLISHER`
   (`packages/verify/README.md`, "Publishing").
 - Refactor for it, no behaviour change: the verify-audit command line moved
   from `src/cli.ts` to `src/audit/verify-audit-cli.ts`, argv parsing

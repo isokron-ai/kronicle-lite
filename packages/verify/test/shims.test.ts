@@ -10,6 +10,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 
 import * as real from './entries/schemas.js';
+import { z as zs } from '../src/shims/zod.js';
 import { importBundled } from './helpers.js';
 import { join } from 'node:path';
 
@@ -86,6 +87,15 @@ const issues = (r: { success: boolean; data?: unknown; error?: { issues: { code:
   r.success ? { ok: true, data: r.data } : { ok: false, issues: r.error!.issues.map((i) => ({ code: i.code, path: i.path.map(String), message: i.message })) };
 
 describe('the zod shim gives zod 4 results for every schema the verifier parses with', () => {
+  it('the corpus covers every payload kind, and the shim refuses parameters it does not reproduce', () => {
+    expect(Object.keys(BASES).sort()).toEqual(Object.keys(real.PAYLOAD_SCHEMAS).sort());
+    expect(Object.keys(shim.PAYLOAD_SCHEMAS).sort()).toEqual(Object.keys(real.PAYLOAD_SCHEMAS).sort());
+    expect(() => zs.string().min(1, { message: 'm' } as never)).toThrow(/only a message string/);
+    expect(() => zs.array(zs.string()).refine(() => true, { path: ['x'] } as never)).toThrow(/only a message string/);
+    expect(() => zs.number().int({ message: 'm' } as never)).toThrow(/takes no parameter/);
+    expect(zs.string().min(2, 'too short').safeParse('a')).toMatchObject({ success: false, error: { issues: [{ message: 'too short' }] } });
+  });
+
   for (const kind of Object.keys(BASES)) {
     it(`${kind}: the same pass / fail, parsed value and issues (code, path, message, order)`, () => {
       const realSchema = real.PAYLOAD_SCHEMAS[kind as keyof typeof real.PAYLOAD_SCHEMAS];

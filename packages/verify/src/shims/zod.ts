@@ -25,9 +25,10 @@
  * zod 4.6's results for the schemas used: the same pass / fail, the same parsed value, and the same
  * issues in the same order with the same English messages.
  *
- * packages/verify/test/zod-shim.test.ts parses a corpus of valid and mutated payloads with both
+ * packages/verify/test/shims.test.ts parses a corpus of valid and mutated payloads with both
  * zod and this module and requires identical results. Anything outside this subset throws at
- * build or load time rather than silently differing.
+ * build or load time rather than silently differing: a missing method, and a parameter that is not
+ * a plain message string (zod's `{ message, path, abort }` objects are not supported here).
  *
  * Reproduced from zod 4.6 (MIT, Colin McDonnell): the check order and abort rules
  * ($ZodType runChecks: a check without `when` is skipped once an issue without continue: true
@@ -93,6 +94,12 @@ function parsedType(v: unknown): string {
 const typeName = (t: string, input?: unknown): string => (t === 'number' && typeof input === 'number' && !Number.isFinite(input) ? String(input) : t === 'nan' ? 'NaN' : t);
 const primitive = (v: unknown): string => (typeof v === 'bigint' ? `${v}n` : typeof v === 'string' ? `"${v}"` : `${String(v)}`);
 const SIZING: Record<string, string> = { string: 'characters', array: 'items' };
+
+/** The only parameter form supported: an optional message string. Anything else would silently differ from zod. */
+function message(m: unknown): string | undefined {
+  if (m === undefined || typeof m === 'string') return m;
+  throw new Error('zod shim: only a message string is supported as a check parameter');
+}
 
 const invalidType = (expected: string, input: unknown, cont?: boolean): Issue => ({
   code: 'invalid_type',
@@ -231,10 +238,11 @@ export abstract class ZodType {
   describe(_description: string): this {
     return this;
   }
-  refine(fn: (value: never) => unknown, message?: string): this {
+  refine(fn: (value: never) => unknown, msg?: string): this {
+    const m = message(msg);
     return this.withCheck({
       run: (p) => {
-        if (!fn(p.value as never)) p.issues.push({ code: 'custom', path: [], continue: true, message: message ?? 'Invalid input' });
+        if (!fn(p.value as never)) p.issues.push({ code: 'custom', path: [], continue: true, message: m ?? 'Invalid input' });
       },
     });
   }
@@ -244,14 +252,14 @@ export class ZodString extends ZodType {
   protected parseType(p: Payload): void {
     if (typeof p.value !== 'string') p.issues.push(invalidType('string', p.value));
   }
-  min(n: number, message?: string): this {
-    return this.withCheck(minLength(n, message));
+  min(n: number, msg?: string): this {
+    return this.withCheck(minLength(n, message(msg)));
   }
-  max(n: number, message?: string): this {
-    return this.withCheck(maxLength(n, message));
+  max(n: number, msg?: string): this {
+    return this.withCheck(maxLength(n, message(msg)));
   }
-  regex(pattern: RegExp, message?: string): this {
-    return this.withCheck(stringFormat('regex', pattern, message));
+  regex(pattern: RegExp, msg?: string): this {
+    return this.withCheck(stringFormat('regex', pattern, message(msg)));
   }
   /** z.uuid() / z.iso.datetime(): a string whose format check runs first. */
   static format(format: 'uuid' | 'datetime', pattern: RegExp): ZodString {
@@ -268,7 +276,8 @@ export class ZodNumber extends ZodType {
     p.issues.push(invalidType('number', v));
   }
   /** zod's safeint format: a non-integer stops the checks after it (continue: false). */
-  int(): this {
+  int(...params: unknown[]): this {
+    if (params.length) throw new Error('zod shim: int() takes no parameter here');
     return this.withCheck({
       run: (p) => {
         const v = p.value as number;
@@ -282,10 +291,12 @@ export class ZodNumber extends ZodType {
       },
     });
   }
-  nonnegative(): this {
+  nonnegative(...params: unknown[]): this {
+    if (params.length) throw new Error('zod shim: nonnegative() takes no parameter here');
     return this.withCheck({ run: (p) => void ((p.value as number) >= 0 || p.issues.push(tooSmall('number', 0, true))) });
   }
-  positive(): this {
+  positive(...params: unknown[]): this {
+    if (params.length) throw new Error('zod shim: positive() takes no parameter here');
     return this.withCheck({ run: (p) => void ((p.value as number) > 0 || p.issues.push(tooSmall('number', 0, false))) });
   }
 }
@@ -350,14 +361,14 @@ export class ZodArray extends ZodType {
       out[i] = r.value;
     }
   }
-  min(n: number, message?: string): this {
-    return this.withCheck(minLength(n, message));
+  min(n: number, msg?: string): this {
+    return this.withCheck(minLength(n, message(msg)));
   }
-  max(n: number, message?: string): this {
-    return this.withCheck(maxLength(n, message));
+  max(n: number, msg?: string): this {
+    return this.withCheck(maxLength(n, message(msg)));
   }
-  length(n: number, message?: string): this {
-    return this.withCheck(exactLength(n, message));
+  length(n: number, msg?: string): this {
+    return this.withCheck(exactLength(n, message(msg)));
   }
 }
 

@@ -399,7 +399,7 @@ applies the 0.10.0 rules and reports `PARTIAL`, or with `npx -y kronicle-lite@0.
 
 The same check without installing kronicle-lite: **[`packages/verify`](packages/verify/README.md)**
 builds `verify-audit` into one readable file, `verify.mjs` (Node.js 22+, Node built-ins only, no
-dependencies), with the same report and exit codes, proven by a differential test on every pack
+dependencies), with the same report and exit codes, checked by a parity test on every pack
 format. Unreleased; its package name and first release are the owner's call.
 
 ```sh
