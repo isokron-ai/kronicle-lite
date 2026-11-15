@@ -3,7 +3,7 @@
 `get_system_state` is a pull: the agent learns about a change only when it
 asks. In agent-memory-bench Track B (stale runbook mid-session), agents that
 oriented at session start and never again deployed to the stale target in
-every run; two cheap additions each fixed it (10/10 on Haiku):
+every run; two cheap additions each fixed it (10/10 with the model tested):
 
 1. **Push** — a hook after every tool call injects retractions that landed
    since the hook's own cursor (Claude Code `PostToolUse`).
