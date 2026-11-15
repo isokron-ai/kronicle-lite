@@ -75,6 +75,13 @@ export interface PutDocumentResult {
   head: ChainHead;
   blocks: BlockSummary[];
   events: number;
+  /**
+   * Unreleased (KL-1): true when idempotency_key had already recorded this
+   * same put, so the original document.put is returned and nothing is
+   * appended. The same key with other arguments is refused
+   * (`idempotency_key_reused`).
+   */
+  replayed: boolean;
   /** 0.6.0: present when secrets: 'redact' replaced something before chaining. */
   redactions?: SecretFinding[];
   /** Unreleased: lineage recorded on this write (counts), when any. */
@@ -130,7 +137,16 @@ export interface TombstoneBlockResult {
 export class DocumentError extends Error {
   override readonly name = 'DocumentError';
   constructor(
-    readonly code: 'unknown_block' | 'block_not_live' | 'unknown_document' | 'invalid_slug' | 'empty_content' | 'invalid_source' | 'invalid_lineage' | 'reserved_key',
+    readonly code:
+      | 'unknown_block'
+      | 'block_not_live'
+      | 'unknown_document'
+      | 'invalid_slug'
+      | 'empty_content'
+      | 'invalid_source'
+      | 'invalid_lineage'
+      | 'reserved_key'
+      | 'idempotency_key_reused',
     message: string,
   ) {
     super(message);
@@ -556,6 +572,21 @@ export class DocumentStore {
     });
 
     const run = this.db.transaction((): PutDocumentResult => {
+      // KL-1: a used idempotency_key replays only the same put (same slug, title, markdown, source,
+      // project, explicit lineage and actor); anything else under it is refused, nothing appended.
+      if (args.idempotency_key !== undefined) {
+        const prior = this.chain.findByIdempotencyKey(args.idempotency_key);
+        if (prior) {
+          const differs = this.putDiffers(prior, { slug: args.slug, title: args.title, markdown_hash, source: args.source, project: args.project ?? null, derived_from: explicit, actor_id: args.actor_id });
+          if (differs.length > 0) {
+            throw new DocumentError(
+              'idempotency_key_reused',
+              `idempotency_key was already used (seq ${prior.seq}) for a different ${prior.event_type === 'document.put' ? 'put' : prior.event_type} (${differs.join(', ')} differ${differs.length === 1 ? 's' : ''}); nothing written. Use a new key for a new write.`,
+            );
+          }
+          return { ...this.describePut(prior), replayed: true };
+        }
+      }
       const existing = this.getDocument(args.slug);
       // 0.8.1: idempotent by content. Decided here, under the write lock, so
       // concurrent identical puts (several instruction-import hooks firing on
@@ -566,7 +597,7 @@ export class DocumentStore {
         const same = this.unchangedPut(existing, { title: args.title, markdown_hash, source: args.source, project: args.project ?? null });
         if (same) {
           this.logWrite(args.actor_id, existing.doc_id, 'document');
-          return this.describePut(same); // events: 0, like an idempotent replay
+          return { ...this.describePut(same), replayed: false }; // events: 0; no key, so not a replay
         }
       }
       const doc_id = existing?.doc_id ?? randomUUID();
@@ -673,8 +704,9 @@ export class DocumentStore {
         actor_id: args.actor_id,
         ...(args.idempotency_key !== undefined ? { idempotency_key: args.idempotency_key } : {}),
       });
+      // why: the key was checked at the top of this transaction; the chain refuses a changed request under it.
       if (first.replayed) {
-        return this.describePut(first.event);
+        return { ...this.describePut(first.event), replayed: true };
       }
       this.applyEvent(first.event);
       let head = first.head;
@@ -738,6 +770,7 @@ export class DocumentStore {
         head,
         blocks: summaries,
         events: pending.length,
+        replayed: false,
         ...(explicit !== undefined || inferred.length > 0 || truncated
           ? { lineage: { derived_from: explicit?.length ?? 0, derived_from_inferred: inferred.length, ...(truncated ? { derived_from_inferred_truncated: true as const } : {}) } }
           : {}),
@@ -774,7 +807,47 @@ export class DocumentStore {
     return ev;
   }
 
-  private describePut(putEvent: ChainEvent): PutDocumentResult {
+  /**
+   * KL-1: the request fields in which a put differs from the event that
+   * already holds its idempotency key (empty: the same put, a replay). Compared
+   * against what that event chained: the slug, title, markdown hash, source
+   * (a git binding counts by its presence: the blob it pins moves with the
+   * file), project, explicit lineage and actor. Another event type differs
+   * as a whole.
+   */
+  private putDiffers(
+    prior: ChainEvent,
+    req: {
+      slug: string;
+      title: string;
+      markdown_hash: string;
+      source: DocumentSource | undefined;
+      project: { key: string; root: string } | null;
+      derived_from: LineageRef[] | undefined;
+      actor_id: string;
+    },
+  ): string[] {
+    if (prior.event_type !== 'document.put') return ['event_type'];
+    const p = prior.payload;
+    const canon = (v: unknown) => (v === undefined || v === null ? null : canonicalize(v as Record<string, unknown>));
+    const src = (v: unknown) => {
+      if (v === undefined || v === null || typeof v !== 'object') return null;
+      const { git, ...rest } = v as Record<string, unknown>;
+      return canonicalize({ ...rest, git: git !== undefined && git !== null });
+    };
+    const project = req.project && !req.source?.project ? { key: req.project.key, root: req.project.root } : undefined;
+    const out: string[] = [];
+    if (p['slug'] !== req.slug) out.push('slug');
+    if (p['title'] !== req.title) out.push('title');
+    if (p['markdown_hash'] !== req.markdown_hash) out.push('markdown');
+    if (src(p['source']) !== src(req.source)) out.push('source');
+    if (canon(p['project']) !== canon(project)) out.push('project');
+    if (canon(p['derived_from']) !== canon(req.derived_from)) out.push('derived_from');
+    if (prior.actor_id !== req.actor_id) out.push('actor_id');
+    return out;
+  }
+
+  private describePut(putEvent: ChainEvent): Omit<PutDocumentResult, 'replayed'> {
     const p = putEvent.payload as { doc_id: string; slug: string; title: string; revision: number };
     const live = this.liveBlocks(p.doc_id);
     return {

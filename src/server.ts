@@ -17,10 +17,10 @@ import { McpServer, ProtocolError, ResourceNotFoundError, ResourceTemplate, type
 import { z } from 'zod';
 
 import { anchorStatus, tryPushCheckpoint, verifyLastAnchor } from './anchor/anchor.js';
-import { ApplyError, CONFIRM_TTL_MAX_S, MAX_APPLY_OPS } from './apply/apply.js';
+import { ApplyError, CONFIRM_TTL_MAX_S, MAX_APPLY_OPS, type ApplyResult } from './apply/apply.js';
 import { AuditError, MAX_EVENTS_PER_CALL } from './audit/log.js';
 import { AUDIT_KINDS, AuditEventInputSchema, PAYLOAD_SCHEMAS } from './audit/schemas.js';
-import { ChainConflictError } from './chain/index.js';
+import { ChainConflictError, IdempotencyKeyReusedError } from './chain/index.js';
 import { bindGit } from './git/binding.js';
 import type { BlockSummary, DocumentSource } from './docs/documents.js';
 import { DocumentError, isInstructionSlug, MAX_SLUG_LENGTH, SLUG_PATTERN } from './docs/documents.js';
@@ -163,6 +163,19 @@ function json(value: object): ToolResult {
   };
 }
 
+/**
+ * KL-2: an apply that did not do what it was asked is a tool execution error.
+ * Only `committed` and `planned` (a dry run that would succeed) are successes;
+ * `rolled_back`, `failed` (a dry run that would roll back) and `partial` (a
+ * best_effort apply with failed ops) carry `isError: true`, with the same
+ * structured body, so a client that checks only isError cannot take a
+ * rolled-back batch for a write.
+ */
+function applyResult(result: ApplyResult): ToolResult {
+  const out = json(result);
+  return result.status === 'committed' || result.status === 'planned' ? out : { ...out, isError: true };
+}
+
 /** 0.8.1 (P2-02): enforce RESULT_BUDGET_BYTES on any tool result. */
 export function withinBudget(result: ToolResult, tool: string): ToolResult {
   const bytes = Buffer.byteLength(JSON.stringify(result));
@@ -252,6 +265,9 @@ function errorResult(err: unknown): ToolResult {
     return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err.code, message: err.message, ...(err.index !== undefined ? { index: err.index } : {}) }) }] };
   }
   if (err instanceof DocumentError) {
+    return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err.code, message: err.message }) }] };
+  }
+  if (err instanceof IdempotencyKeyReusedError) {
     return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err.code, message: err.message }) }] };
   }
   if (err instanceof ChainConflictError) {
@@ -560,7 +576,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
           slug: z.string().min(1).max(MAX_SLUG_LENGTH).regex(new RegExp(SLUG_PATTERN)).describe('name or namespace/Path (finding/G-2); max 128'),
           title: z.string().min(1).max(300),
           markdown: z.string().max(2_000_000),
-          idempotency_key: z.string().min(1).max(200).optional(),
+          idempotency_key: z.string().min(1).max(200).optional().describe('Retry key: the same put returns the first result (replayed: true); other arguments under it are refused.'),
           source_path: z.string().min(1).max(4096).optional().describe('File the markdown came from.'),
           bind_git: z.boolean().default(false),
           redact_secrets: REDACT,
@@ -632,7 +648,9 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     'supersede_block',
     {
       title: 'Replace one block',
-      description: 'Replace one live block\'s content, with a reason. Receipts for the old block then verify as SUPERSEDED.',
+      description:
+        'Replace one live block\'s content, with a reason: the document reads the new text from then on. The old text stays ' +
+        'on the chain (orient shows it as a retraction) and receipts for the old block then verify as SUPERSEDED.',
       inputSchema: lean(
         z.object({
           block_id: z.guid(),
@@ -646,7 +664,8 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
         'input',
       ),
       outputSchema: lean(SupersedeBlockResultSchema, 'output'),
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      // KL-3: it replaces the block's live content (as tombstone_block retires it), so it is not additive.
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
     (args) => {
       try {
@@ -701,7 +720,8 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
         `Up to ${MAX_APPLY_OPS} put / supersede / tombstone ops in ONE local transaction. mode all_or_nothing (default; any ` +
         'failure rolls back everything) | best_effort. dry_run: exact per-op diffs, nothing written, plus a single-use ' +
         'confirm_token bound to this plan, actor and the previewed versions; commit with it to reject a plan whose state ' +
-        'changed. expect_version per op; idempotency_key replays the committed result.',
+        'changed. expect_version per op; idempotency_key replays the committed result. Any status but committed or planned ' +
+        '(rolled_back, failed, partial) is returned with isError: true and the same body.',
       inputSchema: lean(
         z.object({
           mode: z.enum(['all_or_nothing', 'best_effort']).default('all_or_nothing'),
@@ -728,7 +748,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     },
     (args) => {
       try {
-        return json(
+        return applyResult(
           store.applier.apply({
             ...args,
             actor_id: actorOf(args.actor_id),

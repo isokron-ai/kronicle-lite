@@ -221,9 +221,14 @@ Orient before the next write and re-check anything the delta touched.
 - `verify`: malformed input yields `UNVERIFIED / malformed_receipt`, never
   a tool error. `SUPERSEDED` carries `current_block_id` and
   `current_content_hash`; `STALE_SOURCE` carries `source_drift`.
-- `put_document`: unchanged blocks keep their ids; `idempotency_key`
-  replays return the first result; `bind_git` needs `source_path` and
-  only warns outside git.
+- `put_document`: unchanged blocks keep their ids; retrying the same put
+  with its `idempotency_key` returns the first result (`replayed: true`),
+  and other arguments under a used key are refused
+  (`idempotency_key_reused`): use a new key for a new write; `bind_git`
+  needs `source_path` and only warns outside git.
+- `apply`: any status but `committed` / `planned` (`rolled_back`,
+  `failed`, `partial`) is a tool error with the full body; read
+  `ops[].error`.
 - `supersede_block` / `tombstone_block`: refused on a block that is not
   live; operate on the current head.
 - `checkpoint_chain {push: true}` sends the signed root, range,

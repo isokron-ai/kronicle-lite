@@ -79,9 +79,12 @@ describe('Chain.append', () => {
   it('idempotency_key replays the original event without appending', () => {
     const { chain } = fresh();
     const a = chain.append({ event_type: 't', payload: { x: 1 }, actor_id: 'a', idempotency_key: 'k1' });
-    const b = chain.append({ event_type: 't', payload: { x: 999 }, actor_id: 'a', idempotency_key: 'k1' });
+    const b = chain.append({ event_type: 't', payload: { x: 1 }, actor_id: 'a', idempotency_key: 'k1' });
     expect(b.replayed).toBe(true);
     expect(b.event).toEqual(a.event);
+    expect(chain.head().seq).toBe(1);
+    // KL-1: a changed request under the key is refused, not answered with the first event.
+    expect(() => chain.append({ event_type: 't', payload: { x: 999 }, actor_id: 'a', idempotency_key: 'k1' })).toThrow(/idempotency_key was already used/);
     expect(chain.head().seq).toBe(1);
   });
 

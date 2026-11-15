@@ -147,6 +147,61 @@ uses semantic versioning once past 0.x.
   and the threat model. package.json `homepage` and server.json `websiteUrl`
   point to isokron.ai/open-source/kronicle-lite.
 
+### Fixed — write-check findings: idempotency, failed applies, supersede_block's annotation
+
+Three findings from a run of the MCP write-check suite (MWS 0.9) against
+0.11.2.
+
+- **`put_document` answered a reused `idempotency_key` with changed
+  arguments with the first result (MWS-RETRY-2, MUST).** Another slug, title
+  or markdown under a key that had already written a document came back as a
+  success, with no sign that nothing new was written. The key is now checked
+  inside the write transaction against the `document.put` that holds it: the
+  same put (slug, title, markdown hash, source, project, explicit
+  `derived_from` and actor) returns the original result with
+  **`replayed: true`** and appends nothing; anything else is refused with
+  `idempotency_key_reused`, naming the fields that differ, and nothing is
+  written. A key held by another kind of event is refused too. A git-bound
+  source counts by its path and by whether it is bound, not by the blob it
+  pins (that moves with the file). The check reads the chain, so it holds
+  across restarts. `put_document`'s result has a new `replayed` field
+  (`false` on every write, and on a no-op put without a key).
+- **The chain refuses a changed request under a used key.** `Chain.append`
+  used to return the existing event for any request under a known key; it
+  now returns it (`replayed: true`) only for the same event type, actor and
+  canonical payload, and otherwise throws `IdempotencyKeyReusedError`
+  (`idempotency_key_reused`, with the seq that holds the key and what
+  differs). `audit_record` and `apply` already compared before appending, so
+  they behave as before; `apply` reports a key squatted on the chain as
+  `idempotency_conflict`, as it did.
+- **A failed `apply` came back as a normal result (MWS-ATOM-1, MUST; the
+  same cause showed under RES-2 and CONC-4).** An all-or-nothing apply rolled
+  back by a `version_conflict` (or any failed op) answered `status:
+  rolled_back` without `isError`, so a client that checks only `isError`
+  took it for a write. Now every apply result whose status is not
+  `committed` or `planned` carries **`isError: true`**, with the same body
+  in `structuredContent` and the text block: `rolled_back`, `failed` (a dry
+  run that would roll back) and `partial` (a `best_effort` apply in which an
+  op failed; the ops reported `applied` are committed). Errors raised before
+  the plan runs (`confirm_*`, `idempotency_key_reused`, …) are unchanged.
+- **`supersede_block` declared `destructiveHint: false` (MWS-ANN-5,
+  SHOULD).** It replaces a block's live content: the document reads the new
+  text from then on, as `tombstone_block` (already `destructiveHint: true`)
+  retires a block. It now declares `destructiveHint: true`. The old text is
+  not erased (it stays on the chain, orient shows it as a retraction, and
+  receipts for the old block verify as `SUPERSEDED`), and the description
+  now says so.
+- **MCP catalog drift (deliberate):** `supersede_block`'s annotation and
+  description, `apply`'s description, a description on `put_document`'s
+  `idempotency_key` and the `replayed` field of its output schema.
+  `CATALOG_FINGERPRINT` is now `b6d64f0d…b47c` and
+  `CORE_CATALOG_FINGERPRINT` `b4f0c164…6af3` (both snapshots in
+  `.mcp-catalog/` regenerated).
+- Tests: `test/mws-retry-atom-ann.test.ts` (each finding, at the store and
+  over MCP; every one failed on 0.11.2). `test/chain.test.ts` and
+  `test/documents.test.ts` encoded the old replay of a changed request and
+  now assert the refusal.
+
 ## [0.11.2] — 2026-11-10
 
 ### Fixed — token-count labels are no longer refused as secrets
