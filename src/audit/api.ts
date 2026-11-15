@@ -2,9 +2,13 @@
 
 export {
   AUDIT_KINDS,
+  AUTH_COMMITMENT_LABELS,
+  AUTH_KINDS,
   BUNDLE_FORMAT_V1,
   BUNDLE_FORMAT_V2,
   BUNDLE_FORMAT_V3,
+  BUNDLE_FORMAT_V4,
+  isProfileFormat,
   MAX_PLANNED_RUNS,
   PAYLOAD_SCHEMAS,
   V3_REQUIRED,
@@ -14,6 +18,7 @@ export {
   type AuditEventInput,
   type AuditKind,
   type AuditPayload,
+  type AuthCommitmentLabel,
   type BlobRef,
   type BundleFormat,
 } from './schemas.js';

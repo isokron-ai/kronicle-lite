@@ -224,7 +224,7 @@ describe('no credential can be recorded in an OAuth event', () => {
         const o = getAt(VALID[kind], p) as Record<string, unknown>;
         return o && typeof o === 'object' && 'commit' in o;
       });
-      expect(commits.length, kind).toBeGreaterThan(0);
+      expect(commits.length > 0, kind).toBe(kind !== 'auth_failed'); // a failure carries no credential
       for (const p of commits) {
         const o = getAt(VALID[kind], p) as { commit: string; len: number; label: string };
         refused(kind, setAt(VALID[kind], p, OPAQUE)); // the value in place of the commitment
@@ -289,6 +289,9 @@ describe('no credential can be recorded in an OAuth event', () => {
       refused(kind, setAt(VALID[kind], path, `prefix:${JWT}`));
       refused(kind, setAt(VALID[kind], path, 'eyJhbGciOiJSUzI1NiJ9.eyJ.x')); // a JWE or a cut JWT too
     }
+    // an identifier that merely contains the letters is kept
+    accepted('auth_registered', { ...VALID.auth_registered, client_id: 'monkeyJack.example' });
+    accepted('auth_granted', setAt(VALID.auth_granted, ['access_token_jwt', 'claims', 'aud', 0], 'api://surveyJobs.v2'));
     // the decoded claims keep the structure of the token, never the subject or the token id in clear
     refused('auth_granted', setAt(VALID.auth_granted, ['access_token_jwt', 'claims', 'sub'], 'user-123'));
     refused('auth_granted', setAt(VALID.auth_granted, ['access_token_jwt', 'claims', 'jti'], 'jti-123'));
@@ -317,7 +320,7 @@ describe('no credential can be recorded in an OAuth event', () => {
     for (const kind of AUTH_KINDS) {
       for (const path of leaves(VALID[kind])) {
         if (typeof getAt(VALID[kind], path) !== 'string') continue;
-        refused(kind, setAt(VALID[kind], path, JWT));
+        expect(parse(kind, setAt(VALID[kind], path, JWT)).ok, `${kind}.${path.join('.')}`).toBe(false);
       }
     }
   });
@@ -376,7 +379,7 @@ describe('format /4: the OAuth kinds, with every /3 rule; older bundles unchange
 
   it('only /4 may hold the OAuth kinds; /4 holds every kind; /3 and /4 are the audit-profile formats', () => {
     expect(BUNDLE_FORMATS).toEqual([BUNDLE_FORMAT_V1, BUNDLE_FORMAT_V2, BUNDLE_FORMAT_V3, BUNDLE_FORMAT_V4]);
-    for (const f of [BUNDLE_FORMAT_V1, BUNDLE_FORMAT_V2, BUNDLE_FORMAT_V3]) for (const a of AUTH_KINDS) expect(kindsOfFormat(f)).not.toContain(a);
+    for (const f of [BUNDLE_FORMAT_V1, BUNDLE_FORMAT_V2, BUNDLE_FORMAT_V3] as const) for (const a of AUTH_KINDS) expect(kindsOfFormat(f)).not.toContain(a);
     expect([...kindsOfFormat(BUNDLE_FORMAT_V3)].sort()).toEqual([...AUDIT_KINDS_V1, ...MILESTONE_KINDS, ...V3_KINDS].sort());
     expect([...kindsOfFormat(BUNDLE_FORMAT_V4)].sort()).toEqual([...AUDIT_KINDS].sort());
     expect([BUNDLE_FORMAT_V1, BUNDLE_FORMAT_V2, BUNDLE_FORMAT_V3, BUNDLE_FORMAT_V4, 'kronicle-lite-evidence-bundle/5', null].map(isProfileFormat)).toEqual([false, false, true, true, false, false]);
@@ -433,6 +436,14 @@ describe('evidence bundles with OAuth events', () => {
     kl.close();
   });
 
+  it('an anchor over an OAuth event is an audit milestone anchor (audit mode), as over a /3 kind', () => {
+    const kl = new KronicleLite({ memory: true });
+    kl.audit.record('plain', [{ kind: 'finding', event_key: 'f', payload: { finding_id: 'F1', status: 'discovered' } }], 'auditor');
+    kl.audit.record('oauth-audit', [{ kind: 'auth_granted', event_key: 'g', payload: VALID.auth_granted }], 'auditor');
+    expect(kl.audit.profileAuditsIn(1, kl.chain.head().seq)).toEqual(['oauth-audit']);
+    kl.close();
+  });
+
   it('a store without one exports /3 exactly as before', () => {
     const { kl, r } = store(false);
     expect(r.manifest.format).toBe(BUNDLE_FORMAT_V3);
@@ -440,7 +451,7 @@ describe('evidence bundles with OAuth events', () => {
   });
 
   it('the key holder relabelling a /4 bundle /3 (or /2) fails events: the OAuth kinds are not allowed there', () => {
-    for (const f of [BUNDLE_FORMAT_V3, BUNDLE_FORMAT_V2]) {
+    for (const f of [BUNDLE_FORMAT_V3, BUNDLE_FORMAT_V2] as const) {
       const { kl, dir } = store(true);
       resign(dir, kl, (m) => {
         m.format = f;

@@ -456,7 +456,7 @@ async function main(argv: string[]): Promise<number> {
     case 'checkpoint': {
       const store = new KronicleLite({ dataDir });
       let opts: AnchorCallOptions = {};
-      // 0.11.1 audit mode: a push whose range holds a /3 audit's events anchors a milestone (freeze,
+      // 0.11.1 audit mode: a push whose range holds a /3 (or /4) audit's events anchors a milestone (freeze,
       // last run, report). The key is resolved before anything is stored, and a failure says so.
       let audits: string[] = [];
       if (flags['push'] === true) {

@@ -84,7 +84,7 @@ import { chainIdFromPublicKeyPem, keyIdFromPublicKey } from '../crypto/keys.js';
 import { findFreezePending, FREEZE_PENDING_RECORD, type FreezePending } from './freeze-pending.js';
 import { finalFindingStatuses, findingsDigest, freezeNonce, REPRODUCTION_NAMESPACE, reproductionStatement } from './profile.js';
 import { MAX_TSR_BYTES, verifyTimestamp } from './rfc3161.js';
-import { BUNDLE_FORMAT_V3, kindOfEventType } from './schemas.js';
+import { BUNDLE_FORMAT_V3, isProfileFormat, kindOfEventType } from './schemas.js';
 import { MAX_SSHSIG_BYTES, verifySshSignature } from './sshsig.js';
 import { SHIPPED_TSA_EXTRAS, SHIPPED_TSA_ROOTS } from './tsa-roots.js';
 import { DEFAULT_MAX_BUNDLE_BYTES, hashRegularFile, MAX_BUNDLE_BLOB_BYTES, MAX_MANIFEST_BYTES, readBundleFile, verifyBundle } from './verify-bundle.js';
@@ -1023,10 +1023,10 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     const events = eventsTrusted ? readEvents(join(bundleDir, 'events.jsonl'), maxBytes, allowHardlinks) : null;
     const full = events ? [...events.values()].filter((e) => !e.stub && e.kind !== null).sort((x, y) => x.seq - y.seq) : [];
 
-    // ── audit profile: a /3 bundle of this audit alone ──
+    // ── audit profile: a /3 (or /4) bundle of this audit alone ──
     if (auditProfile) {
-      const v3 = result.bundle_format === BUNDLE_FORMAT_V3;
-      add('pack', 'integrity', null, 'bundle format', v3, v3 ? `${BUNDLE_FORMAT_V3} (audit profile)` : `${result.bundle_format ?? 'unknown'} is not ${BUNDLE_FORMAT_V3}: the audit profile needs the run plan, the derived nonce and the run count; verify a pack made before 0.11.0 with --profile legacy (PARTIAL at best)`);
+      const v3 = isProfileFormat(result.bundle_format);
+      add('pack', 'integrity', null, 'bundle format', v3, v3 ? `${result.bundle_format} (audit profile)` : `${result.bundle_format ?? 'unknown'} is not ${BUNDLE_FORMAT_V3}: the audit profile needs the run plan, the derived nonce and the run count; verify a pack made before 0.11.0 with --profile legacy (PARTIAL at best)`);
       // Stubs are events of other documents or audits inside the range: one store per audit, so none.
       add('bundle', 'integrity', null, 'this audit only', vb.counts.stubs === 0 && manifest !== null, vb.counts.stubs === 0 ? `the bundle holds only audit ${vb.audit_id ?? '?'}'s events (no stubs)` : `the bundle holds ${vb.counts.stubs} stub(s): events of other documents or audits inside its range (record each audit in its own store)`);
     }
@@ -1611,8 +1611,8 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     const gaps: number[] = [];
     for (let i = 1; i <= (rs.seqs[rs.seqs.length - 1] ?? 0); i++) if (!rs.seqs.includes(i)) gaps.push(i);
     if (gaps.length) return fail(`run_seq is not contiguous: ${gaps.slice(0, 10).join(', ')} missing of 1..${rs.seqs[rs.seqs.length - 1]}`);
-    // /3: planned_runs counts the plan, so the abandoned runs too; the report and claims.json count the completed runs.
-    const abandoned = result.bundle_format === BUNDLE_FORMAT_V3 ? full.filter((e) => e.kind === 'run_abandoned').length : 0;
+    // /3, /4: planned_runs counts the plan, so the abandoned runs too; the report and claims.json count the completed runs.
+    const abandoned = isProfileFormat(result.bundle_format) ? full.filter((e) => e.kind === 'run_abandoned').length : 0;
     const off = rs.declared_counts.filter((d) => d.count !== runs.length + (d.source === 'planned_runs' ? abandoned : 0));
     if (off.length) return fail(`${runs.length} run(s) recorded${abandoned ? ` and ${abandoned} abandoned` : ''}; declared ${off.map((d) => `${d.count} (${d.source})`).join(', ')}`);
     if (claimsFile?.runs) {
@@ -1634,7 +1634,7 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
       add('plan', 'plan_complete', null, 'run plan', false, why);
     };
     if (!haveEvents) return fail('not checked: the bundle does not verify');
-    if (result.bundle_format !== BUNDLE_FORMAT_V3) return fail(`a ${result.bundle_format ?? 'bundle of unknown format'} has no run plan (${BUNDLE_FORMAT_V3} records harness_frozen.plan)`);
+    if (!isProfileFormat(result.bundle_format)) return fail(`a ${result.bundle_format ?? 'bundle of unknown format'} has no run plan (${BUNDLE_FORMAT_V3} records harness_frozen.plan)`);
     const freezes = full.filter((e) => e.kind === 'harness_frozen');
     if (freezes.length !== 1) return fail(freezes.length === 0 ? 'the bundle holds no harness_frozen event' : `the bundle holds ${freezes.length} harness_frozen events; one freeze per audit (record a retest as its own audit)`);
     const fz = freezes[0]!;
@@ -1906,9 +1906,9 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     const fa = committing(freeze.seq);
     const measured = runs.map((r) => sOrNull(r.payload?.['measured_at'])).filter((x): x is string => x !== null && Number.isFinite(Date.parse(x)));
     const sortedM = [...measured].sort((a, b) => Date.parse(a) - Date.parse(b));
-    // /3: the nonce is derived from the freeze receipt and the TSA tokens over it (W2), which the
+    // /3, /4: the nonce is derived from the freeze receipt and the TSA tokens over it (W2), which the
     // auditor cannot know before the TSAs sign; /1, /2: the receipt digest, as 0.10.0 recorded it.
-    const v3 = result.bundle_format === BUNDLE_FORMAT_V3;
+    const v3 = isProfileFormat(result.bundle_format);
     const toks = fa ? (tokenBytes.get(fa.base) ?? []) : [];
     const digest = !fa ? null : v3 ? (toks.length >= 2 ? freezeNonce(fa.a.receipt_sha256, toks) : null) : fa.a.receipt_sha256;
     const nonceName = v3 ? `derived freeze nonce sha256(${fa?.base ?? 'freeze'} receipt digest ‖ its ${toks.length} TSA token(s)) = ${digest}` : `freeze receipt digest ${digest}`;

@@ -58,8 +58,9 @@ be reused as it is.
 `--json` prints the report as `kronicle-lite-verify-audit/3`. A consumer that must accept only a
 plain pass checks `.verdict == "verified"`.
 
-Pack formats: `kronicle-lite-evidence-bundle/3` (kronicle-lite 0.11.x) under the default audit
-profile. Formats `/1` and `/2` (0.10.x) need `--profile legacy` and give PARTIAL at best.
+Pack formats: `kronicle-lite-evidence-bundle/3` (kronicle-lite 0.11.x) and `/4` (`/3` with the
+OAuth evidence kinds, kronicle-lite 0.12.0) under the default audit profile. Formats `/1` and `/2`
+(0.10.x) need `--profile legacy` and give PARTIAL at best.
 
 ## What it checks
 
@@ -127,7 +128,7 @@ The fix is in the shared source, so `kronicle-lite verify-audit` behaves the sam
 - **`test/differential.test.ts`** (parity): `node verify.mjs` and `kronicle-lite verify-audit` on the same
   packs with the same arguments and the same data dir. stdout (text and `--json`), stderr (up to the
   program name), the exit code and the rollback cache must all be identical. The packs are one of each
-  format (`/1`, `/2`, `/3`, `/3` with a late-anchored freeze) made by kronicle-lite, the published
+  format (`/1`, `/2`, `/3`, `/3` with a late-anchored freeze, `/4` with OAuth events) made by kronicle-lite, the published
   sample pack, eight tampers of each, the usage errors, the rollback cache, and the rotation case.
   `KL_VERIFY_EXTRA_PACKS=list.json` adds packs from disk. Both tools run the same `verify-audit.ts`,
   so this shows the standalone build changes nothing. Whether verify-audit's verdicts are right is

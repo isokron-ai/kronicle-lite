@@ -99,6 +99,11 @@ is `{sha256, size, media_type?, redacted?: true}`.
 | `run_abandoned` (0.11.0) | `run_id` (a planned run), `reason` | `fingerprint`, `detail` (ref), `evidence[]` |
 | `reproduction_signed` (0.11.0) | `finding_id`, `signer` (allowed-signers principal), `reproduced_at`, `commands` (ref), `output` (ref), `signature` (ref: armored SSH signature) | `evidence[]` |
 | `audit_closed` (0.11.0) | `report_id`, `run_count`, `findings_digest` | — |
+| `auth_registered` (0.12.0) | `commitment_key`, `registration_id`, `issuer`, `mode` (static \| cimd \| dcr), `client_id`, `token_endpoint_auth_method`, `redirect_uris[]` | `client_id_issued_at`, `client_secret_expires_at`, `client_secret` / `registration_access_token` (commitments), `client_metadata_sha256`, `journal` (ref), `evidence[]` |
+| `auth_granted` (0.12.0) | `commitment_key`, `profile`, `registration_mode`, `resource`, `issuer`, `client_id`, `token_type`, `refreshable`, `access_token` (commitment), `whoami` (passed \| not_configured) | `identity`, `tenant`, `registration_id`, `requested_scope`, `granted_scope`, `expires_in`, `expires_at`, `generation`, `access_token_jwt`, `refresh_token` / `id_token` / `login_hint` (commitments), `prm_sha256`, `as_metadata_sha256`, `attachment` (ref), `journal` (ref), `evidence[]` |
+| `auth_refreshed` (0.12.0) | `commitment_key`, `profile`, `generation`, `rotated`, `access_token` (commitment) | `issuer`, `trigger`, `previous_access_token` / `refresh_token` / `previous_refresh_token` (commitments), `scope`, `expires_in`, `expires_at`, `journal` (ref), `evidence[]` |
+| `auth_failed` (0.12.0) | `commitment_key`, `profile`, `stage`, `error` (codes) | `issuer`, `status`, `generation`, `journal` (ref), `evidence[]` |
+| `auth_revoked` (0.12.0) | `commitment_key`, `profile`, `issuer`, `refresh{sent, status, replay, claim}`, `access{probes[], first_rejected_ms, still_valid_at_cap, remaining_lifetime_s, revoked_explicitly, inconclusive, claim}` | `access_token` / `refresh_token` (commitments), `registration{registration_id?, deleted, status}`, `receipt` (ref), `journal` (ref), `evidence[]` |
 
 The full JSON Schemas are served at `kronicle://schemas/audit`.
 
@@ -164,6 +169,64 @@ A bundle holding a milestone kind is exported as
    finding ends with). Nothing is recorded after it. Anchor and stamp.
 
 Use one store per audit: the audit profile refuses a bundle with stubs.
+
+**OAuth evidence (0.12.0).** An audit of a hosted MCP server logs in as one or
+more test identities. mcp-audit's auth helper records each step on the audit
+chain: `auth_registered` (the OAuth client registration, which several
+profiles may share), `auth_granted` (a login), `auth_refreshed` (a refresh
+outside a run), `auth_failed` (a login or refresh that failed for good) and
+`auth_revoked` (the close-out revocation receipt). Any of them makes the
+bundle `kronicle-lite-evidence-bundle/4`, which is `/3` plus these kinds: every
+`/3` rule applies unchanged, and `verify-audit` reads `/4` under the audit
+profile exactly as `/3`. A store without them is still exported as before
+(the format choice for every set of the older kinds is unchanged), so an
+existing pack and a re-export of an existing store are byte for byte what
+0.11.x made. 0.11.x readers refuse a `/4` pack by its format.
+
+No OAuth payload can hold a credential. The schemas are strict at every
+level, so a field named `code`, `code_verifier`, `state`, `client_secret`,
+`token` or any other name not listed is refused. What is kept:
+
+- **Commitments, never values.** Every token, code, verifier, secret, subject
+  and login hint is `{commit, len, label}`: `commit` is the first 16 hex
+  digits of `HMAC-SHA256(audit key, label "\n" value)`, `len` the value's
+  length, `label` the kind of credential (`access-token`, `refresh-token`,
+  `id-token`, `authorization-code`, `pkce-verifier`, `code-challenge`,
+  `state`, `client-secret`, `registration-access-token`, `subject`, `jti`,
+  `login-hint`), fixed per field. The key is one per audit and stays with the
+  auditor; each event names its `commitment_key` (the key's sha256) so a
+  revealed key can be checked. The commitment shows that two events saw the
+  same value (the auditor attests to it); nobody without the key can test a
+  guess, and a third party cannot recompute one.
+- **Issuer, resource, audience, times, scope, client id** in clear. URLs are
+  `https` (or `http` to `127.0.0.1`, `localhost` or `[::1]`) with no
+  userinfo, query or fragment, so a code or token carried in a URL cannot be
+  recorded. A JWT access token's structure is kept as `access_token_jwt`:
+  header (`alg`, `kid`, `typ`), the claims `iss`, `aud` (a list), `exp`,
+  `iat`, `nbf`, `scope`, `scp`, `client_id`, `azp`, `sub` and `jti` as
+  commitments, the names of the other claims, and `claims_verified` (false
+  unless the signature was checked).
+- **Codes, not text.** `stage`, `error` and the revocation `replay` outcome are
+  lowercase letters and underscores (and `http_<status>` for a replay); there
+  is no field for a server's error description.
+- **No token-shaped value.** Profile, identity, tenant and registration names,
+  client ids, audiences, issuer claims, key ids and scopes refuse anything
+  shaped like a JSON Web Token. The write-time secret guard then scans the
+  payload, as for every kind.
+
+The revocation receipt (`auth_revoked`) states one claim level per part:
+`rejection_observed` (the revoked token was tried and refused),
+`request_accepted` (the revocation endpoint answered 200, which RFC 7009 also
+answers for an unknown token, so it proves nothing alone) or
+`not_confirmed`. `access.probes` are the timed reads with the last access
+token (`after_ms`, `elapsed_ms`, `status`), `first_rejected_ms` the measured
+revocation latency, and `still_valid_at_cap` with `remaining_lifetime_s` a
+token that outlived its revocation. The full receipt can be attached as
+`receipt`.
+
+`verify-audit` checks these events as it checks every event (chain,
+signature, schema, blob refs); it does not judge them. Whether every grant
+was revoked before the close is mcp-audit's close-out precondition.
 
 **The 0.9.0 convention.** Before these kinds, a harness freeze was recorded as
 `finding` with `class: "protocol_freeze"` and `fingerprint`, and runs as
