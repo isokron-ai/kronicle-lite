@@ -159,7 +159,8 @@ Three findings from a run of the MCP write-check suite (MWS 0.9) against
   inside the write transaction against the `document.put` that holds it: the
   same put (slug, title, markdown hash, source, project, explicit
   `derived_from` and actor) returns the original result with
-  **`replayed: true`** and appends nothing; anything else is refused with
+  **`replayed: true`** and appends nothing (the revision, title and blocks
+  that put recorded, even after later writes; `head` is the current head); anything else is refused with
   `idempotency_key_reused`, naming the fields that differ, and nothing is
   written. A key held by another kind of event is refused too. A git-bound
   source counts by its path and by whether it is bound, not by the blob it
@@ -183,7 +184,9 @@ Three findings from a run of the MCP write-check suite (MWS 0.9) against
   in `structuredContent` and the text block: `rolled_back`, `failed` (a dry
   run that would roll back) and `partial` (a `best_effort` apply in which an
   op failed; the ops reported `applied` are committed). Errors raised before
-  the plan runs (`confirm_*`, `idempotency_key_reused`, …) are unchanged.
+  the plan runs (`confirm_*`, `idempotency_key_reused`, …) are unchanged. A
+  `best_effort` dry run in which an op would fail is still `planned` (it
+  issues a token): read `ops[].status` before committing it.
 - **`supersede_block` declared `destructiveHint: false` (MWS-ANN-5,
   SHOULD).** It replaces a block's live content: the document reads the new
   text from then on, as `tombstone_block` (already `destructiveHint: true`)
@@ -198,7 +201,8 @@ Three findings from a run of the MCP write-check suite (MWS 0.9) against
   `CORE_CATALOG_FINGERPRINT` `b4f0c164…6af3` (both snapshots in
   `.mcp-catalog/` regenerated).
 - Tests: `test/mws-retry-atom-ann.test.ts` (each finding, at the store and
-  over MCP; every one failed on 0.11.2). `test/chain.test.ts` and
+  over MCP, including a replay after later writes, the git-binding and
+  project rules; every one fails on 0.11.2). `test/chain.test.ts` and
   `test/documents.test.ts` encoded the old replay of a changed request and
   now assert the refusal.
 

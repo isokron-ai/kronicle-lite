@@ -24,7 +24,10 @@ own `document.*` / `block.*` events land in the same transaction.
 dry run that would roll back; no `confirm_token`) and `partial` (a
 `best_effort` apply in which an op failed; the ops reported `applied` are
 committed). Read `ops[].status` and `ops[].error` for what happened to each
-op. Up to 0.11.2 these came back as normal results.
+op. Up to 0.11.2 these came back as normal results. A `best_effort` dry run
+stays `planned` (and issues a token) even when an op in it would fail, since
+`best_effort` commits the rest; read `ops[].status` in the preview, because
+committing that plan returns `partial`, which is an error.
 
 ## expect_version
 

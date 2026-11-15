@@ -575,16 +575,16 @@ export class DocumentStore {
       // KL-1: a used idempotency_key replays only the same put (same slug, title, markdown, source,
       // project, explicit lineage and actor); anything else under it is refused, nothing appended.
       if (args.idempotency_key !== undefined) {
-        const prior = this.chain.findByIdempotencyKey(args.idempotency_key);
-        if (prior) {
-          const differs = this.putDiffers(prior, { slug: args.slug, title: args.title, markdown_hash, source: args.source, project: args.project ?? null, derived_from: explicit, actor_id: args.actor_id });
+        const keyHolder = this.chain.findByIdempotencyKey(args.idempotency_key);
+        if (keyHolder) {
+          const differs = this.putDiffers(keyHolder, { slug: args.slug, title: args.title, markdown_hash, source: args.source, project: args.project ?? null, derived_from: explicit, actor_id: args.actor_id });
           if (differs.length > 0) {
             throw new DocumentError(
               'idempotency_key_reused',
-              `idempotency_key was already used (seq ${prior.seq}) for a different ${prior.event_type === 'document.put' ? 'put' : prior.event_type} (${differs.join(', ')} differ${differs.length === 1 ? 's' : ''}); nothing written. Use a new key for a new write.`,
+              `idempotency_key was already used (seq ${keyHolder.seq}) for a different ${keyHolder.event_type === 'document.put' ? 'put' : keyHolder.event_type} (${differs.join(', ')} differ${differs.length === 1 ? 's' : ''}); nothing written. Use a new key for a new write.`,
             );
           }
-          return { ...this.describePut(prior), replayed: true };
+          return { ...this.describePut(keyHolder, true), replayed: true };
         }
       }
       const existing = this.getDocument(args.slug);
@@ -706,7 +706,7 @@ export class DocumentStore {
       });
       // why: the key was checked at the top of this transaction; the chain refuses a changed request under it.
       if (first.replayed) {
-        return { ...this.describePut(first.event), replayed: true };
+        return { ...this.describePut(first.event, true), replayed: true };
       }
       this.applyEvent(first.event);
       let head = first.head;
@@ -847,9 +847,17 @@ export class DocumentStore {
     return out;
   }
 
-  private describePut(putEvent: ChainEvent): Omit<PutDocumentResult, 'replayed'> {
-    const p = putEvent.payload as { doc_id: string; slug: string; title: string; revision: number };
-    const live = this.liveBlocks(p.doc_id);
+  /**
+   * A put that appended nothing, described from the document.put behind it.
+   * `asOfPut` (KL-1 replay): the blocks that put left live (its `block_ids`,
+   * in order), so a replay answers with the original put's revision, title
+   * and blocks even after later writes; otherwise the current live blocks
+   * (a no-op put: the same thing). `head` is the current chain head.
+   */
+  private describePut(putEvent: ChainEvent, asOfPut = false): Omit<PutDocumentResult, 'replayed'> {
+    const p = putEvent.payload as { doc_id: string; slug: string; title: string; revision: number; block_ids?: unknown };
+    const ids = asOfPut && Array.isArray(p.block_ids) ? (p.block_ids as unknown[]).filter((x): x is string => typeof x === 'string') : null;
+    const rows = ids !== null ? ids.map((id) => this.getBlock(id)).filter((b): b is BlockRow => b !== null) : this.liveBlocks(p.doc_id);
     return {
       doc_id: p.doc_id,
       slug: p.slug,
@@ -857,9 +865,9 @@ export class DocumentStore {
       revision: p.revision,
       chain_seq: putEvent.seq,
       head: this.chain.head(),
-      blocks: live.map((b) => ({
+      blocks: rows.map((b, i) => ({
         block_id: b.block_id,
-        ordinal: b.ordinal,
+        ordinal: ids !== null ? i : b.ordinal,
         kind: b.kind,
         heading_path: splitHeadingPath(b.heading_path),
         content_hash: b.content_hash,

@@ -117,6 +117,31 @@ describe('KL-1 (MWS-RETRY-2): a reused idempotency_key with changed arguments is
     expect(docs.getDocument('d')!.title).toBe('t');
   });
 
+  it('putDocument: a replay after later writes answers with the original put (revision, title and its blocks)', () => {
+    const { docs } = fresh();
+    const base = { slug: 'd', title: 't', markdown: '# d\n\nfirst\n', actor_id: 'a', idempotency_key: 'k' };
+    const r1 = docs.putDocument(base);
+    docs.putDocument({ slug: 'd', title: 't2', markdown: '# d\n\nsecond\n', actor_id: 'a' });
+    const again = docs.putDocument(base);
+    expect(again).toMatchObject({ replayed: true, revision: 1, title: 't', chain_seq: r1.chain_seq });
+    expect(again.blocks.map((b) => [b.block_id, b.content_hash])).toEqual(r1.blocks.map((b) => [b.block_id, b.content_hash]));
+  });
+
+  it('putDocument: a git-bound source counts by path and binding, not by the blob it pins; the project counts', () => {
+    const { docs, chain } = fresh();
+    const git = (blob: string) => ({ repo_root: '/r', path: 'notes/d.md', blob_sha: blob, commit: null });
+    const base = { slug: 'd', title: 't', markdown: 'x\n', actor_id: 'a', idempotency_key: 'k', project: { key: 'p1', root: '/r' } };
+    docs.putDocument({ ...base, source: { kind: 'file', path: 'notes/d.md', git: git('1') } });
+    const head = chain.head();
+    // The file moved on (another blob): the same request, a replay.
+    expect(docs.putDocument({ ...base, source: { kind: 'file', path: 'notes/d.md', git: git('2') } }).replayed).toBe(true);
+    // Unbound now, or another project, or none: a different request.
+    expect(codeOf(() => docs.putDocument({ ...base, source: { kind: 'file', path: 'notes/d.md' } }))).toBe('idempotency_key_reused');
+    expect(codeOf(() => docs.putDocument({ ...base, project: { key: 'p2', root: '/r' }, source: { kind: 'file', path: 'notes/d.md', git: git('1') } }))).toBe('idempotency_key_reused');
+    expect(codeOf(() => docs.putDocument({ ...base, project: null, source: { kind: 'file', path: 'notes/d.md', git: git('1') } }))).toBe('idempotency_key_reused');
+    expect(chain.head()).toEqual(head);
+  });
+
   it('putDocument: a key held by another kind of event is refused, not replayed as a put', () => {
     const { docs, chain } = fresh();
     chain.append({ event_type: 'note.added', payload: { n: 1 }, actor_id: 'a', idempotency_key: 'shared' });
