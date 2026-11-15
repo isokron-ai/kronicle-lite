@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-15T21:57:22.187Z",
+  "capturedAt": "2026-11-15T23:21:24.315Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -312,12 +312,12 @@
       },
       {
         "annotations": {
-          "destructiveHint": false,
+          "destructiveHint": true,
           "idempotentHint": false,
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Create or re-put a Markdown document by slug. Unchanged blocks keep their ids; changed blocks are superseded and removed ones tombstoned, which other agents see as retractions. bind_git with source_path ties the document to that file's git blob (verify reports STALE_SOURCE when the file changes). Refuses text holding a secret (API key, token, private key, connection string): the chain cannot forget it.",
+        "description": "Create or re-put a Markdown document by slug. A re-put replaces the document: unchanged blocks keep their ids, changed blocks are replaced (superseded) and dropped ones tombstoned, and the document reads the new text from then on. The old text stays on the chain (orient shows it as retractions) and receipts for the old blocks then verify as SUPERSEDED or TOMBSTONED. bind_git with source_path ties the document to that file's git blob (verify reports STALE_SOURCE when the file changes). Refuses text holding a secret (API key, token, private key, connection string): the chain cannot forget it.",
         "inputSchema": {
           "properties": {
             "actor_id": {
@@ -841,5 +841,5 @@
     "title": "kronicle-lite",
     "version": "0.11.2"
   },
-  "sha256": "b4f0c16456e32c3b23a7c8dd77c6b583485085bfb0452a291bbecb6c7e7c6af3"
+  "sha256": "f8d2b0aea9972c539297d3261f83125fa74d066b49ddd995279a2cd182c4daeb"
 }

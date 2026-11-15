@@ -221,7 +221,10 @@ Orient before the next write and re-check anything the delta touched.
 - `verify`: malformed input yields `UNVERIFIED / malformed_receipt`, never
   a tool error. `SUPERSEDED` carries `current_block_id` and
   `current_content_hash`; `STALE_SOURCE` carries `source_drift`.
-- `put_document`: unchanged blocks keep their ids; retrying the same put
+- `put_document`: declared destructive, like `supersede_block`: a re-put
+  replaces changed blocks and tombstones dropped ones (the old text stays
+  on the chain); a client that honours the hint may ask before each call.
+  Unchanged blocks keep their ids; retrying the same put
   with its `idempotency_key` returns the first result (`replayed: true`),
   and other arguments under a used key are refused
   (`idempotency_key_reused`): use a new key for a new write; `bind_git`

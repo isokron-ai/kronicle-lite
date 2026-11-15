@@ -567,8 +567,10 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     {
       title: 'Create or replace a document',
       description:
-        'Create or re-put a Markdown document by slug. Unchanged blocks keep their ids; changed blocks are superseded and ' +
-        'removed ones tombstoned, which other agents see as retractions. bind_git with source_path ties the document to ' +
+        'Create or re-put a Markdown document by slug. A re-put replaces the document: unchanged blocks keep their ids, ' +
+        'changed blocks are replaced (superseded) and dropped ones tombstoned, and the document reads the new text from then ' +
+        'on. The old text stays on the chain (orient shows it as retractions) and receipts for the old blocks then verify as ' +
+        'SUPERSEDED or TOMBSTONED. bind_git with source_path ties the document to ' +
         'that file\'s git blob (verify reports STALE_SOURCE when the file changes). Refuses text holding a secret (API key, ' +
         'token, private key, connection string): the chain cannot forget it.',
       inputSchema: lean(
@@ -587,7 +589,8 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
         'input',
       ),
       outputSchema: lean(PutDocumentResultSchema, 'output'),
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      // A re-put supersedes changed blocks and tombstones dropped ones (as supersede_block and apply do), so it is not additive.
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
     (args) => {
       try {

@@ -11,6 +11,11 @@
  *         `isError: true`, with the same structured body.
  *   KL-3  MWS-ANN-5 (SHOULD): supersede_block replaces a block's live content
  *         but declared `destructiveHint: false`.
+ *
+ * And the same reading for put_document (MWS-ANN-5; ANN-2 for an upsert with
+ * no expected version): a re-put supersedes changed blocks and tombstones
+ * dropped ones, so it declares `destructiveHint: true` in the full and core
+ * catalogs.
  */
 
 import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
@@ -256,5 +261,31 @@ describe('over MCP', () => {
     const sup = tools.find((t) => t.name === 'supersede_block')!;
     expect(sup.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: false });
     expect(sup.description).toMatch(/old text stays on the chain/);
+  });
+
+  it('put_document declares destructiveHint: true (full and core catalogs) and says what a re-put replaces', async () => {
+    type Listed = Awaited<ReturnType<Client['listTools']>>['tools'];
+    const check = (tools: Listed) => {
+      const put = tools.find((t) => t.name === 'put_document')!;
+      expect(put.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false });
+      expect(put.description).toMatch(/changed blocks are replaced \(superseded\) and dropped ones tombstoned/);
+      expect(put.description).toMatch(/old text stays on the chain/);
+    };
+    check((await client.listTools()).tools);
+
+    const coreStore = new KronicleLite({ memory: true });
+    const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+    const handle = serveStdio(createServerFactory(coreStore, { profile: 'core' }), { transport: serverT });
+    const coreClient = new Client({ name: 'mws-test-core', version: '0.0.0' }, { versionNegotiation: { mode: { pin: '2026-07-28' } } });
+    try {
+      await coreClient.connect(clientT);
+      const { tools } = await coreClient.listTools();
+      expect(tools.map((t) => t.name)).toContain('put_document');
+      check(tools);
+    } finally {
+      await coreClient.close();
+      await handle.close();
+      coreStore.close();
+    }
   });
 });

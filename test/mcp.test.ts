@@ -124,7 +124,7 @@ describe('MCP server (in-process, 2026-07-28 client via serveStdio over InMemory
     expect((gss.inputSchema as { properties: Record<string, unknown> }).properties).toHaveProperty('budget_tokens');
     expect((gss.outputSchema as { required: string[] }).required).toEqual(expect.arrayContaining(['cursor', 'head', 'drift_banner']));
     expect(tools.find((t) => t.name === 'tombstone_block')!.annotations).toMatchObject({ destructiveHint: true });
-    expect(tools.find((t) => t.name === 'put_document')!.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: false });
+    expect(tools.find((t) => t.name === 'put_document')!.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true });
   });
 
   it('tools/list order is deterministic across calls', async () => {

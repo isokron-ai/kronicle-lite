@@ -206,6 +206,31 @@ Three findings from a run of the MCP write-check suite (MWS 0.9) against
   `test/documents.test.ts` encoded the old replay of a changed request and
   now assert the refusal.
 
+### Changed — `put_document` declares `destructiveHint: true` (behaviour change)
+
+- **Behaviour change for clients: a client that honours the hint may now
+  ask for confirmation before `put_document`, possibly on every call.**
+  Clients that key only on `readOnlyHint` see no change.
+- **Why (MWS-ANN-5, SHOULD; ANN-2 for an upsert with no expected
+  version):** a re-put of an existing slug is not additive. Changed blocks
+  are replaced (superseded) and dropped ones tombstoned (a re-put with
+  empty markdown tombstones every live block), and the document reads the
+  new text from then on: the same mechanics as `supersede_block` and
+  `apply`, which already declare `destructiveHint: true`. In MCP, `false`
+  means the tool only adds. The old text is not erased: it stays on the
+  chain, orient shows it as retractions, and receipts for the old blocks
+  verify as `SUPERSEDED` or `TOMBSTONED`. The description now says so.
+- **MCP catalog drift (deliberate):** `put_document`'s annotation and
+  description, in both the full and the `--core` catalogs.
+  `CATALOG_FINGERPRINT` is now `d31f975b…e439` and
+  `CORE_CATALOG_FINGERPRINT` `f8d2b0ae…daeb` (both snapshots in
+  `.mcp-catalog/` regenerated).
+- Docs: README tool table, `skills/orient/SKILL.md`.
+- Tests: `test/mws-retry-atom-ann.test.ts` checks the hint and the
+  description from `tools/list` in the full and core profiles;
+  `test/mcp.test.ts` asserted `destructiveHint: false` and now asserts
+  `true`.
+
 ## [0.11.2] — 2026-11-10
 
 ### Fixed — token-count labels are no longer refused as secrets
