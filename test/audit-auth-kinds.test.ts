@@ -53,6 +53,8 @@ const ISS = 'https://as.example.test';
 const MCP = 'https://mcp.example.test/mcp';
 /** A JWT-shaped string (header {"alg":"none"}, a claims part, a signature part): never recordable. */
 const JWT = 'eyJhbGciOiJub25lIn0.eyJzdWIiOiJ1c2VyLTEyMyIsImF1ZCI6Im1jcCJ9.c2lnbmF0dXJlLXBhcnQtMTIzNDU2';
+/** A short unsigned JWT (40 characters): fits most length limits. */
+const SHORT_JWT = 'eyJhbGciOiJub25lIn0.eyJzdWIiOiJ1In0.c2ln';
 /** An opaque refresh token as an authorization server issues one. */
 const OPAQUE = 'rt_Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MGFiY2RlZmdoaWo';
 const c = (label: string, commit = '0123456789abcdef', len = 43) => ({ commit, len, label });
@@ -261,6 +263,9 @@ describe('no credential can be recorded in an OAuth event', () => {
       'ftp://as.example.test',
       `${ISS}/a b`,
       `${ISS}/${'a'.repeat(600)}`,
+      `${ISS}/cb%3Fcode%3DSplxlOBeZQQYbYS6WxSbIA%26state%3Daf0ifjsldkj`,
+      `${MCP}/${SHORT_JWT}`,
+      `${MCP}/${JWT}`,
       '',
     ];
     const good = [ISS, `${ISS}/`, 'https://login.example.test/0b4f7f2c-0000-4000-8000-000000000000/v2.0', 'https://as.example.test:8443/oauth2/default', 'http://127.0.0.1:33418/callback', 'http://localhost/callback', 'http://[::1]:8080/'];
@@ -316,13 +321,42 @@ describe('no credential can be recorded in an OAuth event', () => {
     for (const v of [600, -1, 1.5, '200']) refused('auth_failed', { ...VALID.auth_failed, status: v });
   });
 
-  it('every string leaf of every valid payload is refused when it becomes a raw token (JWT)', () => {
+  it('every string leaf of every valid payload (event key and blob media types too) is refused when it becomes a raw token (JWT)', () => {
+    const ref = { sha256: SHA, size: 3, media_type: 'application/json' };
     for (const kind of AUTH_KINDS) {
-      for (const path of leaves(VALID[kind])) {
-        if (typeof getAt(VALID[kind], path) !== 'string') continue;
-        expect(parse(kind, setAt(VALID[kind], path, JWT)).ok, `${kind}.${path.join('.')}`).toBe(false);
+      const base = { ...VALID[kind], journal: ref, ...(kind === 'auth_granted' ? { attachment: { ...ref, media_type: 'image/png' } } : {}), ...(kind === 'auth_revoked' ? { receipt: ref } : {}) };
+      accepted(kind, base);
+      for (const path of [...leaves(base), ['event_key']]) {
+        if (path[0] !== 'event_key' && typeof getAt(base, path) !== 'string') continue;
+        for (const jwt of [JWT, SHORT_JWT]) expect(parse(kind, setAt({ ...COMMON, ...base }, path, jwt)).ok, `${kind}.${path.join('.')} = ${jwt}`).toBe(false);
       }
     }
+    // the older kinds keep their 0.11.x rules: a token-shaped event key still parses there (the guard scans it)
+    expect(parseAuditPayload('finding', { ...COMMON, event_key: SHORT_JWT, finding_id: 'F1', status: 'discovered' }).ok).toBe(true);
+  });
+
+  it('a blob ref in an OAuth event carries a bare media type: no parameters, no free text', () => {
+    const ref = { sha256: SHA, size: 3 };
+    for (const mt of ['application/json', 'application/x-ndjson', 'image/png', 'application/vnd.isokron.receipt+json']) accepted('auth_revoked', { ...VALID.auth_revoked, receipt: { ...ref, media_type: mt } });
+    for (const mt of ['text/plain; code=SplxlOBeZQQYbYS6WxSbIA', OPAQUE, 'Text/Plain', 'text/plain ', 'application/json; charset=utf-8', `x/${SHORT_JWT}`, '']) {
+      refused('auth_revoked', { ...VALID.auth_revoked, receipt: { ...ref, media_type: mt } });
+      refused('auth_granted', { ...VALID.auth_granted, journal: { ...ref, media_type: mt } });
+    }
+    refused('auth_revoked', { ...VALID.auth_revoked, receipt: { ...ref, note: 'x' } });
+    // through the store: the blob is stored, the event that names its free-text media type is not
+    const kl = new KronicleLite({ memory: true });
+    const b = kl.audit.putBlob(Buffer.from('x'), 'text/plain; code=SplxlOBeZQQYbYS6WxSbIA');
+    expect(() => kl.audit.record('oauth-audit', [{ kind: 'auth_granted', event_key: 'g', payload: { ...VALID.auth_granted, journal: b } }], 'auditor')).toThrow(/journal\.media_type/);
+    kl.close();
+  });
+
+  it('shapes real tokens and servers produce are accepted (namespaced claims, fractional times, no lifetime, N_A)', () => {
+    accepted('auth_granted', setAt(VALID.auth_granted, ['access_token_jwt', 'other_claims'], ['https://example.com/roles', 'urn:zitadel:iam:org:id', 'auth_time']));
+    accepted('auth_granted', setAt(VALID.auth_granted, ['access_token_jwt', 'claims', 'exp'], 1794703600.5));
+    accepted('auth_granted', { ...VALID.auth_granted, expires_in: null });
+    accepted('auth_refreshed', { ...VALID.auth_refreshed, expires_in: null });
+    accepted('auth_granted', { ...VALID.auth_granted, token_type: 'N_A' });
+    accepted('auth_granted', { ...VALID.auth_granted, token_type: 'DPoP' });
   });
 
   it('the write-time secret guard still scans every OAuth payload', () => {
@@ -408,12 +442,12 @@ function resign(dir: string, kl: KronicleLite, edit: (m: BundleManifest) => void
 }
 
 describe('evidence bundles with OAuth events', () => {
-  function store(withAuth: boolean) {
+  function store(withAuth: boolean, freeze: 'planned' | 'none' = 'planned') {
     const kl = new KronicleLite({ memory: true });
     const journal = kl.audit.putBlob(Buffer.from('{"format":"mcp-audit/auth-journal@1","seq":1}\n'), 'application/x-ndjson');
     const receipt = kl.audit.putBlob(Buffer.from('{"profile":"owner-a","refresh":{"claim":"rejection_observed"}}'), 'application/json');
     const manifest = kl.audit.putBlob(Buffer.from('harness files'), 'text/plain');
-    kl.audit.record('oauth-audit', [{ kind: 'harness_frozen', event_key: 'freeze', payload: { harness_id: 'h1', fingerprint: SHA, manifest, plan: ['run-1'] } }], 'auditor');
+    if (freeze === 'planned') kl.audit.record('oauth-audit', [{ kind: 'harness_frozen', event_key: 'freeze', payload: { harness_id: 'h1', fingerprint: SHA, manifest, plan: ['run-1'] } }], 'auditor');
     if (withAuth) {
       kl.audit.record('oauth-audit', [
         { kind: 'auth_registered', event_key: 'reg', payload: { ...VALID.auth_registered, journal } },
@@ -450,20 +484,22 @@ describe('evidence bundles with OAuth events', () => {
     kl.close();
   });
 
-  it('the key holder relabelling a /4 bundle /3 (or /2) fails events: the OAuth kinds are not allowed there', () => {
-    for (const f of [BUNDLE_FORMAT_V3, BUNDLE_FORMAT_V2] as const) {
-      const { kl, dir } = store(true);
+  it('the key holder relabelling a /4 bundle /3, /2 or /1 fails events: the OAuth kinds are not allowed there', () => {
+    // OAuth events only, so the only rule that can catch any relabelling is the OAuth kind's
+    for (const f of [BUNDLE_FORMAT_V3, BUNDLE_FORMAT_V2, BUNDLE_FORMAT_V1] as const) {
+      const { kl, dir, r } = store(true, 'none');
+      expect(r.manifest.format).toBe(BUNDLE_FORMAT_V4);
       resign(dir, kl, (m) => {
         m.format = f;
       });
       const v = verifyBundle(dir, { public_key_pem: kl.identity.signer.public_key_pem });
       expect(v.ok).toBe(false);
-      expect(v.checks.find((x) => x.check === 'events')!.problem).toMatch(new RegExp(`auth_registered is not allowed in a ${f.replace('/', '\\/')} bundle|harness_frozen with a run plan needs`));
+      expect(v.checks.find((x) => x.check === 'events')!.problem).toBe(`seq ${r.manifest.range.from_seq}: auth_registered is not allowed in a ${f} bundle`);
       kl.close();
     }
   });
 
-  it('a 0.11.x reader refuses a /4 bundle by its format, never by skipping the events it does not know', () => {
+  it('a format this reader does not know is refused on the manifest, never read by skipping events (how 0.11.x meets /4)', () => {
     const { kl, dir } = store(true);
     resign(dir, kl, (m) => {
       m.format = 'kronicle-lite-evidence-bundle/5' as never;

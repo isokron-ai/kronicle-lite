@@ -82,6 +82,7 @@ const VALUES: unknown[] = [
   ISS, `${ISS}/p?code=x`, `${ISS}#f`, 'https://u:p@as.example.test', 'http://as.example.test', 'http://127.0.0.1:8080/cb', 'http://localhost.evil.test', JWT, `x${JWT}`, 'eyJ.', '0123456789abcdef', '0123456789ABCDEF', '0123456789abcde',
   'read write', 'read  write', ' read', 'read "x"', 'invalid_grant', 'http_401', 'http_4011', 'Bearer', 'Bearer1', 'dcr', 'passed', 'rejection_observed', 'access-token', 'subject',
   commit('access-token'), commit('refresh-token'), { commit: '0123456789abcdef', len: 1 }, { ...commit('subject'), value: 'x' }, 599, 600, 3600,
+  'text/plain', 'text/plain; code=x', 'application/vnd.a+json', 'https://example.com/roles', 'N_A', 1794703600.5,
   [], [1], ['x'], [UUID, UUID], ['run-1', 'run-1'], [null],
   {}, { a: 1 }, { sha256: SHA, size: 1 }, { sha256: SHA, size: 1, redacted: false }, { sha256: SHA, size: -1, extra: 1 }, { name: 'x' }, { '': 1 }, { ['k'.repeat(65)]: 1 }, { ['1'.repeat(65)]: 1 }, { a: 'x' },
   Object.fromEntries(Array.from({ length: 17 }, (_, i) => [`t${i}`, i])), Object.fromEntries(Array.from({ length: 65 }, (_, i) => [`d${i}`, i])),

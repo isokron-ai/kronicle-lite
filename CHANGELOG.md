@@ -17,17 +17,20 @@ uses semantic versioning once past 0.x.
   receipt: what was revoked, whether the revoked refresh token was refused,
   the timed reads with the last access token, the registration's deletion,
   and a claim level per part). Schemas in `docs/AUDIT.md`.
-- **No credential can be recorded in them.** Every object is strict, so a
-  `code`, `code_verifier`, `state`, `client_secret`, raw `token` or any
-  unlisted field is refused at any level. Tokens, codes, verifiers, secrets,
-  subjects and login hints are only keyed commitments `{commit, len, label}`
-  (16 hex digits, a fixed credential label per field); each event names the
-  sha256 of the audit's commitment key, never the key. URLs are `https` (or
-  `http` to a loopback host) with no userinfo, query or fragment. Stages,
-  error codes and replay outcomes are lowercase letters and underscores, with
-  no free-text description. Names, client ids, audiences, issuer claims, key
-  ids and scopes refuse a token-shaped (JWT) value. The write-time secret
-  guard scans every payload, as before.
+- **No field for a credential.** Every object is strict, so a `code`,
+  `code_verifier`, `state`, `client_secret`, raw `token` or any unlisted
+  field is refused at any level. Tokens, codes, verifiers, secrets, subjects
+  and login hints are only keyed commitments `{commit, len, label}` (16 hex
+  digits, a fixed credential label per field); each event names the sha256
+  of the audit's commitment key, never the key. URLs are `https` (or `http`
+  to a loopback host) with no userinfo, query, fragment or
+  percent-encoding. Stages, error codes and replay outcomes are lowercase
+  letters and underscores, with no free-text description. Blob refs carry a
+  bare media type. Every free string, the event key included, refuses a
+  token-shaped (JWT) value, and the write-time secret guard scans every
+  payload, as before. Identifier fields (profile, client id, scope …)
+  cannot tell an opaque credential from an identifier; that stays the
+  recorder's field policy (docs/AUDIT.md).
 - **Bundle format `kronicle-lite-evidence-bundle/4`**: `/3` plus the OAuth
   kinds, with every `/3` rule. `verify-audit` (and `@isokron/verify`, built
   from the same source) reads `/4` under the audit profile exactly as `/3`; a

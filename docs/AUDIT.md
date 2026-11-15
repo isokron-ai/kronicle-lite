@@ -183,9 +183,10 @@ profile exactly as `/3`. A store without them is still exported as before
 existing pack and a re-export of an existing store are byte for byte what
 0.11.x made. 0.11.x readers refuse a `/4` pack by its format.
 
-No OAuth payload can hold a credential. The schemas are strict at every
-level, so a field named `code`, `code_verifier`, `state`, `client_secret`,
-`token` or any other name not listed is refused. What is kept:
+An OAuth payload has no field for a credential. The schemas are strict at
+every level, so a field named `code`, `code_verifier`, `state`,
+`client_secret`, `token` or any other name not listed is refused. What is
+kept:
 
 - **Commitments, never values.** Every token, code, verifier, secret, subject
   and login hint is `{commit, len, label}`: `commit` is the first 16 hex
@@ -197,22 +198,44 @@ level, so a field named `code`, `code_verifier`, `state`, `client_secret`,
   auditor; each event names its `commitment_key` (the key's sha256) so a
   revealed key can be checked. The commitment shows that two events saw the
   same value (the auditor attests to it); nobody without the key can test a
-  guess, and a third party cannot recompute one.
+  guess, and a third party cannot recompute one. Revealing the key opens
+  every commitment of the audit, and lets its holder confirm guesses of the
+  low-entropy ones (a `subject` or `login-hint` that is an email address):
+  reveal it only to whoever must check a commitment.
 - **Issuer, resource, audience, times, scope, client id** in clear. URLs are
   `https` (or `http` to `127.0.0.1`, `localhost` or `[::1]`) with no
-  userinfo, query or fragment, so a code or token carried in a URL cannot be
-  recorded. A JWT access token's structure is kept as `access_token_jwt`:
-  header (`alg`, `kid`, `typ`), the claims `iss`, `aud` (a list), `exp`,
-  `iat`, `nbf`, `scope`, `scp`, `client_id`, `azp`, `sub` and `jti` as
-  commitments, the names of the other claims, and `claims_verified` (false
-  unless the signature was checked).
+  userinfo, query, fragment or percent-encoding, so a code or token carried
+  in a query string cannot be recorded. A JWT access token's structure is
+  kept as `access_token_jwt`: header (`alg`, `kid`, `typ`), the claims
+  `iss`, `aud`, `exp`, `iat`, `nbf`, `scope`, `scp`, `client_id`, `azp`,
+  `sub` and `jti` as commitments, the names of the other claims (a
+  namespaced name may be a URL), and `claims_verified` (false unless the
+  signature was checked). The recorder normalises what tokens vary in: a
+  single `aud` string is recorded as a one-element list; `scp` is a list of
+  scope tokens (a space-separated `scp` string goes in `scope`); times are
+  NumericDates (a fraction is allowed).
 - **Codes, not text.** `stage`, `error` and the revocation `replay` outcome are
   lowercase letters and underscores (and `http_<status>` for a replay); there
-  is no field for a server's error description.
-- **No token-shaped value.** Profile, identity, tenant and registration names,
-  client ids, audiences, issuer claims, key ids and scopes refuse anything
-  shaped like a JSON Web Token. The write-time secret guard then scans the
-  payload, as for every kind.
+  is no field for a server's error description. A server's error string that
+  is not such a code is recorded as `server_error_other` (the recorder maps
+  it; the schema refuses it).
+- **Bare media types.** A blob ref in an OAuth event (`journal`,
+  `attachment`, `receipt`) has a `media_type` of `type/subtype` only, with no
+  parameters.
+- **Event keys from the recorder.** An OAuth event's `event_key` is built from
+  the profile, the kind and the generation, never from a credential such as
+  `state` or `jti`; it refuses a token-shaped value.
+- **No token-shaped value.** Every free string (names, client ids,
+  audiences, issuer claims, key ids, claim names, scopes, URLs, media types,
+  the event key) refuses anything shaped like a JSON Web Token. The
+  write-time secret guard then scans the payload, as for every kind.
+
+What the schemas cannot do: a public identifier field (`profile`,
+`identity`, `tenant`, `registration_id`, `client_id`, a scope) cannot tell
+an opaque random credential from an identifier. Keeping credentials out of
+those fields is the recorder's field policy (mcp-audit's auth journal
+applies it before anything is recorded), with the secret guard as the
+backstop for the shapes it knows.
 
 The revocation receipt (`auth_revoked`) states one claim level per part:
 `rejection_observed` (the revoked token was tried and refused),

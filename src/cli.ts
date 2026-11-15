@@ -77,7 +77,7 @@ Usage:
                                                                  (a command printing it: keychain, password manager),
                                                                  KRONICLE_ANCHOR_KEY or config.json, in that order
                                                                  (--key K works but warns: argv is visible to other users).
-                                                                 Audit mode (the range holds a /3 audit): no key, no push:
+                                                                 Audit mode (the range holds a /3 or /4 audit): no key, no push:
                                                                  exit 2 before anything is stored
   kronicle-lite verify       [--remote [--offline]] [--url U] [--genesis PIN] [--json]
                                                                  local: = verify-chain; --remote: recompute each anchored
@@ -149,7 +149,7 @@ Usage:
                                                                  from Sectigo and DigiCert; when the latest audit event is
                                                                  not anchored yet it pushes [1..head] first (anchor key as
                                                                  for checkpoint --push). Prints the derived freeze nonce
-                                                                 for runs to record (/3). A missing key, an unreachable
+                                                                 for runs to record (/3, /4). A missing key, an unreachable
                                                                  service or a failed TSA exits 2 and writes no .pending
                                                                  marker; --allow-pending writes one (verify-audit rejects it)
   kronicle-lite audit package --audit-id A --out DIR [--timestamps DIR] [--tsa-roots DIR] [--anchor-keys FILE] [--genesis SHA256@VALID_FROM]
@@ -159,7 +159,7 @@ Usage:
                                                                  signers, claims.json (the claims the store supports),
                                                                  SHA256SUMS(.sig) and RFC 3161 tokens over SHA256SUMS,
                                                                  COMPLETION.txt, VERIFY.md; then runs verify-audit on it
-                                                                 (the audit profile for a /3 bundle). Exit 0 VERIFIED,
+                                                                 (the audit profile for a /3 or /4 bundle). Exit 0 VERIFIED,
                                                                  2 PARTIAL, 1 otherwise
   kronicle-lite verify-audit PACK --key-fingerprint SHA256 | --key PEM-FILE [--profile audit|legacy] [--anchor-keys FILE] [--genesis SHA256@VALID_FROM]
                  [--tsa-roots DIR] [--allowed-signers FILE] [--no-tsa] [--tsa-at-gentime] [--require CLAIM,…] [--skip-claim CLAIM,…] [--strict-freeze]
@@ -172,7 +172,7 @@ Usage:
                                                                  receipts, independent_timestamps, harness_frozen_before_runs,
                                                                  run_sequence, plan_complete, reproductions_signed, closed;
                                                                  claims.json can add claims, never remove one; the bundle
-                                                                 must be format /3, anchors must close the freeze, the last run
+                                                                 must be format /3 or /4, anchors must close the freeze, the last run
                                                                  and the report, SHA256SUMS must be stamped, nothing pending.
                                                                  --profile legacy applies the 0.10.0 rules (claims.json picks
                                                                  the claims) to older packs and reports PARTIAL at best.

@@ -143,11 +143,12 @@ const JWT_SHAPED = /(?:^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]*\./;
 const notJwt = (s: string) => !JWT_SHAPED.test(s);
 /** An id (as ID) that is not token-shaped: profile, identity, tenant and registration names. */
 const AUTH_ID = ID.refine(notJwt, 'a token-shaped value (JWT) is not recorded');
-/** https, or http to a loopback host (a local build or a test fixture); no userinfo, query or fragment. */
+/** https, or http to a loopback host (a local build or a test fixture); no userinfo, query, fragment or percent-encoding. */
 const AUTH_URL = z
   .string()
   .max(512)
-  .regex(/^(?:https:\/\/[A-Za-z0-9][A-Za-z0-9.-]*|http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]))(?::[0-9]{1,5})?(?:\/[A-Za-z0-9._~%:@/-]*)?$/, 'an https URL (http only to a loopback host) with no userinfo, query or fragment');
+  .regex(/^(?:https:\/\/[A-Za-z0-9][A-Za-z0-9.-]*|http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]))(?::[0-9]{1,5})?(?:\/[A-Za-z0-9._~:@/-]*)?$/, 'an https URL (http only to a loopback host) with no userinfo, query, fragment or percent-encoding')
+  .refine(notJwt, 'a token-shaped value (JWT) is not recorded');
 /** A public identifier the protocol defines as non-secret (client id, audience, issuer claim, key id). */
 const PUBLIC_ID = z
   .string()
@@ -165,13 +166,26 @@ const SCOPE = z
 /** A stage or an error code: lowercase letters and underscores only (no digits, so no token fits). */
 const AUTH_CODE = z.string().regex(/^[a-z][a-z_]{0,63}$/, 'lowercase letters and underscores (at most 64)');
 const HTTP_STATUS = COUNT.refine((n) => n <= 599, 'an HTTP status (0 when none was received)');
-const EPOCH_S = COUNT.describe('seconds since the epoch');
+const EPOCH_S = z.number().nonnegative().describe('seconds since the epoch (a NumericDate may have a fraction)');
 const REGISTRATION_MODES = ['static', 'cimd', 'dcr'] as const;
 const CLAIM_LEVELS = ['rejection_observed', 'request_accepted', 'not_confirmed'] as const;
+/** A blob ref whose media type is a bare type/subtype (no parameters, no free text). */
+const AuthBlobRefSchema = z.strictObject({
+  sha256: SHA256,
+  size: COUNT,
+  media_type: z
+    .string()
+    .regex(/^[a-z0-9][a-z0-9!#$&^_.+-]{0,62}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,62}$/, 'a bare media type (type/subtype, lowercase, no parameters)')
+    .refine(notJwt, 'a token-shaped value (JWT) is not recorded')
+    .optional(),
+  redacted: z.literal(true).optional(),
+});
 const AuthCommon = {
   ...Common,
+  /** Built from the profile, kind and generation by the recorder, never from a credential (state, jti …). */
+  event_key: AUTH_ID,
   commitment_key: SHA256.describe('sha256 of the audit commitment key (the key itself is never recorded)'),
-  journal: BlobRefSchema.optional().describe('the redacted auth journal (mcp-audit/auth-journal@1) of this step'),
+  journal: AuthBlobRefSchema.optional().describe('the redacted auth journal (mcp-audit/auth-journal@1) of this step'),
   evidence: EVIDENCE.optional(),
 };
 
@@ -181,7 +195,7 @@ const AccessTokenJwtSchema = z.strictObject({
   header: z.strictObject({
     alg: z.string().regex(/^[A-Za-z0-9+_-]{1,32}$/, 'a JOSE algorithm name').optional(),
     kid: PUBLIC_ID.optional(),
-    typ: z.string().regex(/^[A-Za-z0-9+./_-]{1,64}$/, 'a media type').optional(),
+    typ: z.string().regex(/^[A-Za-z0-9+./_-]{1,64}$/, 'a media type').refine(notJwt, 'a token-shaped value (JWT) is not recorded').optional(),
   }),
   claims: z.strictObject({
     iss: PUBLIC_ID.optional(),
@@ -197,7 +211,7 @@ const AccessTokenJwtSchema = z.strictObject({
     jti: commitment('jti').optional(),
   }),
   other_claims: z
-    .array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_.:-]{0,63}$/, 'a claim name'))
+    .array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_.:/-]{0,127}$/, 'a claim name (a namespaced name may be a URL)').refine(notJwt, 'a token-shaped value (JWT) is not recorded'))
     .max(64)
     .optional()
     .describe('the names of the claims not kept (their values are not recorded)'),
@@ -351,8 +365,8 @@ export const PAYLOAD_SCHEMAS = {
     client_id: PUBLIC_ID,
     requested_scope: SCOPE.optional(),
     granted_scope: SCOPE.optional(),
-    token_type: z.string().regex(/^[A-Za-z][A-Za-z-]{0,15}$/, 'a token type (Bearer, DPoP)'),
-    expires_in: COUNT.optional(),
+    token_type: z.string().regex(/^[A-Za-z][A-Za-z_-]{0,15}$/, 'a token type (Bearer, DPoP, N_A)'),
+    expires_in: COUNT.nullable().optional().describe('seconds; null when the server gave no lifetime'),
     expires_at: z.iso.datetime().optional(),
     refreshable: z.boolean(),
     generation: z.number().int().positive().optional(),
@@ -364,7 +378,7 @@ export const PAYLOAD_SCHEMAS = {
     prm_sha256: SHA256.optional().describe('sha256 of the protected resource metadata document'),
     as_metadata_sha256: SHA256.optional().describe('sha256 of the authorization server metadata document'),
     whoami: z.enum(['passed', 'not_configured']).describe("the identity's whoami control before the tokens were kept"),
-    attachment: BlobRefSchema.optional().describe('operator evidence of consent (a screenshot), scanned like any blob'),
+    attachment: AuthBlobRefSchema.optional().describe('operator evidence of consent (a screenshot), scanned like any blob'),
   }),
   auth_refreshed: z.strictObject({
     ...AuthCommon,
@@ -378,7 +392,7 @@ export const PAYLOAD_SCHEMAS = {
     refresh_token: commitment('refresh-token').optional(),
     previous_refresh_token: commitment('refresh-token').optional(),
     scope: SCOPE.optional(),
-    expires_in: COUNT.optional(),
+    expires_in: COUNT.nullable().optional().describe('seconds; null when the server gave no lifetime'),
     expires_at: z.iso.datetime().optional(),
   }),
   auth_failed: z.strictObject({
@@ -413,7 +427,7 @@ export const PAYLOAD_SCHEMAS = {
       claim: z.enum(CLAIM_LEVELS),
     }),
     registration: z.strictObject({ registration_id: AUTH_ID.optional(), deleted: z.boolean(), status: HTTP_STATUS.nullable() }).optional(),
-    receipt: BlobRefSchema.optional().describe('the full revocation receipt (JSON)'),
+    receipt: AuthBlobRefSchema.optional().describe('the full revocation receipt (JSON)'),
   }),
 } as const satisfies Record<AuditKind, z.ZodType>;
 

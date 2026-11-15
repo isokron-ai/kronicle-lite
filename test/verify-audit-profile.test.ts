@@ -95,7 +95,7 @@ interface Golden {
  * TSA tokens → runs with the derived nonce (and one abandoned) → anchor → finding, refuter, human
  * sign-off, acceptance → report → close → anchor; then package and stamp SHA256SUMS.
  */
-async function build(tamper?: Tamper): Promise<Golden> {
+async function build(tamper?: Tamper, withOauth = false): Promise<Golden> {
   const dataDir = tempDir('kl-vp-store-');
   const work = tempDir('kl-vp-work-');
   const tsDir = join(work, 'timestamps');
@@ -126,7 +126,7 @@ async function build(tamper?: Tamper): Promise<Golden> {
     const plan = tamper === 'missing_planned_run' ? ['run-1', 'run-2', 'run-3', 'run-4', 'run-5'] : ['run-1', 'run-2', 'run-3', 'run-4'];
     // 0.12.0: an OAuth identity registered and logged in before the freeze (its profile is a harness file),
     // refreshed during the runs, revoked with its receipt before the findings. Commitments only.
-    const oauth = tamper === 'oauth';
+    const oauth = tamper === 'oauth' || withOauth;
     const KEY = 'ee'.repeat(32);
     const ISS = 'https://as.example.test';
     const cm = (label: string, n: number) => ({ commit: n.toString(16).padStart(16, '0'), len: 43, label });
@@ -704,3 +704,30 @@ describe('an audit with OAuth events (0.12.0): format /4, every /3 rule', () => 
     expectCaught(d, g, 'integrity', /events/);
   });
 });
+
+/** Every /3 rule holds in /4: the golden tampers again, on the audit with OAuth events. */
+describe('a /4 pack is held to every /3 rule (the tampers again, with OAuth events)', () => {
+  it('unplanned run: FAILED, plan_complete', async () => {
+    const t = await build('unplanned_run', true);
+    expect(t.pack.bundle_format).toBe(BUNDLE_FORMAT_V4);
+    expectCaught(t.pkg, t, 'plan_complete', /run\(s\) not in the plan frozen at seq \d+: run-9 \(seq \d+\)/);
+  });
+  it('missing planned run: FAILED, plan_complete', async () => {
+    const t = await build('missing_planned_run', true);
+    expectCaught(t.pkg, t, 'plan_complete', 'planned run(s) with neither run_completed nor run_abandoned: run-5');
+  });
+  it('a run with the receipt digest, not the derived nonce: FAILED, harness_frozen_before_runs', async () => {
+    const t = await build('nonce_mismatch', true);
+    expectCaught(t.pkg, t, 'harness_frozen_before_runs', /carries a nonce that is not the derived freeze nonce sha256\(01-harness-frozen receipt digest ‖ its 2 TSA token\(s\)\)/);
+  });
+  it("report run_count off by one: FAILED, plan_complete", async () => {
+    const t = await build('wrong_run_count', true);
+    expectCaught(t.pkg, t, 'plan_complete', "the report's run_count is 2; the bundle records 3 run_completed event(s)");
+  });
+  it('an accepted finding without a sign-off: FAILED, reproductions_signed', async () => {
+    const t = await build('unsigned_accepted_finding', true);
+    expect(t.pack.bundle_format).toBe(BUNDLE_FORMAT_V4);
+    expectCaught(t.pkg, t, 'reproductions_signed', /F1/);
+  });
+});
+
