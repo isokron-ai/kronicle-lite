@@ -17,6 +17,18 @@ event carrying `plan_hash`, `result_hash`, the mode, the policy version, any
 receipt. The receipt is the op's chain seq range and the last hash. The ops'
 own `document.*` / `block.*` events land in the same transaction.
 
+**A failed apply is a tool error.** Over MCP, a result whose `status` is not
+`committed` or `planned` comes back with `isError: true` and the same body
+(in `structuredContent` and the text block): `rolled_back` (an
+`all_or_nothing` plan with a failed op; nothing was written), `failed` (a
+dry run that would roll back; no `confirm_token`) and `partial` (a
+`best_effort` apply in which an op failed; the ops reported `applied` are
+committed). Read `ops[].status` and `ops[].error` for what happened to each
+op. Up to 0.11.2 these came back as normal results. A `best_effort` dry run
+stays `planned` (and issues a token) even when an op in it would fail, since
+`best_effort` commits the rest; read `ops[].status` in the preview, because
+committing that plan returns `partial`, which is an error.
+
 ## expect_version
 
 `expect_version` is the document revision the op expects; `0` means the

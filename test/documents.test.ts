@@ -114,9 +114,13 @@ describe('putDocument', () => {
   it('idempotency_key replays without new events', () => {
     const { docs, chain } = fresh();
     const r1 = docs.putDocument({ slug: 'd', title: 't', markdown: 'hello', actor_id: 'a', idempotency_key: 'k' });
-    const r2 = docs.putDocument({ slug: 'd', title: 't', markdown: 'other', actor_id: 'a', idempotency_key: 'k' });
+    const r2 = docs.putDocument({ slug: 'd', title: 't', markdown: 'hello', actor_id: 'a', idempotency_key: 'k' });
     expect(r2.revision).toBe(1);
     expect(r2.events).toBe(0);
+    expect(r2.replayed).toBe(true);
+    expect(chain.head().seq).toBe(r1.head.seq);
+    // KL-1: other markdown under the same key is refused (it used to replay the first put).
+    expect(() => docs.putDocument({ slug: 'd', title: 't', markdown: 'other', actor_id: 'a', idempotency_key: 'k' })).toThrow(DocumentError);
     expect(chain.head().seq).toBe(r1.head.seq);
   });
 });

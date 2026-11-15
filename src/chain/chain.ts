@@ -33,7 +33,11 @@ export interface AppendInput {
   event_type: string;
   payload: Record<string, unknown>;
   actor_id: string;
-  /** Replay-safe key; a second append with the same key returns the first event. */
+  /**
+   * Replay-safe key. A second append with the same key, event type, actor and
+   * payload returns the first event (`replayed: true`); the same key with
+   * anything else is refused (IdempotencyKeyReusedError).
+   */
   idempotency_key?: string;
   /** Compare-and-swap: refuse unless the current head hash equals this. */
   expected_prev_hash?: string;
@@ -48,8 +52,27 @@ export interface AppendInput {
 export interface AppendResult {
   event: ChainEvent;
   head: ChainHead;
-  /** True when an existing event was returned because the idempotency key matched. */
+  /** True when an existing event was returned because the idempotency key matched the same request. */
   replayed: boolean;
+}
+
+/**
+ * Unreleased (KL-1): an idempotency key that is already on the chain was sent
+ * with a different event type, actor or payload. Nothing is appended. Before
+ * this, the first event was returned as a replay, so a changed request was
+ * answered with the earlier result as if it had been written.
+ */
+export class IdempotencyKeyReusedError extends Error {
+  override readonly name = 'IdempotencyKeyReusedError';
+  readonly code = 'idempotency_key_reused' as const;
+  constructor(
+    /** seq of the event that holds the key. */
+    readonly seq: number,
+    /** What differs: `event_type`, `actor_id` or `payload`. */
+    readonly differs: 'event_type' | 'actor_id' | 'payload',
+  ) {
+    super(`idempotency_key was already used (seq ${seq}) for a request with a different ${differs}; nothing appended. Use a new key for a new write.`);
+  }
 }
 
 export class ChainConflictError extends Error {
@@ -236,6 +259,16 @@ export class Chain {
           .prepare(`SELECT * FROM events WHERE idempotency_key = ?`)
           .get(input.idempotency_key) as EventRow | undefined;
         if (existing) {
+          // KL-1: replay only the same request; a changed one under a used key is refused, never answered with the old event.
+          const differs =
+            existing.event_type !== input.event_type
+              ? 'event_type'
+              : existing.actor_id !== input.actor_id
+                ? 'actor_id'
+                : existing.payload_canonical !== canonicalize(input.payload)
+                  ? 'payload'
+                  : null;
+          if (differs !== null) throw new IdempotencyKeyReusedError(existing.seq, differs);
           return { event: rowToEvent(existing), head: this.head(), replayed: true };
         }
       }

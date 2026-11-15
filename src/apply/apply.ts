@@ -28,7 +28,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 
 import { CATALOG_FINGERPRINT } from '../catalog-pin.js';
-import type { Chain, ChainHead } from '../chain/index.js';
+import { IdempotencyKeyReusedError, type AppendInput, type AppendResult, type Chain, type ChainHead } from '../chain/index.js';
 import { canonicalize, type JsonValue } from '../crypto/canonical.js';
 import { sha256Hex } from '../crypto/hash.js';
 import { chainIdFromPublicKeyPem } from '../crypto/keys.js';
@@ -236,7 +236,7 @@ export class ApplyEngine {
         const failed = results.some((r) => r.status === 'failed');
         if (failed && mode === 'all_or_nothing') throw new RolledBack(results);
         const result_hash = sha256Hex(canonicalize(results as unknown as JsonValue));
-        const ev = this.chain.append({
+        const ev = this.appendCommit({
           event_type: 'apply.committed',
           actor_id: input.actor_id,
           payload: {
@@ -297,6 +297,18 @@ export class ApplyEngine {
           receipt: null,
           head: this.chain.head(),
         };
+      }
+      throw err;
+    }
+  }
+
+  /** The apply.committed append; a chain key held by another request (KL-1: the chain now refuses it) is idempotency_conflict, as a replay is. */
+  private appendCommit(input: AppendInput): AppendResult {
+    try {
+      return this.chain.append(input);
+    } catch (err) {
+      if (err instanceof IdempotencyKeyReusedError) {
+        throw new ApplyError('idempotency_conflict', `the chain already holds an event under this apply's key (seq ${err.seq}); nothing committed`);
       }
       throw err;
     }

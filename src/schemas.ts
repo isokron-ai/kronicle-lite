@@ -699,6 +699,7 @@ export const PutDocumentResultSchema = z.object({
   blocks_truncated: z.boolean().describe('0.9.0: true when `blocks` is not the whole list.'),
   blocks_next: z.string().nullable().describe('0.9.0: resource URI (kronicle://docs/{slug}/blocks/{revision}/{offset}) of the rest of the list; null when blocks is complete.'),
   events: z.number().int().nonnegative().describe('Events appended by this call (0 on idempotent replay).'),
+  replayed: z.boolean().describe('true: this idempotency_key already recorded the same put; the original result, nothing appended.'),
   source: DocumentSourceSchema.optional(),
   warnings: z.array(z.string()).optional().describe('Non-fatal notes, e.g. bind_git outside a git repository.'),
   redactions: z.array(SecretFindingSchema).optional().describe('0.6.0: secrets replaced before chaining (redact_secrets).'),

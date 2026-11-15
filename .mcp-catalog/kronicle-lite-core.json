@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-10T21:31:17.408Z",
+  "capturedAt": "2026-11-15T21:57:22.187Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -336,6 +336,7 @@
               "type": "string"
             },
             "idempotency_key": {
+              "description": "Retry key: the same put returns the first result (replayed: true); other arguments under it are refused.",
               "maxLength": 200,
               "minLength": 1,
               "type": "string"
@@ -411,6 +412,9 @@
             "redactions": {
               "type": "array"
             },
+            "replayed": {
+              "type": "boolean"
+            },
             "revision": {
               "type": "integer"
             },
@@ -442,6 +446,7 @@
             "blocks_truncated",
             "blocks_next",
             "events",
+            "replayed",
             "stale_write_advisory"
           ],
           "type": "object"
@@ -585,12 +590,12 @@
       },
       {
         "annotations": {
-          "destructiveHint": false,
+          "destructiveHint": true,
           "idempotentHint": false,
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Replace one live block's content, with a reason. Receipts for the old block then verify as SUPERSEDED.",
+        "description": "Replace one live block's content, with a reason: the document reads the new text from then on. The old text stays on the chain (orient shows it as a retraction) and receipts for the old block then verify as SUPERSEDED.",
         "inputSchema": {
           "properties": {
             "actor_id": {
@@ -836,5 +841,5 @@
     "title": "kronicle-lite",
     "version": "0.11.2"
   },
-  "sha256": "4fa11b1848b3c8fa19d1eeeef47d91e60b81e9a8bdcf8430bbc5b095c3002c6a"
+  "sha256": "b4f0c16456e32c3b23a7c8dd77c6b583485085bfb0452a291bbecb6c7e7c6af3"
 }

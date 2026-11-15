@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-10T21:31:17.217Z",
+  "capturedAt": "2026-11-15T21:57:21.889Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -88,7 +88,7 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Up to 50 put / supersede / tombstone ops in ONE local transaction. mode all_or_nothing (default; any failure rolls back everything) | best_effort. dry_run: exact per-op diffs, nothing written, plus a single-use confirm_token bound to this plan, actor and the previewed versions; commit with it to reject a plan whose state changed. expect_version per op; idempotency_key replays the committed result.",
+        "description": "Up to 50 put / supersede / tombstone ops in ONE local transaction. mode all_or_nothing (default; any failure rolls back everything) | best_effort. dry_run: exact per-op diffs, nothing written, plus a single-use confirm_token bound to this plan, actor and the previewed versions; commit with it to reject a plan whose state changed. expect_version per op; idempotency_key replays the committed result. Any status but committed or planned (rolled_back, failed, partial) is returned with isError: true and the same body.",
         "inputSchema": {
           "properties": {
             "actor_id": {
@@ -921,6 +921,7 @@
               "type": "array"
             },
             "idempotency_key": {
+              "description": "Retry key: the same put returns the first result (replayed: true); other arguments under it are refused.",
               "maxLength": 200,
               "minLength": 1,
               "type": "string"
@@ -996,6 +997,9 @@
             "redactions": {
               "type": "array"
             },
+            "replayed": {
+              "type": "boolean"
+            },
             "revision": {
               "type": "integer"
             },
@@ -1027,6 +1031,7 @@
             "blocks_truncated",
             "blocks_next",
             "events",
+            "replayed",
             "stale_write_advisory"
           ],
           "type": "object"
@@ -1170,12 +1175,12 @@
       },
       {
         "annotations": {
-          "destructiveHint": false,
+          "destructiveHint": true,
           "idempotentHint": false,
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Replace one live block's content, with a reason. Receipts for the old block then verify as SUPERSEDED.",
+        "description": "Replace one live block's content, with a reason: the document reads the new text from then on. The old text stays on the chain (orient shows it as a retraction) and receipts for the old block then verify as SUPERSEDED.",
         "inputSchema": {
           "properties": {
             "actor_id": {
@@ -1580,5 +1585,5 @@
     "title": "kronicle-lite",
     "version": "0.11.2"
   },
-  "sha256": "ebd2f0092cb3a7a9e94dae9825384bf6110d464273bd5811e84a1e20c70ed4d6"
+  "sha256": "b6d64f0dfe9624374e3c964a665bc8a25698753a3f3f46f929bad527e3cbb47c"
 }
