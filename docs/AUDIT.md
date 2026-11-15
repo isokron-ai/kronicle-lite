@@ -205,23 +205,27 @@ kept:
 - **Issuer, resource, audience, times, scope, client id** in clear. URLs are
   `https` (or `http` to `127.0.0.1`, `localhost` or `[::1]`) with no
   userinfo, query, fragment or percent-encoding, so a code or token carried
-  in a query string cannot be recorded. A JWT access token's structure is
+  in a query string cannot be recorded (an issuer whose path needs
+  percent-encoding cannot be recorded either). A JWT access token's structure is
   kept as `access_token_jwt`: header (`alg`, `kid`, `typ`), the claims
   `iss`, `aud`, `exp`, `iat`, `nbf`, `scope`, `scp`, `client_id`, `azp`,
   `sub` and `jti` as commitments, the names of the other claims (a
   namespaced name may be a URL), and `claims_verified` (false unless the
   signature was checked). The recorder normalises what tokens vary in: a
-  single `aud` string is recorded as a one-element list; `scp` is a list of
-  scope tokens (a space-separated `scp` string goes in `scope`); times are
-  NumericDates (a fraction is allowed).
+  single `aud` string is recorded as a one-element list, and a
+  space-separated `scp` string as the list of its tokens (both lossless);
+  times are NumericDates (a fraction is allowed). An empty scope is left
+  out, not recorded as `""`.
 - **Codes, not text.** `stage`, `error` and the revocation `replay` outcome are
   lowercase letters and underscores (and `http_<status>` for a replay); there
   is no field for a server's error description. A server's error string that
   is not such a code is recorded as `server_error_other` (the recorder maps
   it; the schema refuses it).
-- **Bare media types.** A blob ref in an OAuth event (`journal`,
-  `attachment`, `receipt`) has a `media_type` of `type/subtype` only, with no
-  parameters.
+- **Known media types.** A blob ref in an OAuth event (`journal`,
+  `attachment`, `receipt`) names one of `application/json`,
+  `application/x-ndjson`, `application/octet-stream`, `application/pdf`,
+  `image/png`, `image/jpeg`, `image/webp`, `text/plain` or `text/markdown`,
+  with no parameters.
 - **Event keys from the recorder.** An OAuth event's `event_key` is built from
   the profile, the kind and the generation, never from a credential such as
   `state` or `jti`; it refuses a token-shaped value.
@@ -230,9 +234,10 @@ kept:
   the event key) refuses anything shaped like a JSON Web Token. The
   write-time secret guard then scans the payload, as for every kind.
 
-What the schemas cannot do: a public identifier field (`profile`,
-`identity`, `tenant`, `registration_id`, `client_id`, a scope) cannot tell
-an opaque random credential from an identifier. Keeping credentials out of
+What the schemas cannot do: an identifier field (`profile`, `identity`,
+`tenant`, `registration_id`, `client_id`, a scope, `event_key`, a claim
+name, a URL's host or path segment) cannot tell an opaque random credential
+from an identifier. Keeping credentials out of
 those fields is the recorder's field policy (mcp-audit's auth journal
 applies it before anything is recorded), with the secret guard as the
 backstop for the shapes it knows.

@@ -25,10 +25,10 @@ uses semantic versioning once past 0.x.
   of the audit's commitment key, never the key. URLs are `https` (or `http`
   to a loopback host) with no userinfo, query, fragment or
   percent-encoding. Stages, error codes and replay outcomes are lowercase
-  letters and underscores, with no free-text description. Blob refs carry a
-  bare media type. Every free string, the event key included, refuses a
+  letters and underscores, with no free-text description. Blob refs name one
+  of nine media types. Every free string, the event key included, refuses a
   token-shaped (JWT) value, and the write-time secret guard scans every
-  payload, as before. Identifier fields (profile, client id, scope …)
+  payload, as before. Identifier fields (profile, client id, scope, URL path …)
   cannot tell an opaque credential from an identifier; that stays the
   recorder's field policy (docs/AUDIT.md).
 - **Bundle format `kronicle-lite-evidence-bundle/4`**: `/3` plus the OAuth

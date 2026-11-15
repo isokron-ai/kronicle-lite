@@ -169,15 +169,13 @@ const HTTP_STATUS = COUNT.refine((n) => n <= 599, 'an HTTP status (0 when none w
 const EPOCH_S = z.number().nonnegative().describe('seconds since the epoch (a NumericDate may have a fraction)');
 const REGISTRATION_MODES = ['static', 'cimd', 'dcr'] as const;
 const CLAIM_LEVELS = ['rejection_observed', 'request_accepted', 'not_confirmed'] as const;
-/** A blob ref whose media type is a bare type/subtype (no parameters, no free text). */
+/** The media types an OAuth event's blob may name: journals, receipts, consent screenshots. */
+export const AUTH_MEDIA_TYPES = ['application/json', 'application/x-ndjson', 'application/octet-stream', 'application/pdf', 'image/png', 'image/jpeg', 'image/webp', 'text/plain', 'text/markdown'] as const;
+/** A blob ref whose media type is one of AUTH_MEDIA_TYPES (no parameters, no free text). */
 const AuthBlobRefSchema = z.strictObject({
   sha256: SHA256,
   size: COUNT,
-  media_type: z
-    .string()
-    .regex(/^[a-z0-9][a-z0-9!#$&^_.+-]{0,62}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,62}$/, 'a bare media type (type/subtype, lowercase, no parameters)')
-    .refine(notJwt, 'a token-shaped value (JWT) is not recorded')
-    .optional(),
+  media_type: z.enum(AUTH_MEDIA_TYPES).optional(),
   redacted: z.literal(true).optional(),
 });
 const AuthCommon = {

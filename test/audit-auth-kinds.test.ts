@@ -335,10 +335,10 @@ describe('no credential can be recorded in an OAuth event', () => {
     expect(parseAuditPayload('finding', { ...COMMON, event_key: SHORT_JWT, finding_id: 'F1', status: 'discovered' }).ok).toBe(true);
   });
 
-  it('a blob ref in an OAuth event carries a bare media type: no parameters, no free text', () => {
+  it('a blob ref in an OAuth event names one of a few media types: no parameters, no free text', () => {
     const ref = { sha256: SHA, size: 3 };
-    for (const mt of ['application/json', 'application/x-ndjson', 'image/png', 'application/vnd.isokron.receipt+json']) accepted('auth_revoked', { ...VALID.auth_revoked, receipt: { ...ref, media_type: mt } });
-    for (const mt of ['text/plain; code=SplxlOBeZQQYbYS6WxSbIA', OPAQUE, 'Text/Plain', 'text/plain ', 'application/json; charset=utf-8', `x/${SHORT_JWT}`, '']) {
+    for (const mt of ['application/json', 'application/x-ndjson', 'image/png', 'text/plain']) accepted('auth_revoked', { ...VALID.auth_revoked, receipt: { ...ref, media_type: mt } });
+    for (const mt of ['text/plain; code=SplxlOBeZQQYbYS6WxSbIA', OPAQUE, 'Text/Plain', 'text/plain ', 'application/json; charset=utf-8', `x/${SHORT_JWT}`, 'text/a94a8fe5ccb19ba61c4c0873d391e987982fbbd3', 'application/vnd.isokron.receipt+json', '']) {
       refused('auth_revoked', { ...VALID.auth_revoked, receipt: { ...ref, media_type: mt } });
       refused('auth_granted', { ...VALID.auth_granted, journal: { ...ref, media_type: mt } });
     }
