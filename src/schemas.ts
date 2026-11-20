@@ -474,7 +474,10 @@ const ApplyOpResultSchema = z.object({
   version_after: z.number().int().nullable(),
   diff: z.string().nullable(),
   receipt: z.object({ first_seq: z.number().int(), last_seq: z.number().int(), this_hash: HEX64 }).nullable(),
-  error: z.object({ code: z.string(), message: z.string() }).nullable(),
+  error: z
+    .looseObject({ code: z.string(), message: z.string() })
+    .nullable()
+    .describe('Unreleased: may also carry the structured fields of the refusal (current_version, current_block_id, ...).'),
 });
 export const ApplyResultSchema = z.object({
   status: z.enum(['planned', 'committed', 'partial', 'rolled_back', 'failed']),

@@ -198,16 +198,26 @@ describe('MCP surface', () => {
     expect(store.docs.getBlock(id)!.tombstoned_at).not.toBeNull();
   });
 
-  it('refuses unknown arguments instead of ignoring them', async () => {
-    let refused = false;
-    try {
-      const r = (await client.callTool({ name: 'put_document', arguments: { slug: 'mcp-unknown', title: 'T', markdown: 'x\n', expected_revision: 0 } })) as ToolResult;
-      refused = r.isError === true;
-    } catch {
-      refused = true;
-    }
-    expect(refused).toBe(true);
+  it('refuses unknown arguments instead of ignoring them (a tool error, nothing written)', async () => {
+    const r = (await client.callTool({ name: 'put_document', arguments: { slug: 'mcp-unknown', title: 'T', markdown: 'x\n', expected_revision: 0 } })) as ToolResult;
+    expect(r.isError).toBe(true);
+    expect(JSON.stringify(r.content)).toMatch(/expected_revision/);
     expect(store.docs.getDocument('mcp-unknown')).toBeNull();
+  });
+
+  it('tombstone_block dry_run over MCP changes no row in any table', async () => {
+    const put = body<{ blocks: { block_id: string }[] }>(await client.callTool({ name: 'put_document', arguments: { slug: 'mcp-dry-all', title: 'T', markdown: 'keep\n\ndrop\n' } }));
+    const snapshot = () => {
+      const tables = (store.db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`).all() as { name: string }[]).map((t) => t.name);
+      return Object.fromEntries(tables.map((t) => [t, JSON.stringify(store.db.prepare(`SELECT * FROM "${t}"`).raw().all())]));
+    };
+    const before = snapshot();
+    const r = (await client.callTool({ name: 'tombstone_block', arguments: { block_id: put.blocks[1]!.block_id, reason: 'r', dry_run: true } })) as ToolResult;
+    expect(r.isError).toBeFalsy();
+    expect(r.structuredContent).toMatchObject({ dry_run: true });
+    const after = snapshot();
+    expect(Object.keys(after)).toEqual(Object.keys(before));
+    for (const t of Object.keys(before)) expect(after[t], t).toBe(before[t]);
   });
 
   it('verify: a malformed receipt object still answers UNVERIFIED / malformed_receipt', async () => {
@@ -297,6 +307,80 @@ describe('apply expected_head_hash (batch precondition)', () => {
       const r = (await client.callTool({ name: 'apply', arguments: { ops: [op(block)], expected_head_hash: read.hash } })) as ToolResult;
       expect(r.isError).toBe(true);
       expect(body(r)).toMatchObject({ error: 'head_conflict', expected_head_hash: read.hash, current_head: kl.chain.head() });
+    } finally {
+      await client.close();
+      await handle.close();
+      kl.close();
+    }
+  });
+});
+
+describe('apply: confirm tokens bind expected_head_hash; op errors keep their structured fields', () => {
+  function seeded() {
+    const kl = new KronicleLite({ memory: true });
+    const a = kl.docs.putDocument({ slug: 'tok', title: 'T', markdown: 'one\n\ntwo\n', actor_id: 'h' });
+    return { kl, block: a.blocks[0]!.block_id };
+  }
+  const op = (block_id: string) => ({ id: 'o', op: 'supersede' as const, block_id, new_content: 'one v2', reason: 'r' });
+  const codeOf = (fn: () => unknown): string => {
+    try {
+      fn();
+    } catch (err) {
+      return (err as { code: string }).code;
+    }
+    return 'no error';
+  };
+
+  it('a token previewed with expected_head_hash does not commit after another write (head_conflict, token burned)', () => {
+    const { kl, block } = seeded();
+    const h = kl.chain.head().hash;
+    const plan = kl.applier.apply({ actor_id: 'agent', ops: [op(block)], dry_run: true, expected_head_hash: h });
+    expect(plan.status).toBe('planned');
+    kl.docs.putDocument({ slug: 'elsewhere', title: 'E', markdown: 'x\n', actor_id: 'someone-else' });
+    const moved = kl.chain.head();
+    expect(codeOf(() => kl.applier.apply({ actor_id: 'agent', ops: [op(block)], confirm_token: plan.confirm_token!, expected_head_hash: h }))).toBe('head_conflict');
+    expect(kl.chain.head()).toEqual(moved);
+    expect(codeOf(() => kl.applier.apply({ actor_id: 'agent', ops: [op(block)], confirm_token: plan.confirm_token!, expected_head_hash: h }))).toBe('confirm_used');
+    kl.close();
+  });
+
+  it('a commit may not drop or change the bound expected_head_hash; with it unchanged and the head unmoved it commits', () => {
+    const { kl, block } = seeded();
+    const h = kl.chain.head().hash;
+    const p1 = kl.applier.apply({ actor_id: 'agent', ops: [op(block)], dry_run: true, expected_head_hash: h });
+    expect(codeOf(() => kl.applier.apply({ actor_id: 'agent', ops: [op(block)], confirm_token: p1.confirm_token! }))).toBe('confirm_mismatch');
+    const p2 = kl.applier.apply({ actor_id: 'agent', ops: [op(block)], dry_run: true, expected_head_hash: h });
+    expect(codeOf(() => kl.applier.apply({ actor_id: 'agent', ops: [op(block)], confirm_token: p2.confirm_token!, expected_head_hash: 'f'.repeat(64) }))).toBe('confirm_mismatch');
+    const p3 = kl.applier.apply({ actor_id: 'agent', ops: [op(block)], dry_run: true });
+    expect(codeOf(() => kl.applier.apply({ actor_id: 'agent', ops: [op(block)], confirm_token: p3.confirm_token!, expected_head_hash: h }))).toBe('confirm_mismatch');
+    const p4 = kl.applier.apply({ actor_id: 'agent', ops: [op(block)], dry_run: true, expected_head_hash: h });
+    const done = kl.applier.apply({ actor_id: 'agent', ops: [op(block)], confirm_token: p4.confirm_token!, expected_head_hash: h });
+    expect(done.status).toBe('committed');
+    kl.close();
+  });
+
+  it('per-op errors carry block_not_live and version_conflict fields', () => {
+    const { kl, block } = seeded();
+    const s = kl.docs.supersedeBlock({ block_id: block, new_content: 'one b', reason: 'r', actor_id: 'h' });
+    const r = kl.applier.apply({ actor_id: 'agent', mode: 'best_effort', ops: [op(block), { id: 'v', op: 'put', slug: 'tok', title: 'T', markdown: 'z\n', expect_version: 1 }] });
+    expect(r.ops[0]!.error).toMatchObject({ code: 'block_not_live', state: 'superseded', current_block_id: s.new_block_id });
+    expect(r.ops[1]!.error).toMatchObject({ code: 'version_conflict', slug: 'tok', expected_version: 1, current_version: 2 });
+    kl.close();
+  });
+});
+
+describe('--core profile is strict too', () => {
+  it('refuses derived_from, which the core put_document does not offer', async () => {
+    const kl = new KronicleLite({ memory: true });
+    const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+    const handle = serveStdio(createServerFactory(kl, { profile: 'core' }), { transport: serverT });
+    const client = new Client({ name: 'core-strict', version: '0.0.0' }, { versionNegotiation: { mode: { pin: '2026-07-28' } } });
+    try {
+      await client.connect(clientT);
+      const r = (await client.callTool({ name: 'put_document', arguments: { slug: 'core-df', title: 'T', markdown: 'x\n', derived_from: [] } })) as ToolResult;
+      expect(r.isError).toBe(true);
+      expect(JSON.stringify(r.content)).toMatch(/derived_from/);
+      expect(kl.docs.getDocument('core-df')).toBeNull();
     } finally {
       await client.close();
       await handle.close();

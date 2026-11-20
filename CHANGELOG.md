@@ -59,7 +59,7 @@ schemas). The catalog fingerprints in `src/catalog-pin.ts` and both
   (`superseded` | `tombstoned`) and `current_block_id` (the live end of the
   supersession walk, or null), so a retried `supersede_block` /
   `tombstone_block` can tell its first call landed.
-- **Strict input schemas (breaking for sloppy callers)**: every tool's
+- **BREAKING — strict input schemas**: every tool's
   `inputSchema` sets `additionalProperties: false` and an unknown or
   misspelled argument is refused instead of silently ignored (for example
   `derived_from` against a `--core` server, which does not offer it).

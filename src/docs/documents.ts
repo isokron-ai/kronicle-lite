@@ -1081,7 +1081,7 @@ export class DocumentStore {
     const b = this.getBlock(block_id);
     if (!b) throw new DocumentError('unknown_block', `no block ${block_id}`);
     if (b.tombstoned_at !== null) {
-      throw new DocumentError('block_not_live', `block ${block_id} is tombstoned (${b.tombstone_reason ?? 'no reason'})`, {
+      throw new DocumentError('block_not_live', `block ${block_id} is tombstoned`, {
         block_id,
         state: 'tombstoned',
         current_block_id: null,

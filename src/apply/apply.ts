@@ -99,8 +99,11 @@ export interface OpResult {
   diff: string | null;
   /** Chain events this op appended: [first_seq, last_seq] and the last hash. null when nothing landed. */
   receipt: { first_seq: number; last_seq: number; this_hash: string } | null;
-  error: { code: string; message: string } | null;
+  error: OpError | null;
 }
+
+/** An op's error; besides code and message it may carry structured fields (current_version, current_block_id, ...). */
+export type OpError = { code: string; message: string } & Record<string, unknown>;
 
 export interface ApplyResult {
   status: 'planned' | 'committed' | 'partial' | 'rolled_back' | 'failed';
@@ -171,6 +174,12 @@ interface Binding {
   nonce: string;
   exp: string;
   idempotency_key: string | null;
+  /**
+   * Unreleased: the expected_head_hash the preview was checked against
+   * (absent when the preview had none). The commit must present the same
+   * value, and the head must still be there.
+   */
+  expected_head_hash?: string;
 }
 
 export interface ApplyEngineOptions {
@@ -214,10 +223,8 @@ export class ApplyEngine {
     const request_hash = sha256Hex(canonicalize({ mode, ops } as unknown as JsonValue));
     const key = input.idempotency_key ?? null;
 
-    if (input.dry_run) {
-      this.checkHead(input.expected_head_hash);
-      return this.preview(mode, ops, plan_hash, key, input);
-    }
+    // The dry run checks expected_head_hash against the head it previews from (inside its transaction).
+    if (input.dry_run) return this.preview(mode, ops, plan_hash, key, input);
 
     const nonce = input.confirm_token !== undefined ? this.parseToken(input.confirm_token) : null;
     const project = input.project ?? null;
@@ -241,8 +248,9 @@ export class ApplyEngine {
             return { ...(JSON.parse(prior.result_json) as ApplyResult), replayed: true };
           }
         }
-        this.checkHead(input.expected_head_hash);
-        if (nonce !== null) this.revalidate(nonce, { plan_hash, actor_id: input.actor_id, key, ops, project }, () => (burnOnFailure = true));
+        // With a token, revalidate checks expected_head_hash against the bound value (and burns the token on a moved head).
+        if (nonce === null) this.checkHead(input.expected_head_hash);
+        if (nonce !== null) this.revalidate(nonce, { plan_hash, actor_id: input.actor_id, key, ops, project, expected_head_hash: input.expected_head_hash ?? null }, () => (burnOnFailure = true));
         else if (input.require_confirm === true) throw new ApplyError('confirm_required', 'this server requires a confirm_token: dry_run first, then commit with it');
         else if (this.pendingConfirmation(plan_hash, input.actor_id)) {
           throw new ApplyError('confirm_required', 'this plan was previewed (dry_run): commit it with the confirm_token it returned');
@@ -318,9 +326,8 @@ export class ApplyEngine {
   }
 
   /** Unreleased: expected_head_hash (inside the commit transaction, so nothing can land between the check and the ops). */
-  private checkHead(expected: string | undefined): void {
-    if (expected === undefined) return;
-    const head = this.chain.head();
+  private checkHead(expected: string | undefined | null, head: ChainHead = this.chain.head()): void {
+    if (expected === undefined || expected === null) return;
     if (head.hash === expected) return;
     throw new ApplyError('head_conflict', `the chain head moved since expected_head_hash (now seq ${head.seq}); nothing written. Re-orient and re-plan.`, {
       expected_head_hash: expected,
@@ -343,12 +350,16 @@ export class ApplyEngine {
   // ───────────────────────────── preview ─────────────────────────────
 
   private preview(mode: ApplyMode, ops: ApplyOp[], plan_hash: string, key: string | null, input: ApplyInput): ApplyResult {
-    const head = this.chain.head();
-    const versions = this.versionsOf(ops);
+    let head!: ChainHead;
+    let versions: Record<string, string> = {};
     let results: OpResult[] = [];
     // why: run the real writes and always roll back, so the preview is exactly what a commit would do now.
+    // The head, the expected_head_hash check and the versions the token binds are all read inside the same transaction.
     try {
       this.db.transaction(() => {
+        head = this.chain.head();
+        this.checkHead(input.expected_head_hash, head);
+        versions = this.versionsOf(ops);
         results = this.execute(mode, ops, input.actor_id, input.project ?? null);
         throw new RolledBack(results);
       })();
@@ -379,6 +390,7 @@ export class ApplyEngine {
         nonce: randomBytes(16).toString('hex'),
         exp,
         idempotency_key: key,
+        ...(input.expected_head_hash !== undefined ? { expected_head_hash: input.expected_head_hash } : {}),
       };
       token = this.tokenFor(body.nonce);
       this.pruneConfirmations(input.actor_id, issued);
@@ -421,7 +433,11 @@ export class ApplyEngine {
         const denied = this.policy(actor_id, op, { slug: target.slug });
         if (denied !== null) throw new ApplyError('forbidden', denied);
         if (op.expect_version !== undefined && op.expect_version !== base.version_before) {
-          throw new ApplyError('version_conflict', `expect_version ${op.expect_version}, current revision is ${base.version_before ?? 'unknown'}`);
+          throw new ApplyError('version_conflict', `expect_version ${op.expect_version}, current revision is ${base.version_before ?? 'unknown'}`, {
+            ...(target.slug !== null ? { slug: target.slug } : {}),
+            expected_version: op.expect_version,
+            current_version: base.version_before,
+          });
         }
         const diff = this.diffOf(op);
         const after = this.write(op, actor_id, project);
@@ -575,7 +591,7 @@ export class ApplyEngine {
    */
   private revalidate(
     nonce: string,
-    now: { plan_hash: string; actor_id: string; key: string | null; ops: ApplyOp[]; project: { key: string; root: string } | null },
+    now: { plan_hash: string; actor_id: string; key: string | null; ops: ApplyOp[]; project: { key: string; root: string } | null; expected_head_hash: string | null },
     isOwner: () => void,
   ): void {
     const row = this.db.prepare(`SELECT actor_id, used_at, expires_at, binding_json FROM apply_confirmations WHERE nonce = ?`).get(nonce) as
@@ -596,8 +612,12 @@ export class ApplyEngine {
     if (t.policy_version !== this.policy_version) throw mismatch('policy version');
     if (t.idempotency_key !== now.key) throw mismatch('idempotency_key');
     if (canonicalize((t.project ?? null) as JsonValue) !== canonicalize((now.project ?? null) as JsonValue)) throw mismatch('project');
+    // Unreleased: a commit may not drop or change the expected_head_hash its preview was checked against.
+    if ((t.expected_head_hash ?? null) !== now.expected_head_hash) throw mismatch('expected_head_hash');
     const used = this.db.prepare(`UPDATE apply_confirmations SET used_at = ?, outcome = 'committed' WHERE nonce = ? AND used_at IS NULL`).run(this.now().toISOString(), nonce);
     if (used.changes !== 1) throw new ApplyError('confirm_used', 'confirm_token was already used (single use)');
+    // Like a stale plan, a moved head burns the token (the transaction rolls back; the caller burns it on failure).
+    this.checkHead(t.expected_head_hash ?? null);
     const current = this.versionsOf(now.ops);
     const stale = Object.keys(t.versions).filter((k) => t.versions[k] !== current[k]);
     if (stale.length > 0 || canonicalize(Object.keys(current).sort()) !== canonicalize(t.resources)) {
@@ -617,8 +637,9 @@ class RolledBack extends Error {
   }
 }
 
-function errorOf(err: unknown): { code: string; message: string } {
-  if (err instanceof ApplyError || err instanceof DocumentError) return { code: err.code, message: err.message };
+/** An op's error: the code, the message and (Unreleased) the structured fields of the refusal, as the single-document tools return them. */
+function errorOf(err: unknown): OpError {
+  if (err instanceof ApplyError || err instanceof DocumentError) return { code: err.code, message: err.message, ...(err.details ?? {}) };
   if (err instanceof SecretDetectedError) return { code: err.code, message: err.message };
   return { code: 'internal', message: err instanceof Error ? err.message : String(err) };
 }
