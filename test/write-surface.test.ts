@@ -1,5 +1,5 @@
 /**
- * Unreleased: the write surface states and enforces its guards.
+ * 0.12.0: the write surface states and enforces its guards.
  *
  *   - expect_version (optimistic concurrency) on put_document, supersede_block
  *     and tombstone_block, with apply's per-op semantics: the document

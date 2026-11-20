@@ -110,7 +110,7 @@ const CURSOR = z.string().max(CURSOR_MAX).optional().describe('Your latest curso
 const REDACT = z.boolean().default(false).describe('Store a redacted copy instead of refusing a detected secret.');
 
 /**
- * Unreleased: optimistic concurrency on single-document writes, with the
+ * 0.12.0: optimistic concurrency on single-document writes, with the
  * semantics of apply's per-op expect_version (DocumentStore checks it inside
  * the write transaction).
  */
@@ -125,7 +125,7 @@ const SEQ_FROM = z.number().int().min(1).default(1).describe('First event seq of
 const SEQ_TO = z.number().int().min(1).optional().describe('Last event seq of the range (default: the chain head).');
 
 /**
- * Unreleased: verify's receipt argument declares a receipt's fields (as
+ * 0.12.0: verify's receipt argument declares a receipt's fields (as
  * recall() returns them) but leaves their checking to the verifier, so a
  * malformed receipt still answers UNVERIFIED / malformed_receipt instead of
  * a schema error.
@@ -307,7 +307,7 @@ function errorResult(err: unknown): ToolResult {
     return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err.code, message: err.message, ...(err.index !== undefined ? { index: err.index } : {}) }) }] };
   }
   if (err instanceof DocumentError) {
-    // Unreleased: structured fields (current_version, current_block_id, ...) beside the code.
+    // 0.12.0: structured fields (current_version, current_block_id, ...) beside the code.
     return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err.code, message: err.message, ...(err.details ?? {}) }) }] };
   }
   if (err instanceof IdempotencyKeyReusedError) {

@@ -37,7 +37,7 @@ document must not exist. When the current revision differs, the op fails with
 
 ## expected_head_hash
 
-Unreleased. `expected_head_hash` is a precondition on the whole batch: the
+Since 0.12.0, `expected_head_hash` is a precondition on the whole batch: the
 chain head hash you last read (`get_system_state`, or the `head` of any
 write). If anything at all was appended since, the batch is refused with
 `head_conflict` before any op runs, nothing is written, and the error carries

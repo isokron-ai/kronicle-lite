@@ -477,7 +477,7 @@ const ApplyOpResultSchema = z.object({
   error: z
     .looseObject({ code: z.string(), message: z.string() })
     .nullable()
-    .describe('Unreleased: may also carry the structured fields of the refusal (current_version, current_block_id, ...).'),
+    .describe('0.12.0: may also carry the structured fields of the refusal (current_version, current_block_id, ...).'),
 });
 export const ApplyResultSchema = z.object({
   status: z.enum(['planned', 'committed', 'partial', 'rolled_back', 'failed']),
@@ -727,7 +727,7 @@ export const TombstoneBlockResultSchema = z.object({
   doc_slug: z.string(),
   revision: z.number().int().positive().describe('The revision the tombstone created (dry run: would create; the current one is revision - 1).'),
   head: ChainHeadSchema,
-  dry_run: z.boolean().describe('Unreleased: true when nothing was written (a preview).'),
+  dry_run: z.boolean().describe('0.12.0: true when nothing was written (a preview).'),
   preview: z
     .object({
       content: z.string(),
@@ -736,6 +736,6 @@ export const TombstoneBlockResultSchema = z.object({
       heading_path: z.array(z.string()),
     })
     .optional()
-    .describe('Unreleased: on a dry run, the block that would be retired.'),
+    .describe('0.12.0: on a dry run, the block that would be retired.'),
   stale_write_advisory: StaleWriteAdvisorySchema,
 });

@@ -133,9 +133,9 @@ export interface TombstoneBlockResult {
   /** The revision the tombstone created (on a dry run: the one it would create). */
   revision: number;
   head: ChainHead;
-  /** Unreleased: present (true) on a dry run, which wrote nothing. */
+  /** 0.12.0: present (true) on a dry run, which wrote nothing. */
   dry_run?: true;
-  /** Unreleased: on a dry run, the block that would be retired (the document's current revision is revision - 1). */
+  /** 0.12.0: on a dry run, the block that would be retired (the document's current revision is revision - 1). */
   preview?: { content: string; content_hash: string; kind: BlockKind; heading_path: string[] };
 }
 
@@ -155,7 +155,7 @@ export class DocumentError extends Error {
       | 'version_conflict',
     message: string,
     /**
-     * Unreleased: machine-readable fields of the refusal (for example
+     * 0.12.0: machine-readable fields of the refusal (for example
      * `current_version` on version_conflict, `current_block_id` on
      * block_not_live), spread into the MCP error body beside `error`.
      */
@@ -166,7 +166,7 @@ export class DocumentError extends Error {
 }
 
 /**
- * Unreleased: the optimistic-concurrency check shared by putDocument,
+ * 0.12.0: the optimistic-concurrency check shared by putDocument,
  * supersedeBlock and tombstoneBlock (and the semantics of apply's per-op
  * expect_version): `expected` is the document revision the caller read,
  * 0 for "must not exist yet". Called inside the write transaction.
@@ -554,7 +554,7 @@ export class DocumentStore {
     actor_id: string;
     idempotency_key?: string;
     /**
-     * Unreleased: optimistic concurrency. The revision the caller read (0 =
+     * 0.12.0: optimistic concurrency. The revision the caller read (0 =
      * the document must not exist yet); any other current revision is
      * refused with `version_conflict` and nothing is written. A replay under
      * a used idempotency_key is answered before this check.
@@ -925,7 +925,7 @@ export class DocumentStore {
     derived_from?: LineageRef[];
     cursor?: string;
     infer_lineage?: boolean;
-    /** Unreleased: the document revision the caller read (see putDocument). */
+    /** 0.12.0: the document revision the caller read (see putDocument). */
     expect_version?: number;
   }): SupersedeBlockResult {
     const guarded = guardFields({ new_content: args.new_content, reason: args.reason }, args.secrets ?? 'refuse', `block content`);
@@ -1013,9 +1013,9 @@ export class DocumentStore {
     reason: string;
     actor_id: string;
     secrets?: SecretPolicy;
-    /** Unreleased: the document revision the caller read (see putDocument). */
+    /** 0.12.0: the document revision the caller read (see putDocument). */
     expect_version?: number;
-    /** Unreleased: check everything and describe the block that would be retired; write nothing. */
+    /** 0.12.0: check everything and describe the block that would be retired; write nothing. */
     dry_run?: boolean;
   }): TombstoneBlockResult {
     args = { ...args, ...guardFields({ reason: args.reason }, args.secrets ?? 'refuse', 'tombstone reason', 'reword the reason').fields };
@@ -1088,7 +1088,7 @@ export class DocumentStore {
       });
     }
     if (b.valid_to !== null) {
-      // Unreleased: name the live end of the supersession walk, so a retry (or a stale caller) can tell what replaced it.
+      // 0.12.0: name the live end of the supersession walk, so a retry (or a stale caller) can tell what replaced it.
       const walk = this.supersessionWalk(block_id);
       const last = walk[walk.length - 1];
       const current = last && last.valid_to === null && last.tombstoned_at === null ? last.block_id : null;

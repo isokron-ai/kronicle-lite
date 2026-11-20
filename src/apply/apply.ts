@@ -75,7 +75,7 @@ export interface ApplyInput {
   /** Refuse any commit without a confirm_token (remote-capable servers: HTTP). */
   require_confirm?: boolean | undefined;
   /**
-   * Unreleased: batch-level precondition, the chain's compare-and-swap at the
+   * 0.12.0: batch-level precondition, the chain's compare-and-swap at the
    * MCP surface. The head hash the caller read (get_system_state, or any
    * write's `head`); if anything was appended since, the batch (commit or
    * dry run) is refused with `head_conflict` and the current head. A replay
@@ -140,7 +140,7 @@ export class ApplyError extends Error {
       | 'head_conflict'
       | 'forbidden',
     message: string,
-    /** Unreleased: machine-readable fields of the refusal (head_conflict: expected_head_hash, current_head). */
+    /** 0.12.0: machine-readable fields of the refusal (head_conflict: expected_head_hash, current_head). */
     readonly details?: Record<string, unknown>,
   ) {
     super(message);
@@ -175,7 +175,7 @@ interface Binding {
   exp: string;
   idempotency_key: string | null;
   /**
-   * Unreleased: the expected_head_hash the preview was checked against
+   * 0.12.0: the expected_head_hash the preview was checked against
    * (absent when the preview had none). The commit must present the same
    * value, and the head must still be there.
    */
@@ -325,7 +325,7 @@ export class ApplyEngine {
     }
   }
 
-  /** Unreleased: expected_head_hash (inside the commit transaction, so nothing can land between the check and the ops). */
+  /** 0.12.0: expected_head_hash (inside the commit transaction, so nothing can land between the check and the ops). */
   private checkHead(expected: string | undefined | null, head: ChainHead = this.chain.head()): void {
     if (expected === undefined || expected === null) return;
     if (head.hash === expected) return;
@@ -612,7 +612,7 @@ export class ApplyEngine {
     if (t.policy_version !== this.policy_version) throw mismatch('policy version');
     if (t.idempotency_key !== now.key) throw mismatch('idempotency_key');
     if (canonicalize((t.project ?? null) as JsonValue) !== canonicalize((now.project ?? null) as JsonValue)) throw mismatch('project');
-    // Unreleased: a commit may not drop or change the expected_head_hash its preview was checked against.
+    // 0.12.0: a commit may not drop or change the expected_head_hash its preview was checked against.
     if ((t.expected_head_hash ?? null) !== now.expected_head_hash) throw mismatch('expected_head_hash');
     const used = this.db.prepare(`UPDATE apply_confirmations SET used_at = ?, outcome = 'committed' WHERE nonce = ? AND used_at IS NULL`).run(this.now().toISOString(), nonce);
     if (used.changes !== 1) throw new ApplyError('confirm_used', 'confirm_token was already used (single use)');
@@ -637,7 +637,7 @@ class RolledBack extends Error {
   }
 }
 
-/** An op's error: the code, the message and (Unreleased) the structured fields of the refusal, as the single-document tools return them. */
+/** An op's error: the code, the message and (0.12.0) the structured fields of the refusal, as the single-document tools return them. */
 function errorOf(err: unknown): OpError {
   if (err instanceof ApplyError || err instanceof DocumentError) return { code: err.code, message: err.message, ...(err.details ?? {}) };
   if (err instanceof SecretDetectedError) return { code: err.code, message: err.message };

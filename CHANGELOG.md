@@ -6,6 +6,8 @@ uses semantic versioning once past 0.x.
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-11-20
+
 ### Fixed — an honest older pack verifies after an anchor-key rotation (keyListRegression)
 
 - **verify-audit rejected an honest older pack once it had seen a newer key
@@ -33,8 +35,7 @@ uses semantic versioning once past 0.x.
 
 ### Changed — write-safe tool surface: preconditions, idempotency, explicit hints
 
-Proposed release: 0.12.0 (new arguments, a new error code and strict input
-schemas). The catalog fingerprints in `src/catalog-pin.ts` and both
+A minor release: new arguments, new error codes and strict input schemas. The catalog fingerprints in `src/catalog-pin.ts` and both
 `.mcp-catalog` snapshots are regenerated.
 
 - **`expect_version` on `put_document`, `supersede_block` and
