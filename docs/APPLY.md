@@ -35,6 +35,18 @@ committing that plan returns `partial`, which is an error.
 document must not exist. When the current revision differs, the op fails with
 `version_conflict`, which in `all_or_nothing` rolls back the whole plan.
 
+## expected_head_hash
+
+Since 0.12.0, `expected_head_hash` is a precondition on the whole batch: the
+chain head hash you last read (`get_system_state`, or the `head` of any
+write). If anything at all was appended since, the batch is refused with
+`head_conflict` before any op runs, nothing is written, and the error carries
+`expected_head_hash` and `current_head` (`seq`, `hash`). It is checked inside
+the commit transaction, and on a dry run too. Use it when the batch was
+derived from more than the documents it writes (per-op `expect_version` only
+covers its targets). A replay under a used `idempotency_key` is answered
+before the check, so a retry after a lost answer still gets the first result.
+
 ## dry_run and the confirm token
 
 **`dry_run: true` runs the real writes inside a transaction that is always
@@ -96,6 +108,10 @@ inside the commit transaction, so a check and the writes can never be split:
    (`confirm_mismatch`) and does *not* burn the owner's token.
 4. **TOCTOU.** The previewed versions of every resource are compared with the
    current ones. Any change gives `stale_plan`; preview again.
+   **Head precondition (0.12.0).** If the dry run carried `expected_head_hash`,
+   the commit must pass the same value: a different or missing value is
+   `confirm_mismatch` and burns the token, and a head that moved since the
+   preview is `head_conflict` and burns it too. Preview again in either case.
 5. **Authorization, per op, again.** The token proves a preview happened; it
    authorizes nothing. A policy that denies at commit wins over a valid token
    (`forbidden`).

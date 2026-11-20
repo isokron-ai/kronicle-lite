@@ -5,7 +5,10 @@
  * carries `structuredContent` (validated against `outputSchema` by the SDK)
  * plus the same JSON as a text block for clients that only read text. Every
  * write tool accepts an optional `cursor` and returns the new chain head plus
- * a stale-write advisory. Nothing here blocks a write: the advisory is text.
+ * a stale-write advisory (text; it blocks nothing). Writes that change a
+ * document also take an optional `expect_version` (the revision the caller
+ * read), which does block: a stale one is refused with `version_conflict`.
+ * Every input schema is strict (unknown arguments are refused).
  *
  * `createServer` builds one McpServer instance. `createServerFactory` wraps it
  * as the per-connection / per-request factory the SDK's serving entries
@@ -105,6 +108,45 @@ const CURSOR_MAX = 8192;
 const CURSOR = z.string().max(CURSOR_MAX).optional().describe('Your latest cursor (for the stale-write advisory).');
 
 const REDACT = z.boolean().default(false).describe('Store a redacted copy instead of refusing a detected secret.');
+
+/**
+ * 0.12.0: optimistic concurrency on single-document writes, with the
+ * semantics of apply's per-op expect_version (DocumentStore checks it inside
+ * the write transaction).
+ */
+const EXPECT_VERSION = z
+  .number()
+  .int()
+  .nonnegative()
+  .optional()
+  .describe('The document revision you last read (0 = must not exist yet). If it has changed, the write is refused with version_conflict and current_version; nothing is written.');
+
+const SEQ_FROM = z.number().int().min(1).default(1).describe('First event seq of the range (default 1).');
+const SEQ_TO = z.number().int().min(1).optional().describe('Last event seq of the range (default: the chain head).');
+
+/**
+ * 0.12.0: verify's receipt argument declares a receipt's fields (as
+ * recall() returns them) but leaves their checking to the verifier, so a
+ * malformed receipt still answers UNVERIFIED / malformed_receipt instead of
+ * a schema error.
+ */
+const RECEIPT_ARG = z
+  .looseObject({
+    v: z.unknown().optional().describe('Receipt format version.'),
+    receipt_id: z.unknown().optional().describe('Receipt id (uuid).'),
+    workspace: z.unknown().optional().describe('Store the receipt was issued by.'),
+    block_id: z.unknown().optional().describe('Block the receipt covers.'),
+    content_hash: z.unknown().optional().describe('Hash of the block text at recall time.'),
+    doc_slug: z.unknown().optional().describe('Document slug.'),
+    revision: z.unknown().optional().describe('Document revision at recall time.'),
+    chain_seq: z.unknown().optional().describe('Chain seq of the block.'),
+    chain_head_hash: z.unknown().optional().describe('Chain head hash at recall time.'),
+    query_hash: z.unknown().optional().describe('Hash of the recall query.'),
+    issued_at: z.unknown().optional().describe('Issue time (ISO 8601).'),
+    key_id: z.unknown().optional().describe('Signing key id.'),
+    signature: z.unknown().optional().describe('Ed25519 signature.'),
+  })
+  .describe('A receipt object exactly as recall() returned it; verify checks its shape (a malformed one is UNVERIFIED).');
 
 /**
  * Unreleased: explicit lineage (full profile only; `--core` stays lean and
@@ -259,13 +301,14 @@ function errorResult(err: unknown): ToolResult {
     return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err.code, message: err.message, findings: err.findings }) }] };
   }
   if (err instanceof ApplyError) {
-    return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err.code, message: err.message }) }] };
+    return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err.code, message: err.message, ...(err.details ?? {}) }) }] };
   }
   if (err instanceof AuditError) {
     return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err.code, message: err.message, ...(err.index !== undefined ? { index: err.index } : {}) }) }] };
   }
   if (err instanceof DocumentError) {
-    return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err.code, message: err.message }) }] };
+    // 0.12.0: structured fields (current_version, current_block_id, ...) beside the code.
+    return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err.code, message: err.message, ...(err.details ?? {}) }) }] };
   }
   if (err instanceof IdempotencyKeyReusedError) {
     return { isError: true, content: [{ type: 'text', text: JSON.stringify({ error: err.code, message: err.message }) }] };
@@ -337,16 +380,16 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     {
       title: 'Orient against the chain',
       description:
-        'Orient. Call at session start and before writes with your last cursor as since_cursor. Returns what changed since ' +
+        'Orient. Use this at session start, before writes and before world-changing commands, with your last cursor as since_cursor. Returns what changed since ' +
         '(delta), a drift banner, and retractions: things you relied on that changed, with old → new text. Reconcile ' +
         'retractions before acting. A bad or missing cursor never fails. focus: orientation (default) | recent_changes | ' +
         'retractions | pulse (head + banner only). Carry the returned cursor forward.',
       inputSchema: lean(
-        z.object({
-          budget_tokens: z.number().int().min(200).max(64_000).default(3000),
+        z.strictObject({
+          budget_tokens: z.number().int().min(200).max(64_000).default(3000).describe('Size budget of the briefing, in tokens.'),
           since_cursor: z.string().max(CURSOR_MAX).optional().describe('cursor or cursor_compact from your last call'),
-          focus: z.enum(FOCUSES).default('orientation'),
-          response_format: z.enum(['markdown', 'json']).default('markdown'),
+          focus: z.enum(FOCUSES).default('orientation').describe('What to return: orientation, recent_changes, retractions or pulse.'),
+          response_format: z.enum(['markdown', 'json']).default('markdown').describe('Text block format; structuredContent is the same either way.'),
           all_projects: z.boolean().default(false).describe('Include other projects\' documents and retractions.'),
           include_format_only: z.boolean().default(false).describe('Also list format-only edits (identical raw text up to whitespace and reflow) as retractions.'),
           include_cosmetic: z.boolean().default(false).describe('Deprecated alias of include_format_only.'),
@@ -355,7 +398,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
         'input',
       ),
       outputSchema: lean(SystemStateSchema, 'output'),
-      annotations: { readOnlyHint: true, idempotentHint: false, openWorldHint: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     (args) => {
       try {
@@ -383,20 +426,26 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     {
       title: 'Grade beliefs against the chain',
       description:
-        'Grade facts before acting on them. claims: [{symbol, value}]; symbol is a block id (value: content or ' +
+        'Grade facts before acting on them: use this before relying on something you remembered or were told. claims: [{symbol, value}]; symbol is a block id (value: content or ' +
         'content_hash), a document slug (value: revision, markdown hash or markdown) or "head" (value: seq or hash). ' +
         'Verdict per claim: current | stale | contradicted | retracted | unknown | stale_source, with the current truth.',
       inputSchema: lean(
-        z.object({
+        z.strictObject({
           claims: z
-            .array(z.strictObject({ symbol: z.string().min(1).max(300), value: z.union([z.string().max(200_000), z.number()]) }))
+            .array(
+              z.strictObject({
+                symbol: z.string().min(1).max(300).describe('A block id, a document slug, or "head".'),
+                value: z.union([z.string().max(200_000), z.number()]).describe('What you believe it is (see the tool description).'),
+              }),
+            )
             .min(1)
-            .max(100),
+            .max(100)
+            .describe('The facts to grade (1 to 100).'),
         }),
         'input',
       ),
       outputSchema: lean(AuditSummarySchema, 'output'),
-      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     (args) => json(scrubDeep(store.auditor.audit(args.claims)).value),
   );
@@ -408,16 +457,16 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     {
       title: 'Search blocks with signed receipts',
       description:
-        'Full-text search over live blocks. Each hit carries a signed receipt (pass it to verify() before relying on it later) ' +
+        'Full-text search over live blocks. Use this to find what the store says before relying on your own memory. Each hit carries a signed receipt (pass it to verify() before relying on it later) ' +
         'and authority: can_act | inspect_only | never_act with a reason; only can_act is safe to act on unchecked. absence says what was and was not ' +
         'searched: an empty result is not proof of absence unless verdict is absent_in_searched. Pass cursor: hits you already ' +
         'read this session rank lower.',
       inputSchema: lean(
-        z.object({
-          query: z.string().min(1).max(2000),
-          top_k: z.number().int().min(1).max(50).default(12),
-          include_tombstoned: z.boolean().default(false),
-          include_receipts: z.boolean().default(true),
+        z.strictObject({
+          query: z.string().min(1).max(2000).describe('Search terms (full text).'),
+          top_k: z.number().int().min(1).max(50).default(12).describe('Most hits to return.'),
+          include_tombstoned: z.boolean().default(false).describe('Also return retired (tombstoned) blocks, marked as such.'),
+          include_receipts: z.boolean().default(true).describe('Attach a receipt to each hit.'),
           receipts: z.enum(['id', 'inline']).default('id').describe('id: receipt_id per hit (verify takes it); inline: the signed receipt.'),
           max_chars: z.number().int().min(200).max(400_000).default(DEFAULT_MCP_MAX_CHARS).describe('Content budget; longer hits are cut with a pointer.'),
           all_projects: z.boolean().default(false).describe('Search other projects\' documents too.'),
@@ -427,7 +476,8 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
         'input',
       ),
       outputSchema: lean(RecallResultSchema, 'output'),
-      annotations: { readOnlyHint: true, openWorldHint: false },
+      // Not idempotent: hits are logged as this actor's reads (lineage) and already-read hits rank lower next time.
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
     (args) => {
       try {
@@ -456,21 +506,21 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     {
       title: 'Verify retrieval receipts',
       description:
-        'Re-check recall() receipts (receipt / receipt_id, or up to 100 as receipts / receipt_ids) against the store (signature, ' +
-        're-hashed block text, chain position, supersession): VERIFIED | SUPERSEDED (see current_block_id) | TOMBSTONED | ' +
+        'Re-check recall() receipts (receipt / receipt_id, or up to 100 as receipts / receipt_ids) against the store. Use this before acting on a hit you kept from earlier. Checks signature, ' +
+        're-hashed block text, chain position and supersession: VERIFIED | SUPERSEDED (see current_block_id) | TOMBSTONED | ' +
         'STALE_SOURCE | UNVERIFIED, with a reason. Fail-closed: with a batch, the top-level result is the first one not ' +
         'VERIFIED and results[] has each in input order.',
       inputSchema: lean(
-        z.object({
-          receipt: z.record(z.string(), z.unknown()).optional().describe('The receipt object from recall().'),
+        z.strictObject({
+          receipt: RECEIPT_ARG.optional(),
           receipt_id: z.string().min(1).max(100).optional().describe('Or the receipt_id from recall().'),
-          receipts: z.array(z.record(z.string(), z.unknown())).min(1).max(MAX_VERIFY_BATCH).optional().describe('Batch: receipt objects.'),
+          receipts: z.array(RECEIPT_ARG).min(1).max(MAX_VERIFY_BATCH).optional().describe('Batch: receipt objects.'),
           receipt_ids: z.array(z.string().min(1).max(100)).min(1).max(MAX_VERIFY_BATCH).optional().describe('Batch: receipt ids.'),
         }),
         'input',
       ),
       outputSchema: lean(VerifyResultSchema, 'output'),
-      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     (args) => {
       const byId = (id: string) => store.recall.getReceipt(id);
@@ -494,10 +544,10 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
       description:
         'Recompute every event hash and link in [from_seq, to_seq] and check stored checkpoints. Over the whole chain ' +
         '(the default) it also re-derives and re-hashes every stored document and block (projection). ok:false means the ' +
-        'database was edited outside kronicle-lite or is corrupt.',
-      inputSchema: lean(z.object({ from_seq: z.number().int().min(1).default(1), to_seq: z.number().int().min(1).optional() }), 'input'),
+        'database was edited outside kronicle-lite or is corrupt. Use this when you suspect tampering or corruption, or before sharing evidence.',
+      inputSchema: lean(z.strictObject({ from_seq: SEQ_FROM, to_seq: SEQ_TO }), 'input'),
       outputSchema: lean(VerifyChainResultSchema, 'output'),
-      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     (args) => json(store.verifyAll(args.from_seq, args.to_seq)),
   );
@@ -507,18 +557,21 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     {
       title: 'Sign a Merkle checkpoint',
       description:
-        'Sign and store a Merkle root over event hashes in [from_seq, to_seq] (default: all). push:true also anchors it ' +
-        'off-box (root, range, signature and public key leave the machine; the local checkpoint is kept either way).',
+        'Sign and store a Merkle root over event hashes in [from_seq, to_seq] (default: all). Use this to seal the chain so far, ' +
+        'for example before sharing evidence. push:true also anchors it ' +
+        'off-box (root, range, signature and public key leave the machine; the local checkpoint is kept either way). Append-only: ' +
+        'a retry repeats the effect, storing another checkpoint of the same range (the same root) and, with push, sending it again.',
       inputSchema: lean(
-        z.object({
-          from_seq: z.number().int().min(1).default(1),
-          to_seq: z.number().int().min(1).optional(),
-          push: z.boolean().default(false),
+        z.strictObject({
+          from_seq: SEQ_FROM,
+          to_seq: SEQ_TO,
+          push: z.boolean().default(false).describe('Also anchor the checkpoint with the hosted anchor service (network).'),
         }),
         'input',
       ),
       outputSchema: lean(CheckpointSchema, 'output'),
-      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+      // Additive (a new checkpoint row; nothing existing changes), so not destructive; each call adds one, so not idempotent.
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
     async (args) => {
       try {
@@ -544,10 +597,11 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
       title: 'Hosted anchor status',
       description:
         'Last off-box anchor and whether the local chain still matches it: match | diverged (rewritten after anchoring) | ' +
-        'beyond_head | gap | unverified (receipt not trusted). remote:true also asks the anchor service.',
-      inputSchema: lean(z.object({ remote: z.boolean().default(false) }), 'input'),
+        'beyond_head | gap | unverified (receipt not trusted). remote:true also asks the anchor service. Use this to check ' +
+        'that the chain has not been rewritten since it was last anchored.',
+      inputSchema: lean(z.strictObject({ remote: z.boolean().default(false).describe('Also ask the anchor service (network); default: local check only.') }), 'input'),
       outputSchema: lean(AnchorStatusResultSchema, 'output'),
-      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
     async (args) => {
       try {
@@ -567,20 +621,24 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     {
       title: 'Create or replace a document',
       description:
-        'Create or re-put a Markdown document by slug. A re-put replaces the document: unchanged blocks keep their ids, ' +
+        'Create or re-put a whole Markdown document by slug. Use this to write a new document or a full new version of one; ' +
+        'to change one block, use supersede_block. A re-put replaces the document: unchanged blocks keep their ids, ' +
         'changed blocks are replaced (superseded) and dropped ones tombstoned, and the document reads the new text from then ' +
         'on. The old text stays on the chain (orient shows it as retractions) and receipts for the old blocks then verify as ' +
         'SUPERSEDED or TOMBSTONED. bind_git with source_path ties the document to ' +
         'that file\'s git blob (verify reports STALE_SOURCE when the file changes). Refuses text holding a secret (API key, ' +
-        'token, private key, connection string): the chain cannot forget it.',
+        'token, private key, connection string): the chain cannot forget it. expect_version refuses a stale write. Retries: ' +
+        'with idempotency_key a retry returns the first result (replayed: true) and writes nothing; without one, a retry can ' +
+        'append another revision.',
       inputSchema: lean(
-        z.object({
+        z.strictObject({
           slug: z.string().min(1).max(MAX_SLUG_LENGTH).regex(new RegExp(SLUG_PATTERN)).describe('name or namespace/Path (finding/G-2); max 128'),
-          title: z.string().min(1).max(300),
-          markdown: z.string().max(2_000_000),
+          title: z.string().min(1).max(300).describe('Document title.'),
+          markdown: z.string().max(2_000_000).describe('The whole document as Markdown; it replaces the current text.'),
           idempotency_key: z.string().min(1).max(200).optional().describe('Retry key: the same put returns the first result (replayed: true); other arguments under it are refused.'),
+          expect_version: EXPECT_VERSION,
           source_path: z.string().min(1).max(4096).optional().describe('File the markdown came from.'),
-          bind_git: z.boolean().default(false),
+          bind_git: z.boolean().default(false).describe('Pin the document to source_path\'s git blob (needs source_path).'),
           redact_secrets: REDACT,
           ...(core ? {} : { derived_from: DERIVED_FROM }),
           cursor: CURSOR,
@@ -628,6 +686,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
           markdown: args.markdown,
           actor_id,
           ...(args.idempotency_key !== undefined ? { idempotency_key: args.idempotency_key } : {}),
+          ...(args.expect_version !== undefined ? { expect_version: args.expect_version } : {}),
           ...(source !== undefined ? { source } : {}),
           ...(args.redact_secrets ? { secrets: 'redact' as const } : {}),
           ...(opts.project && opts.project.keys.length > 0 ? { project: { key: opts.project.keys[0]!, root: opts.project.root ?? '' } } : {}),
@@ -652,13 +711,17 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     {
       title: 'Replace one block',
       description:
-        'Replace one live block\'s content, with a reason: the document reads the new text from then on. The old text stays ' +
-        'on the chain (orient shows it as a retraction) and receipts for the old block then verify as SUPERSEDED.',
+        'Replace one live block\'s content, with a reason: the document reads the new text from then on. Use this to correct ' +
+        'or update one paragraph, heading or list item without re-putting the document. The old text stays ' +
+        'on the chain (orient shows it as a retraction) and receipts for the old block then verify as SUPERSEDED. ' +
+        'expect_version refuses a stale write. A retry does not repeat the effect: the old block is no longer live, so it is ' +
+        'refused with block_not_live and current_block_id names the live replacement.',
       inputSchema: lean(
-        z.object({
-          block_id: z.guid(),
-          new_content: z.string().min(1).max(200_000),
-          reason: z.string().min(1).max(1000),
+        z.strictObject({
+          block_id: z.guid().describe('Id of the live block to replace (from recall or put_document).'),
+          new_content: z.string().min(1).max(200_000).describe('The block\'s new Markdown text.'),
+          reason: z.string().min(1).max(1000).describe('Why it changed (kept on the chain and shown with the retraction).'),
+          expect_version: EXPECT_VERSION,
           redact_secrets: REDACT,
           ...(core ? {} : { derived_from: DERIVED_FROM }),
           cursor: CURSOR,
@@ -682,6 +745,7 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
           ...(args.redact_secrets ? { secrets: 'redact' as const } : {}),
           ...(derivedFrom(args) !== undefined ? { derived_from: derivedFrom(args)! } : {}),
           ...(args.cursor !== undefined ? { cursor: args.cursor } : {}),
+          ...(args.expect_version !== undefined ? { expect_version: args.expect_version } : {}),
         });
         return json({ ...result, stale_write_advisory });
       } catch (err) {
@@ -694,8 +758,22 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     'tombstone_block',
     {
       title: 'Retire one block',
-      description: 'Retire one live block with a reason (no successor). Receipts for it then verify as TOMBSTONED.',
-      inputSchema: lean(z.object({ block_id: z.guid(), reason: z.string().min(1).max(1000), cursor: CURSOR, actor_id: ACTOR }), 'input'),
+      description:
+        'Retire one live block with a reason (no successor). Use this to remove a block that is wrong or obsolete; to change ' +
+        'it, use supersede_block. Receipts for it then verify as TOMBSTONED; the text stays on the chain. dry_run: true ' +
+        'checks everything and returns the block that would be retired (preview), writing nothing. expect_version refuses a ' +
+        'stale write. A retry does not repeat the effect: the block is no longer live, so it is refused with block_not_live.',
+      inputSchema: lean(
+        z.strictObject({
+          block_id: z.guid().describe('Id of the live block to retire (from recall or put_document).'),
+          reason: z.string().min(1).max(1000).describe('Why it is retired (kept on the chain).'),
+          expect_version: EXPECT_VERSION,
+          dry_run: z.boolean().default(false).describe('Preview only: check, return the block that would be retired, write nothing.'),
+          cursor: CURSOR,
+          actor_id: ACTOR,
+        }),
+        'input',
+      ),
       outputSchema: lean(TombstoneBlockResultSchema, 'output'),
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
@@ -703,8 +781,16 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
       try {
         const actor_id = actorOf(args.actor_id);
         const stale_write_advisory = store.orient.staleWriteAdvisory(actor_id, args.cursor, new Date(), blockTarget(store, args.block_id));
-        const result = store.docs.tombstoneBlock({ block_id: args.block_id, reason: args.reason, actor_id });
-        return json({ ...result, stale_write_advisory });
+        const result = store.docs.tombstoneBlock({
+          block_id: args.block_id,
+          reason: args.reason,
+          actor_id,
+          ...(args.expect_version !== undefined ? { expect_version: args.expect_version } : {}),
+          ...(args.dry_run ? { dry_run: true } : {}),
+        });
+        const { preview, dry_run: _dry, ...rest } = result;
+        // The preview's text goes through the read-time secret scrub, as every read path does.
+        return json({ ...rest, dry_run: args.dry_run, ...(preview !== undefined ? { preview: scrubDeep(preview).value } : {}), stale_write_advisory });
       } catch (err) {
         return errorResult(err);
       }
@@ -720,14 +806,15 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
     {
       title: 'Apply a batch of writes transactionally',
       description:
-        `Up to ${MAX_APPLY_OPS} put / supersede / tombstone ops in ONE local transaction. mode all_or_nothing (default; any ` +
+        `Up to ${MAX_APPLY_OPS} put / supersede / tombstone ops in ONE local transaction. Use this when several writes must ` +
+        'land together or not at all, or to preview writes before committing them. mode all_or_nothing (default; any ' +
         'failure rolls back everything) | best_effort. dry_run: exact per-op diffs, nothing written, plus a single-use ' +
         'confirm_token bound to this plan, actor and the previewed versions; commit with it to reject a plan whose state ' +
-        'changed. expect_version per op; idempotency_key replays the committed result. Any status but committed or planned ' +
+        'changed. expect_version per op; expected_head_hash for the whole batch; idempotency_key replays the committed result. Any status but committed or planned ' +
         '(rolled_back, failed, partial) is returned with isError: true and the same body.',
       inputSchema: lean(
-        z.object({
-          mode: z.enum(['all_or_nothing', 'best_effort']).default('all_or_nothing'),
+        z.strictObject({
+          mode: z.enum(['all_or_nothing', 'best_effort']).default('all_or_nothing').describe('all_or_nothing: any failure rolls back every op; best_effort: each op on its own.'),
           ops: z
             .array(
               z.discriminatedUnion('op', [
@@ -737,10 +824,16 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
               ]),
             )
             .min(1)
-            .max(MAX_APPLY_OPS),
-          dry_run: z.boolean().default(false),
-          confirm_token: z.string().min(1).max(4000).optional(),
-          idempotency_key: z.string().min(1).max(128).optional(),
+            .max(MAX_APPLY_OPS)
+            .describe('The writes, in order. Each has an id you choose and an optional expect_version (the document revision you read).'),
+          dry_run: z.boolean().default(false).describe('Preview: per-op results and diffs plus a confirm_token; nothing is written.'),
+          confirm_token: z.string().min(1).max(4000).optional().describe('From a dry run of this same plan; the commit is refused if anything it previewed changed.'),
+          idempotency_key: z.string().min(1).max(128).optional().describe('Retry key: the same request returns the committed result (replayed: true); other arguments under it are refused.'),
+          expected_head_hash: z
+            .string()
+            .regex(/^[0-9a-f]{64}$/)
+            .optional()
+            .describe('The chain head hash you last read (get_system_state or a write\'s head). If anything was written since, the whole batch is refused with head_conflict and current_head.'),
           ttl_seconds: z.number().int().min(1).max(CONFIRM_TTL_MAX_S).optional().describe('confirm_token lifetime (default 300)'),
           actor_id: ACTOR,
         }),
@@ -776,11 +869,11 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
         'Append MCP-audit evidence to the chain, all or nothing (≤ 500 per call). kind: catalog_snapshot | call_measured | ' +
         'finding | gate_result | fix_applied | regression_result; payload per kind (kronicle://schemas/audit). Hashes and blob ' +
         'refs only: artifacts go to the blob store (CLI audit put-blob). event_key is the stable id: a retry is a no-op, a ' +
-        'different payload under it is refused.',
+        'different payload under it is refused. Use this to log evidence while running an MCP audit.',
       inputSchema: lean(
-        z.object({
-          audit_id: z.string().min(1).max(128),
-          events: z.array(AuditEventInputSchema).min(1).max(MAX_EVENTS_PER_CALL),
+        z.strictObject({
+          audit_id: z.string().min(1).max(128).describe('Your id for the audit run this evidence belongs to.'),
+          events: z.array(AuditEventInputSchema).min(1).max(MAX_EVENTS_PER_CALL).describe('Events to append, all or nothing.'),
           actor_id: ACTOR,
         }),
         'input',
@@ -804,20 +897,21 @@ export function createServer(store: KronicleLite, opts: ServerOptions = {}): Mcp
       title: 'Query audit events and findings',
       description:
         'Audit events by audit_id and/or catalog fingerprint (optional kind, finding_id, after_seq, limit), ascending seq; ' +
-        'with audit_id, also the current state of each finding (discovered | refuted | reopened | accepted).',
+        'with audit_id, also the current state of each finding (discovered | refuted | reopened | accepted). Use this to read ' +
+        'back an audit\'s evidence or where its findings stand.',
       inputSchema: lean(
-        z.object({
-          audit_id: z.string().min(1).max(128).optional(),
-          fingerprint: z.string().regex(/^[0-9a-f]{64}$/).optional(),
-          kind: z.enum(AUDIT_KINDS).optional(),
-          finding_id: z.string().min(1).max(128).optional(),
-          after_seq: z.number().int().nonnegative().optional(),
-          limit: z.number().int().min(1).max(5000).default(200),
+        z.strictObject({
+          audit_id: z.string().min(1).max(128).optional().describe('Only events of this audit (also returns finding states).'),
+          fingerprint: z.string().regex(/^[0-9a-f]{64}$/).optional().describe('Only events about this catalog fingerprint (sha256 hex).'),
+          kind: z.enum(AUDIT_KINDS).optional().describe('Only events of this kind.'),
+          finding_id: z.string().min(1).max(128).optional().describe('Only events about this finding.'),
+          after_seq: z.number().int().nonnegative().optional().describe('Only events after this chain seq (paging).'),
+          limit: z.number().int().min(1).max(5000).default(200).describe('Most events to return.'),
         }),
         'input',
       ),
       outputSchema: lean(AuditQueryResultSchema, 'output'),
-      annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     (args) => {
       try {

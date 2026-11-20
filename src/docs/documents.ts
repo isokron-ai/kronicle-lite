@@ -130,8 +130,13 @@ export interface SupersedeBlockResult {
 export interface TombstoneBlockResult {
   block_id: string;
   doc_slug: string;
+  /** The revision the tombstone created (on a dry run: the one it would create). */
   revision: number;
   head: ChainHead;
+  /** 0.12.0: present (true) on a dry run, which wrote nothing. */
+  dry_run?: true;
+  /** 0.12.0: on a dry run, the block that would be retired (the document's current revision is revision - 1). */
+  preview?: { content: string; content_hash: string; kind: BlockKind; heading_path: string[] };
 }
 
 export class DocumentError extends Error {
@@ -146,11 +151,35 @@ export class DocumentError extends Error {
       | 'invalid_source'
       | 'invalid_lineage'
       | 'reserved_key'
-      | 'idempotency_key_reused',
+      | 'idempotency_key_reused'
+      | 'version_conflict',
     message: string,
+    /**
+     * 0.12.0: machine-readable fields of the refusal (for example
+     * `current_version` on version_conflict, `current_block_id` on
+     * block_not_live), spread into the MCP error body beside `error`.
+     */
+    readonly details?: Record<string, string | number | null>,
   ) {
     super(message);
   }
+}
+
+/**
+ * 0.12.0: the optimistic-concurrency check shared by putDocument,
+ * supersedeBlock and tombstoneBlock (and the semantics of apply's per-op
+ * expect_version): `expected` is the document revision the caller read,
+ * 0 for "must not exist yet". Called inside the write transaction.
+ */
+function checkExpectedVersion(slug: string, expected: number | undefined, current: number): void {
+  if (expected === undefined || expected === current) return;
+  throw new DocumentError(
+    'version_conflict',
+    current === 0
+      ? `expect_version ${expected}, but the document does not exist (current_version 0); nothing written`
+      : `expect_version ${expected}, but the current revision is ${current}; nothing written. Re-read the document and retry with expect_version ${current} if your change still applies.`,
+    { slug, expected_version: expected, current_version: current },
+  );
 }
 
 /** 0.9.0: chain idempotency-key namespaces only kronicle-lite's own writers (audit, apply) may use. */
@@ -524,6 +553,13 @@ export class DocumentStore {
     markdown: string;
     actor_id: string;
     idempotency_key?: string;
+    /**
+     * 0.12.0: optimistic concurrency. The revision the caller read (0 =
+     * the document must not exist yet); any other current revision is
+     * refused with `version_conflict` and nothing is written. A replay under
+     * a used idempotency_key is answered before this check.
+     */
+    expect_version?: number;
     /** 0.4.0: provenance recorded in the document.put payload (`source`). */
     source?: DocumentSource;
     /** 0.6.0: what to do with a detected secret (default refuse; nothing is chained). */
@@ -588,6 +624,7 @@ export class DocumentStore {
         }
       }
       const existing = this.getDocument(args.slug);
+      checkExpectedVersion(args.slug, args.expect_version, existing?.current_revision ?? 0);
       // 0.8.1: idempotent by content. Decided here, under the write lock, so
       // concurrent identical puts (several instruction-import hooks firing on
       // one edit) append one revision, not one each. Only a put that would
@@ -888,6 +925,8 @@ export class DocumentStore {
     derived_from?: LineageRef[];
     cursor?: string;
     infer_lineage?: boolean;
+    /** 0.12.0: the document revision the caller read (see putDocument). */
+    expect_version?: number;
   }): SupersedeBlockResult {
     const guarded = guardFields({ new_content: args.new_content, reason: args.reason }, args.secrets ?? 'refuse', `block content`);
     args = { ...args, ...guarded.fields };
@@ -898,6 +937,7 @@ export class DocumentStore {
     const run = this.db.transaction((): SupersedeBlockResult => {
       const old = this.requireLive(args.block_id);
       const doc = this.getDocumentById(old.doc_id)!;
+      checkExpectedVersion(doc.slug, args.expect_version, doc.current_revision);
       const revision = doc.current_revision + 1;
       const new_block_id = randomUUID();
       const content_hash = blake3Hex(content);
@@ -968,12 +1008,32 @@ export class DocumentStore {
     return run.immediate();
   }
 
-  tombstoneBlock(args: { block_id: string; reason: string; actor_id: string; secrets?: SecretPolicy }): TombstoneBlockResult {
+  tombstoneBlock(args: {
+    block_id: string;
+    reason: string;
+    actor_id: string;
+    secrets?: SecretPolicy;
+    /** 0.12.0: the document revision the caller read (see putDocument). */
+    expect_version?: number;
+    /** 0.12.0: check everything and describe the block that would be retired; write nothing. */
+    dry_run?: boolean;
+  }): TombstoneBlockResult {
     args = { ...args, ...guardFields({ reason: args.reason }, args.secrets ?? 'refuse', 'tombstone reason', 'reword the reason').fields };
     const run = this.db.transaction((): TombstoneBlockResult => {
       const old = this.requireLive(args.block_id);
       const doc = this.getDocumentById(old.doc_id)!;
+      checkExpectedVersion(doc.slug, args.expect_version, doc.current_revision);
       const revision = doc.current_revision + 1;
+      if (args.dry_run === true) {
+        return {
+          block_id: old.block_id,
+          doc_slug: doc.slug,
+          revision,
+          head: this.chain.head(),
+          dry_run: true,
+          preview: { content: old.content, content_hash: old.content_hash, kind: old.kind, heading_path: splitHeadingPath(old.heading_path) },
+        };
+      }
       const r = this.chain.append({
         event_type: 'block.tombstoned',
         actor_id: args.actor_id,
@@ -1021,12 +1081,21 @@ export class DocumentStore {
     const b = this.getBlock(block_id);
     if (!b) throw new DocumentError('unknown_block', `no block ${block_id}`);
     if (b.tombstoned_at !== null) {
-      throw new DocumentError('block_not_live', `block ${block_id} is tombstoned (${b.tombstone_reason ?? 'no reason'})`);
+      throw new DocumentError('block_not_live', `block ${block_id} is tombstoned`, {
+        block_id,
+        state: 'tombstoned',
+        current_block_id: null,
+      });
     }
     if (b.valid_to !== null) {
+      // 0.12.0: name the live end of the supersession walk, so a retry (or a stale caller) can tell what replaced it.
+      const walk = this.supersessionWalk(block_id);
+      const last = walk[walk.length - 1];
+      const current = last && last.valid_to === null && last.tombstoned_at === null ? last.block_id : null;
       throw new DocumentError(
         'block_not_live',
         `block ${block_id} is superseded by ${b.superseded_by ?? 'unknown'}; operate on the current head`,
+        { block_id, state: 'superseded', superseded_by: b.superseded_by ?? null, current_block_id: current },
       );
     }
     return b;

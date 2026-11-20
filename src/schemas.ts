@@ -474,7 +474,10 @@ const ApplyOpResultSchema = z.object({
   version_after: z.number().int().nullable(),
   diff: z.string().nullable(),
   receipt: z.object({ first_seq: z.number().int(), last_seq: z.number().int(), this_hash: HEX64 }).nullable(),
-  error: z.object({ code: z.string(), message: z.string() }).nullable(),
+  error: z
+    .looseObject({ code: z.string(), message: z.string() })
+    .nullable()
+    .describe('0.12.0: may also carry the structured fields of the refusal (current_version, current_block_id, ...).'),
 });
 export const ApplyResultSchema = z.object({
   status: z.enum(['planned', 'committed', 'partial', 'rolled_back', 'failed']),
@@ -722,7 +725,17 @@ export const SupersedeBlockResultSchema = z.object({
 export const TombstoneBlockResultSchema = z.object({
   block_id: z.string(),
   doc_slug: z.string(),
-  revision: z.number().int().positive(),
+  revision: z.number().int().positive().describe('The revision the tombstone created (dry run: would create; the current one is revision - 1).'),
   head: ChainHeadSchema,
+  dry_run: z.boolean().describe('0.12.0: true when nothing was written (a preview).'),
+  preview: z
+    .object({
+      content: z.string(),
+      content_hash: HEX64,
+      kind: z.string(),
+      heading_path: z.array(z.string()),
+    })
+    .optional()
+    .describe('0.12.0: on a dry run, the block that would be retired.'),
   stale_write_advisory: StaleWriteAdvisorySchema,
 });

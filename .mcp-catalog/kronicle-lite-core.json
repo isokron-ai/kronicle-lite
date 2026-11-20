@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-15T23:21:24.315Z",
+  "capturedAt": "2026-11-20T20:51:35.935Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -22,18 +22,22 @@
     "tools": [
       {
         "annotations": {
+          "destructiveHint": false,
           "idempotentHint": true,
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Grade facts before acting on them. claims: [{symbol, value}]; symbol is a block id (value: content or content_hash), a document slug (value: revision, markdown hash or markdown) or \"head\" (value: seq or hash). Verdict per claim: current | stale | contradicted | retracted | unknown | stale_source, with the current truth.",
+        "description": "Grade facts before acting on them: use this before relying on something you remembered or were told. claims: [{symbol, value}]; symbol is a block id (value: content or content_hash), a document slug (value: revision, markdown hash or markdown) or \"head\" (value: seq or hash). Verdict per claim: current | stale | contradicted | retracted | unknown | stale_source, with the current truth.",
         "inputSchema": {
+          "additionalProperties": false,
           "properties": {
             "claims": {
+              "description": "The facts to grade (1 to 100).",
               "items": {
                 "additionalProperties": false,
                 "properties": {
                   "symbol": {
+                    "description": "A block id, a document slug, or \"head\".",
                     "maxLength": 300,
                     "minLength": 1,
                     "type": "string"
@@ -47,7 +51,8 @@
                       {
                         "type": "number"
                       }
-                    ]
+                    ],
+                    "description": "What you believe it is (see the tool description)."
                   }
                 },
                 "required": [
@@ -94,12 +99,14 @@
       },
       {
         "annotations": {
+          "destructiveHint": false,
           "idempotentHint": false,
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Orient. Call at session start and before writes with your last cursor as since_cursor. Returns what changed since (delta), a drift banner, and retractions: things you relied on that changed, with old → new text. Reconcile retractions before acting. A bad or missing cursor never fails. focus: orientation (default) | recent_changes | retractions | pulse (head + banner only). Carry the returned cursor forward.",
+        "description": "Orient. Use this at session start, before writes and before world-changing commands, with your last cursor as since_cursor. Returns what changed since (delta), a drift banner, and retractions: things you relied on that changed, with old → new text. Reconcile retractions before acting. A bad or missing cursor never fails. focus: orientation (default) | recent_changes | retractions | pulse (head + banner only). Carry the returned cursor forward.",
         "inputSchema": {
+          "additionalProperties": false,
           "properties": {
             "actor_id": {
               "description": "Your agent id (default: server --actor). Cursors are bound to it.",
@@ -114,12 +121,14 @@
             },
             "budget_tokens": {
               "default": 3000,
+              "description": "Size budget of the briefing, in tokens.",
               "maximum": 64000,
               "minimum": 200,
               "type": "integer"
             },
             "focus": {
               "default": "orientation",
+              "description": "What to return: orientation, recent_changes, retractions or pulse.",
               "enum": [
                 "orientation",
                 "recent_changes",
@@ -140,6 +149,7 @@
             },
             "response_format": {
               "default": "markdown",
+              "description": "Text block format; structuredContent is the same either way.",
               "enum": [
                 "markdown",
                 "json"
@@ -317,8 +327,9 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Create or re-put a Markdown document by slug. A re-put replaces the document: unchanged blocks keep their ids, changed blocks are replaced (superseded) and dropped ones tombstoned, and the document reads the new text from then on. The old text stays on the chain (orient shows it as retractions) and receipts for the old blocks then verify as SUPERSEDED or TOMBSTONED. bind_git with source_path ties the document to that file's git blob (verify reports STALE_SOURCE when the file changes). Refuses text holding a secret (API key, token, private key, connection string): the chain cannot forget it.",
+        "description": "Create or re-put a whole Markdown document by slug. Use this to write a new document or a full new version of one; to change one block, use supersede_block. A re-put replaces the document: unchanged blocks keep their ids, changed blocks are replaced (superseded) and dropped ones tombstoned, and the document reads the new text from then on. The old text stays on the chain (orient shows it as retractions) and receipts for the old blocks then verify as SUPERSEDED or TOMBSTONED. bind_git with source_path ties the document to that file's git blob (verify reports STALE_SOURCE when the file changes). Refuses text holding a secret (API key, token, private key, connection string): the chain cannot forget it. expect_version refuses a stale write. Retries: with idempotency_key a retry returns the first result (replayed: true) and writes nothing; without one, a retry can append another revision.",
         "inputSchema": {
+          "additionalProperties": false,
           "properties": {
             "actor_id": {
               "description": "Your agent id (default: server --actor). Cursors are bound to it.",
@@ -328,12 +339,18 @@
             },
             "bind_git": {
               "default": false,
+              "description": "Pin the document to source_path's git blob (needs source_path).",
               "type": "boolean"
             },
             "cursor": {
               "description": "Your latest cursor (for the stale-write advisory).",
               "maxLength": 8192,
               "type": "string"
+            },
+            "expect_version": {
+              "description": "The document revision you last read (0 = must not exist yet). If it has changed, the write is refused with version_conflict and current_version; nothing is written.",
+              "minimum": 0,
+              "type": "integer"
             },
             "idempotency_key": {
               "description": "Retry key: the same put returns the first result (replayed: true); other arguments under it are refused.",
@@ -342,6 +359,7 @@
               "type": "string"
             },
             "markdown": {
+              "description": "The whole document as Markdown; it replaces the current text.",
               "maxLength": 2000000,
               "type": "string"
             },
@@ -364,6 +382,7 @@
               "type": "string"
             },
             "title": {
+              "description": "Document title.",
               "maxLength": 300,
               "minLength": 1,
               "type": "string"
@@ -455,11 +474,14 @@
       },
       {
         "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Full-text search over live blocks. Each hit carries a signed receipt (pass it to verify() before relying on it later) and authority: can_act | inspect_only | never_act with a reason; only can_act is safe to act on unchecked. absence says what was and was not searched: an empty result is not proof of absence unless verdict is absent_in_searched. Pass cursor: hits you already read this session rank lower.",
+        "description": "Full-text search over live blocks. Use this to find what the store says before relying on your own memory. Each hit carries a signed receipt (pass it to verify() before relying on it later) and authority: can_act | inspect_only | never_act with a reason; only can_act is safe to act on unchecked. absence says what was and was not searched: an empty result is not proof of absence unless verdict is absent_in_searched. Pass cursor: hits you already read this session rank lower.",
         "inputSchema": {
+          "additionalProperties": false,
           "properties": {
             "actor_id": {
               "description": "Your agent id (default: server --actor). Cursors are bound to it.",
@@ -479,10 +501,12 @@
             },
             "include_receipts": {
               "default": true,
+              "description": "Attach a receipt to each hit.",
               "type": "boolean"
             },
             "include_tombstoned": {
               "default": false,
+              "description": "Also return retired (tombstoned) blocks, marked as such.",
               "type": "boolean"
             },
             "max_chars": {
@@ -493,6 +517,7 @@
               "type": "integer"
             },
             "query": {
+              "description": "Search terms (full text).",
               "maxLength": 2000,
               "minLength": 1,
               "type": "string"
@@ -508,6 +533,7 @@
             },
             "top_k": {
               "default": 12,
+              "description": "Most hits to return.",
               "maximum": 50,
               "minimum": 1,
               "type": "integer"
@@ -595,8 +621,9 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Replace one live block's content, with a reason: the document reads the new text from then on. The old text stays on the chain (orient shows it as a retraction) and receipts for the old block then verify as SUPERSEDED.",
+        "description": "Replace one live block's content, with a reason: the document reads the new text from then on. Use this to correct or update one paragraph, heading or list item without re-putting the document. The old text stays on the chain (orient shows it as a retraction) and receipts for the old block then verify as SUPERSEDED. expect_version refuses a stale write. A retry does not repeat the effect: the old block is no longer live, so it is refused with block_not_live and current_block_id names the live replacement.",
         "inputSchema": {
+          "additionalProperties": false,
           "properties": {
             "actor_id": {
               "description": "Your agent id (default: server --actor). Cursors are bound to it.",
@@ -605,6 +632,7 @@
               "type": "string"
             },
             "block_id": {
+              "description": "Id of the live block to replace (from recall or put_document).",
               "format": "uuid",
               "type": "string"
             },
@@ -613,12 +641,19 @@
               "maxLength": 8192,
               "type": "string"
             },
+            "expect_version": {
+              "description": "The document revision you last read (0 = must not exist yet). If it has changed, the write is refused with version_conflict and current_version; nothing is written.",
+              "minimum": 0,
+              "type": "integer"
+            },
             "new_content": {
+              "description": "The block's new Markdown text.",
               "maxLength": 200000,
               "minLength": 1,
               "type": "string"
             },
             "reason": {
+              "description": "Why it changed (kept on the chain and shown with the retraction).",
               "maxLength": 1000,
               "minLength": 1,
               "type": "string"
@@ -682,15 +717,58 @@
       },
       {
         "annotations": {
+          "destructiveHint": false,
           "idempotentHint": true,
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Re-check recall() receipts (receipt / receipt_id, or up to 100 as receipts / receipt_ids) against the store (signature, re-hashed block text, chain position, supersession): VERIFIED | SUPERSEDED (see current_block_id) | TOMBSTONED | STALE_SOURCE | UNVERIFIED, with a reason. Fail-closed: with a batch, the top-level result is the first one not VERIFIED and results[] has each in input order.",
+        "description": "Re-check recall() receipts (receipt / receipt_id, or up to 100 as receipts / receipt_ids) against the store. Use this before acting on a hit you kept from earlier. Checks signature, re-hashed block text, chain position and supersession: VERIFIED | SUPERSEDED (see current_block_id) | TOMBSTONED | STALE_SOURCE | UNVERIFIED, with a reason. Fail-closed: with a batch, the top-level result is the first one not VERIFIED and results[] has each in input order.",
         "inputSchema": {
+          "additionalProperties": false,
           "properties": {
             "receipt": {
-              "description": "The receipt object from recall().",
+              "description": "A receipt object exactly as recall() returned it; verify checks its shape (a malformed one is UNVERIFIED).",
+              "properties": {
+                "block_id": {
+                  "description": "Block the receipt covers."
+                },
+                "chain_head_hash": {
+                  "description": "Chain head hash at recall time."
+                },
+                "chain_seq": {
+                  "description": "Chain seq of the block."
+                },
+                "content_hash": {
+                  "description": "Hash of the block text at recall time."
+                },
+                "doc_slug": {
+                  "description": "Document slug."
+                },
+                "issued_at": {
+                  "description": "Issue time (ISO 8601)."
+                },
+                "key_id": {
+                  "description": "Signing key id."
+                },
+                "query_hash": {
+                  "description": "Hash of the recall query."
+                },
+                "receipt_id": {
+                  "description": "Receipt id (uuid)."
+                },
+                "revision": {
+                  "description": "Document revision at recall time."
+                },
+                "signature": {
+                  "description": "Ed25519 signature."
+                },
+                "v": {
+                  "description": "Receipt format version."
+                },
+                "workspace": {
+                  "description": "Store the receipt was issued by."
+                }
+              },
               "type": "object"
             },
             "receipt_id": {
@@ -713,6 +791,48 @@
             "receipts": {
               "description": "Batch: receipt objects.",
               "items": {
+                "description": "A receipt object exactly as recall() returned it; verify checks its shape (a malformed one is UNVERIFIED).",
+                "properties": {
+                  "block_id": {
+                    "description": "Block the receipt covers."
+                  },
+                  "chain_head_hash": {
+                    "description": "Chain head hash at recall time."
+                  },
+                  "chain_seq": {
+                    "description": "Chain seq of the block."
+                  },
+                  "content_hash": {
+                    "description": "Hash of the block text at recall time."
+                  },
+                  "doc_slug": {
+                    "description": "Document slug."
+                  },
+                  "issued_at": {
+                    "description": "Issue time (ISO 8601)."
+                  },
+                  "key_id": {
+                    "description": "Signing key id."
+                  },
+                  "query_hash": {
+                    "description": "Hash of the recall query."
+                  },
+                  "receipt_id": {
+                    "description": "Receipt id (uuid)."
+                  },
+                  "revision": {
+                    "description": "Document revision at recall time."
+                  },
+                  "signature": {
+                    "description": "Ed25519 signature."
+                  },
+                  "v": {
+                    "description": "Receipt format version."
+                  },
+                  "workspace": {
+                    "description": "Store the receipt was issued by."
+                  }
+                },
                 "type": "object"
               },
               "maxItems": 100,
@@ -839,7 +959,7 @@
   "server": {
     "name": "kronicle-lite",
     "title": "kronicle-lite",
-    "version": "0.11.2"
+    "version": "0.12.0"
   },
-  "sha256": "f8d2b0aea9972c539297d3261f83125fa74d066b49ddd995279a2cd182c4daeb"
+  "sha256": "4dc777b01f0a5a8215fb29d651d4353f0fb23af67dc0252010797c04fbfbd328"
 }
