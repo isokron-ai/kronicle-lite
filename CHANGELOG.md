@@ -31,6 +31,45 @@ uses semantic versioning once past 0.x.
   `received_at`, a changed key, a fork, a receipt of a key the pack does not
   list, a kept list that does not chain, and `--no-tsa`.
 
+### Changed — write-safe tool surface: preconditions, idempotency, explicit hints
+
+Proposed release: 0.12.0 (new arguments, a new error code and strict input
+schemas). The catalog fingerprints in `src/catalog-pin.ts` and both
+`.mcp-catalog` snapshots are regenerated.
+
+- **`expect_version` on `put_document`, `supersede_block` and
+  `tombstone_block`** (optional): the document revision you read, `0` = the
+  document must not exist yet, with the semantics `apply` already had per op.
+  A different current revision is refused with `version_conflict` inside the
+  write transaction, nothing is appended, and the error carries `slug`,
+  `expected_version` and `current_version` as fields. A replay under a used
+  `idempotency_key` is answered before the check.
+- **`expected_head_hash` on `apply`** (optional): a precondition on the whole
+  batch, exposing the chain's existing compare-and-swap. If anything was
+  appended since that head, the batch (commit or dry run) is refused with
+  `head_conflict` and `current_head`; nothing is written. Per-op
+  `expect_version` covers only the documents a batch writes.
+- **`tombstone_block` `dry_run`** (optional, default `false`): checks
+  everything (the block is live, `expect_version`) and returns the block that
+  would be retired as `preview` (text through the read-time secret scrub),
+  writing nothing. The result now always carries `dry_run`. A required
+  confirm argument was not added: it would break every existing caller, and a
+  tombstone keeps the text on the chain.
+- **`block_not_live` is structured**: the error carries `block_id`, `state`
+  (`superseded` | `tombstoned`) and `current_block_id` (the live end of the
+  supersession walk, or null), so a retried `supersede_block` /
+  `tombstone_block` can tell its first call landed.
+- **Strict input schemas (breaking for sloppy callers)**: every tool's
+  `inputSchema` sets `additionalProperties: false` and an unknown or
+  misspelled argument is refused instead of silently ignored (for example
+  `derived_from` against a `--core` server, which does not offer it).
+- **Catalog clarity**: every tool states `readOnlyHint`, `destructiveHint`,
+  `idempotentHint` and `openWorldHint` as booleans; every description says
+  when to use the tool; every write tool says whether a retry repeats the
+  effect; every top-level argument has a description; `verify`'s `receipt`
+  declares a receipt's fields (still checked by the verifier, so a malformed
+  receipt answers `UNVERIFIED` / `malformed_receipt` as before).
+
 ### Added — a standalone verifier: `packages/verify` (unreleased)
 
 - **`verify.mjs`**: `kronicle-lite verify-audit` built into one readable ES

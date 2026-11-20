@@ -722,7 +722,17 @@ export const SupersedeBlockResultSchema = z.object({
 export const TombstoneBlockResultSchema = z.object({
   block_id: z.string(),
   doc_slug: z.string(),
-  revision: z.number().int().positive(),
+  revision: z.number().int().positive().describe('The revision the tombstone created (dry run: would create; the current one is revision - 1).'),
   head: ChainHeadSchema,
+  dry_run: z.boolean().describe('Unreleased: true when nothing was written (a preview).'),
+  preview: z
+    .object({
+      content: z.string(),
+      content_hash: HEX64,
+      kind: z.string(),
+      heading_path: z.array(z.string()),
+    })
+    .optional()
+    .describe('Unreleased: on a dry run, the block that would be retired.'),
   stale_write_advisory: StaleWriteAdvisorySchema,
 });

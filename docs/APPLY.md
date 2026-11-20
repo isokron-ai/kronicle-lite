@@ -35,6 +35,18 @@ committing that plan returns `partial`, which is an error.
 document must not exist. When the current revision differs, the op fails with
 `version_conflict`, which in `all_or_nothing` rolls back the whole plan.
 
+## expected_head_hash
+
+Unreleased. `expected_head_hash` is a precondition on the whole batch: the
+chain head hash you last read (`get_system_state`, or the `head` of any
+write). If anything at all was appended since, the batch is refused with
+`head_conflict` before any op runs, nothing is written, and the error carries
+`expected_head_hash` and `current_head` (`seq`, `hash`). It is checked inside
+the commit transaction, and on a dry run too. Use it when the batch was
+derived from more than the documents it writes (per-op `expect_version` only
+covers its targets). A replay under a used `idempotency_key` is answered
+before the check, so a retry after a lost answer still gets the first result.
+
 ## dry_run and the confirm token
 
 **`dry_run: true` runs the real writes inside a transaction that is always

@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-15T23:21:24.126Z",
+  "capturedAt": "2026-11-20T20:33:02.300Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -22,15 +22,18 @@
     "tools": [
       {
         "annotations": {
+          "destructiveHint": false,
           "idempotentHint": true,
           "openWorldHint": true,
           "readOnlyHint": true
         },
-        "description": "Last off-box anchor and whether the local chain still matches it: match | diverged (rewritten after anchoring) | beyond_head | gap | unverified (receipt not trusted). remote:true also asks the anchor service.",
+        "description": "Last off-box anchor and whether the local chain still matches it: match | diverged (rewritten after anchoring) | beyond_head | gap | unverified (receipt not trusted). remote:true also asks the anchor service. Use this to check that the chain has not been rewritten since it was last anchored.",
         "inputSchema": {
+          "additionalProperties": false,
           "properties": {
             "remote": {
               "default": false,
+              "description": "Also ask the anchor service (network); default: local check only.",
               "type": "boolean"
             }
           },
@@ -88,8 +91,9 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Up to 50 put / supersede / tombstone ops in ONE local transaction. mode all_or_nothing (default; any failure rolls back everything) | best_effort. dry_run: exact per-op diffs, nothing written, plus a single-use confirm_token bound to this plan, actor and the previewed versions; commit with it to reject a plan whose state changed. expect_version per op; idempotency_key replays the committed result. Any status but committed or planned (rolled_back, failed, partial) is returned with isError: true and the same body.",
+        "description": "Up to 50 put / supersede / tombstone ops in ONE local transaction. Use this when several writes must land together or not at all, or to preview writes before committing them. mode all_or_nothing (default; any failure rolls back everything) | best_effort. dry_run: exact per-op diffs, nothing written, plus a single-use confirm_token bound to this plan, actor and the previewed versions; commit with it to reject a plan whose state changed. expect_version per op; expected_head_hash for the whole batch; idempotency_key replays the committed result. Any status but committed or planned (rolled_back, failed, partial) is returned with isError: true and the same body.",
         "inputSchema": {
+          "additionalProperties": false,
           "properties": {
             "actor_id": {
               "description": "Your agent id (default: server --actor). Cursors are bound to it.",
@@ -98,21 +102,30 @@
               "type": "string"
             },
             "confirm_token": {
+              "description": "From a dry run of this same plan; the commit is refused if anything it previewed changed.",
               "maxLength": 4000,
               "minLength": 1,
               "type": "string"
             },
             "dry_run": {
               "default": false,
+              "description": "Preview: per-op results and diffs plus a confirm_token; nothing is written.",
               "type": "boolean"
             },
+            "expected_head_hash": {
+              "description": "The chain head hash you last read (get_system_state or a write's head). If anything was written since, the whole batch is refused with head_conflict and current_head.",
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
             "idempotency_key": {
+              "description": "Retry key: the same request returns the committed result (replayed: true); other arguments under it are refused.",
               "maxLength": 128,
               "minLength": 1,
               "type": "string"
             },
             "mode": {
               "default": "all_or_nothing",
+              "description": "all_or_nothing: any failure rolls back every op; best_effort: each op on its own.",
               "enum": [
                 "all_or_nothing",
                 "best_effort"
@@ -120,6 +133,7 @@
               "type": "string"
             },
             "ops": {
+              "description": "The writes, in order. Each has an id you choose and an optional expect_version (the document revision you read).",
               "items": {
                 "oneOf": [
                   {
@@ -349,18 +363,22 @@
       },
       {
         "annotations": {
+          "destructiveHint": false,
           "idempotentHint": true,
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Grade facts before acting on them. claims: [{symbol, value}]; symbol is a block id (value: content or content_hash), a document slug (value: revision, markdown hash or markdown) or \"head\" (value: seq or hash). Verdict per claim: current | stale | contradicted | retracted | unknown | stale_source, with the current truth.",
+        "description": "Grade facts before acting on them: use this before relying on something you remembered or were told. claims: [{symbol, value}]; symbol is a block id (value: content or content_hash), a document slug (value: revision, markdown hash or markdown) or \"head\" (value: seq or hash). Verdict per claim: current | stale | contradicted | retracted | unknown | stale_source, with the current truth.",
         "inputSchema": {
+          "additionalProperties": false,
           "properties": {
             "claims": {
+              "description": "The facts to grade (1 to 100).",
               "items": {
                 "additionalProperties": false,
                 "properties": {
                   "symbol": {
+                    "description": "A block id, a document slug, or \"head\".",
                     "maxLength": 300,
                     "minLength": 1,
                     "type": "string"
@@ -374,7 +392,8 @@
                       {
                         "type": "number"
                       }
-                    ]
+                    ],
+                    "description": "What you believe it is (see the tool description)."
                   }
                 },
                 "required": [
@@ -421,32 +440,39 @@
       },
       {
         "annotations": {
+          "destructiveHint": false,
           "idempotentHint": true,
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Audit events by audit_id and/or catalog fingerprint (optional kind, finding_id, after_seq, limit), ascending seq; with audit_id, also the current state of each finding (discovered | refuted | reopened | accepted).",
+        "description": "Audit events by audit_id and/or catalog fingerprint (optional kind, finding_id, after_seq, limit), ascending seq; with audit_id, also the current state of each finding (discovered | refuted | reopened | accepted). Use this to read back an audit's evidence or where its findings stand.",
         "inputSchema": {
+          "additionalProperties": false,
           "properties": {
             "after_seq": {
+              "description": "Only events after this chain seq (paging).",
               "minimum": 0,
               "type": "integer"
             },
             "audit_id": {
+              "description": "Only events of this audit (also returns finding states).",
               "maxLength": 128,
               "minLength": 1,
               "type": "string"
             },
             "finding_id": {
+              "description": "Only events about this finding.",
               "maxLength": 128,
               "minLength": 1,
               "type": "string"
             },
             "fingerprint": {
+              "description": "Only events about this catalog fingerprint (sha256 hex).",
               "pattern": "^[0-9a-f]{64}$",
               "type": "string"
             },
             "kind": {
+              "description": "Only events of this kind.",
               "enum": [
                 "catalog_snapshot",
                 "call_measured",
@@ -465,6 +491,7 @@
             },
             "limit": {
               "default": 200,
+              "description": "Most events to return.",
               "maximum": 5000,
               "minimum": 1,
               "type": "integer"
@@ -500,8 +527,9 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Append MCP-audit evidence to the chain, all or nothing (≤ 500 per call). kind: catalog_snapshot | call_measured | finding | gate_result | fix_applied | regression_result; payload per kind (kronicle://schemas/audit). Hashes and blob refs only: artifacts go to the blob store (CLI audit put-blob). event_key is the stable id: a retry is a no-op, a different payload under it is refused.",
+        "description": "Append MCP-audit evidence to the chain, all or nothing (≤ 500 per call). kind: catalog_snapshot | call_measured | finding | gate_result | fix_applied | regression_result; payload per kind (kronicle://schemas/audit). Hashes and blob refs only: artifacts go to the blob store (CLI audit put-blob). event_key is the stable id: a retry is a no-op, a different payload under it is refused. Use this to log evidence while running an MCP audit.",
         "inputSchema": {
+          "additionalProperties": false,
           "properties": {
             "actor_id": {
               "description": "Your agent id (default: server --actor). Cursors are bound to it.",
@@ -510,11 +538,13 @@
               "type": "string"
             },
             "audit_id": {
+              "description": "Your id for the audit run this evidence belongs to.",
               "maxLength": 128,
               "minLength": 1,
               "type": "string"
             },
             "events": {
+              "description": "Events to append, all or nothing.",
               "items": {
                 "additionalProperties": false,
                 "properties": {
@@ -587,22 +617,27 @@
       {
         "annotations": {
           "destructiveHint": false,
+          "idempotentHint": false,
           "openWorldHint": true,
           "readOnlyHint": false
         },
-        "description": "Sign and store a Merkle root over event hashes in [from_seq, to_seq] (default: all). push:true also anchors it off-box (root, range, signature and public key leave the machine; the local checkpoint is kept either way).",
+        "description": "Sign and store a Merkle root over event hashes in [from_seq, to_seq] (default: all). Use this to seal the chain so far, for example before sharing evidence. push:true also anchors it off-box (root, range, signature and public key leave the machine; the local checkpoint is kept either way). Append-only: a retry repeats the effect, storing another checkpoint of the same range (the same root) and, with push, sending it again.",
         "inputSchema": {
+          "additionalProperties": false,
           "properties": {
             "from_seq": {
               "default": 1,
+              "description": "First event seq of the range (default 1).",
               "minimum": 1,
               "type": "integer"
             },
             "push": {
               "default": false,
+              "description": "Also anchor the checkpoint with the hosted anchor service (network).",
               "type": "boolean"
             },
             "to_seq": {
+              "description": "Last event seq of the range (default: the chain head).",
               "minimum": 1,
               "type": "integer"
             }
@@ -656,12 +691,14 @@
       },
       {
         "annotations": {
+          "destructiveHint": false,
           "idempotentHint": false,
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Orient. Call at session start and before writes with your last cursor as since_cursor. Returns what changed since (delta), a drift banner, and retractions: things you relied on that changed, with old → new text. Reconcile retractions before acting. A bad or missing cursor never fails. focus: orientation (default) | recent_changes | retractions | pulse (head + banner only). Carry the returned cursor forward.",
+        "description": "Orient. Use this at session start, before writes and before world-changing commands, with your last cursor as since_cursor. Returns what changed since (delta), a drift banner, and retractions: things you relied on that changed, with old → new text. Reconcile retractions before acting. A bad or missing cursor never fails. focus: orientation (default) | recent_changes | retractions | pulse (head + banner only). Carry the returned cursor forward.",
         "inputSchema": {
+          "additionalProperties": false,
           "properties": {
             "actor_id": {
               "description": "Your agent id (default: server --actor). Cursors are bound to it.",
@@ -676,12 +713,14 @@
             },
             "budget_tokens": {
               "default": 3000,
+              "description": "Size budget of the briefing, in tokens.",
               "maximum": 64000,
               "minimum": 200,
               "type": "integer"
             },
             "focus": {
               "default": "orientation",
+              "description": "What to return: orientation, recent_changes, retractions or pulse.",
               "enum": [
                 "orientation",
                 "recent_changes",
@@ -702,6 +741,7 @@
             },
             "response_format": {
               "default": "markdown",
+              "description": "Text block format; structuredContent is the same either way.",
               "enum": [
                 "markdown",
                 "json"
@@ -879,8 +919,9 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Create or re-put a Markdown document by slug. A re-put replaces the document: unchanged blocks keep their ids, changed blocks are replaced (superseded) and dropped ones tombstoned, and the document reads the new text from then on. The old text stays on the chain (orient shows it as retractions) and receipts for the old blocks then verify as SUPERSEDED or TOMBSTONED. bind_git with source_path ties the document to that file's git blob (verify reports STALE_SOURCE when the file changes). Refuses text holding a secret (API key, token, private key, connection string): the chain cannot forget it.",
+        "description": "Create or re-put a whole Markdown document by slug. Use this to write a new document or a full new version of one; to change one block, use supersede_block. A re-put replaces the document: unchanged blocks keep their ids, changed blocks are replaced (superseded) and dropped ones tombstoned, and the document reads the new text from then on. The old text stays on the chain (orient shows it as retractions) and receipts for the old blocks then verify as SUPERSEDED or TOMBSTONED. bind_git with source_path ties the document to that file's git blob (verify reports STALE_SOURCE when the file changes). Refuses text holding a secret (API key, token, private key, connection string): the chain cannot forget it. expect_version refuses a stale write. Retries: with idempotency_key a retry returns the first result (replayed: true) and writes nothing; without one, a retry can append another revision.",
         "inputSchema": {
+          "additionalProperties": false,
           "properties": {
             "actor_id": {
               "description": "Your agent id (default: server --actor). Cursors are bound to it.",
@@ -890,6 +931,7 @@
             },
             "bind_git": {
               "default": false,
+              "description": "Pin the document to source_path's git blob (needs source_path).",
               "type": "boolean"
             },
             "cursor": {
@@ -920,6 +962,11 @@
               "maxItems": 200,
               "type": "array"
             },
+            "expect_version": {
+              "description": "The document revision you last read (0 = must not exist yet). If it has changed, the write is refused with version_conflict and current_version; nothing is written.",
+              "minimum": 0,
+              "type": "integer"
+            },
             "idempotency_key": {
               "description": "Retry key: the same put returns the first result (replayed: true); other arguments under it are refused.",
               "maxLength": 200,
@@ -927,6 +974,7 @@
               "type": "string"
             },
             "markdown": {
+              "description": "The whole document as Markdown; it replaces the current text.",
               "maxLength": 2000000,
               "type": "string"
             },
@@ -949,6 +997,7 @@
               "type": "string"
             },
             "title": {
+              "description": "Document title.",
               "maxLength": 300,
               "minLength": 1,
               "type": "string"
@@ -1040,11 +1089,14 @@
       },
       {
         "annotations": {
+          "destructiveHint": false,
+          "idempotentHint": false,
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Full-text search over live blocks. Each hit carries a signed receipt (pass it to verify() before relying on it later) and authority: can_act | inspect_only | never_act with a reason; only can_act is safe to act on unchecked. absence says what was and was not searched: an empty result is not proof of absence unless verdict is absent_in_searched. Pass cursor: hits you already read this session rank lower.",
+        "description": "Full-text search over live blocks. Use this to find what the store says before relying on your own memory. Each hit carries a signed receipt (pass it to verify() before relying on it later) and authority: can_act | inspect_only | never_act with a reason; only can_act is safe to act on unchecked. absence says what was and was not searched: an empty result is not proof of absence unless verdict is absent_in_searched. Pass cursor: hits you already read this session rank lower.",
         "inputSchema": {
+          "additionalProperties": false,
           "properties": {
             "actor_id": {
               "description": "Your agent id (default: server --actor). Cursors are bound to it.",
@@ -1064,10 +1116,12 @@
             },
             "include_receipts": {
               "default": true,
+              "description": "Attach a receipt to each hit.",
               "type": "boolean"
             },
             "include_tombstoned": {
               "default": false,
+              "description": "Also return retired (tombstoned) blocks, marked as such.",
               "type": "boolean"
             },
             "max_chars": {
@@ -1078,6 +1132,7 @@
               "type": "integer"
             },
             "query": {
+              "description": "Search terms (full text).",
               "maxLength": 2000,
               "minLength": 1,
               "type": "string"
@@ -1093,6 +1148,7 @@
             },
             "top_k": {
               "default": 12,
+              "description": "Most hits to return.",
               "maximum": 50,
               "minimum": 1,
               "type": "integer"
@@ -1180,8 +1236,9 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Replace one live block's content, with a reason: the document reads the new text from then on. The old text stays on the chain (orient shows it as a retraction) and receipts for the old block then verify as SUPERSEDED.",
+        "description": "Replace one live block's content, with a reason: the document reads the new text from then on. Use this to correct or update one paragraph, heading or list item without re-putting the document. The old text stays on the chain (orient shows it as a retraction) and receipts for the old block then verify as SUPERSEDED. expect_version refuses a stale write. A retry does not repeat the effect: the old block is no longer live, so it is refused with block_not_live and current_block_id names the live replacement.",
         "inputSchema": {
+          "additionalProperties": false,
           "properties": {
             "actor_id": {
               "description": "Your agent id (default: server --actor). Cursors are bound to it.",
@@ -1190,6 +1247,7 @@
               "type": "string"
             },
             "block_id": {
+              "description": "Id of the live block to replace (from recall or put_document).",
               "format": "uuid",
               "type": "string"
             },
@@ -1221,12 +1279,19 @@
               "maxItems": 200,
               "type": "array"
             },
+            "expect_version": {
+              "description": "The document revision you last read (0 = must not exist yet). If it has changed, the write is refused with version_conflict and current_version; nothing is written.",
+              "minimum": 0,
+              "type": "integer"
+            },
             "new_content": {
+              "description": "The block's new Markdown text.",
               "maxLength": 200000,
               "minLength": 1,
               "type": "string"
             },
             "reason": {
+              "description": "Why it changed (kept on the chain and shown with the retraction).",
               "maxLength": 1000,
               "minLength": 1,
               "type": "string"
@@ -1295,8 +1360,9 @@
           "openWorldHint": false,
           "readOnlyHint": false
         },
-        "description": "Retire one live block with a reason (no successor). Receipts for it then verify as TOMBSTONED.",
+        "description": "Retire one live block with a reason (no successor). Use this to remove a block that is wrong or obsolete; to change it, use supersede_block. Receipts for it then verify as TOMBSTONED; the text stays on the chain. dry_run: true checks everything and returns the block that would be retired (preview), writing nothing. expect_version refuses a stale write. A retry does not repeat the effect: the block is no longer live, so it is refused with block_not_live.",
         "inputSchema": {
+          "additionalProperties": false,
           "properties": {
             "actor_id": {
               "description": "Your agent id (default: server --actor). Cursors are bound to it.",
@@ -1305,6 +1371,7 @@
               "type": "string"
             },
             "block_id": {
+              "description": "Id of the live block to retire (from recall or put_document).",
               "format": "uuid",
               "type": "string"
             },
@@ -1313,7 +1380,18 @@
               "maxLength": 8192,
               "type": "string"
             },
+            "dry_run": {
+              "default": false,
+              "description": "Preview only: check, return the block that would be retired, write nothing.",
+              "type": "boolean"
+            },
+            "expect_version": {
+              "description": "The document revision you last read (0 = must not exist yet). If it has changed, the write is refused with version_conflict and current_version; nothing is written.",
+              "minimum": 0,
+              "type": "integer"
+            },
             "reason": {
+              "description": "Why it is retired (kept on the chain).",
               "maxLength": 1000,
               "minLength": 1,
               "type": "string"
@@ -1334,7 +1412,13 @@
             "doc_slug": {
               "type": "string"
             },
+            "dry_run": {
+              "type": "boolean"
+            },
             "head": {
+              "type": "object"
+            },
+            "preview": {
               "type": "object"
             },
             "revision": {
@@ -1349,6 +1433,7 @@
             "doc_slug",
             "revision",
             "head",
+            "dry_run",
             "stale_write_advisory"
           ],
           "type": "object"
@@ -1357,15 +1442,58 @@
       },
       {
         "annotations": {
+          "destructiveHint": false,
           "idempotentHint": true,
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Re-check recall() receipts (receipt / receipt_id, or up to 100 as receipts / receipt_ids) against the store (signature, re-hashed block text, chain position, supersession): VERIFIED | SUPERSEDED (see current_block_id) | TOMBSTONED | STALE_SOURCE | UNVERIFIED, with a reason. Fail-closed: with a batch, the top-level result is the first one not VERIFIED and results[] has each in input order.",
+        "description": "Re-check recall() receipts (receipt / receipt_id, or up to 100 as receipts / receipt_ids) against the store. Use this before acting on a hit you kept from earlier. Checks signature, re-hashed block text, chain position and supersession: VERIFIED | SUPERSEDED (see current_block_id) | TOMBSTONED | STALE_SOURCE | UNVERIFIED, with a reason. Fail-closed: with a batch, the top-level result is the first one not VERIFIED and results[] has each in input order.",
         "inputSchema": {
+          "additionalProperties": false,
           "properties": {
             "receipt": {
-              "description": "The receipt object from recall().",
+              "description": "A receipt object exactly as recall() returned it; verify checks its shape (a malformed one is UNVERIFIED).",
+              "properties": {
+                "block_id": {
+                  "description": "Block the receipt covers."
+                },
+                "chain_head_hash": {
+                  "description": "Chain head hash at recall time."
+                },
+                "chain_seq": {
+                  "description": "Chain seq of the block."
+                },
+                "content_hash": {
+                  "description": "Hash of the block text at recall time."
+                },
+                "doc_slug": {
+                  "description": "Document slug."
+                },
+                "issued_at": {
+                  "description": "Issue time (ISO 8601)."
+                },
+                "key_id": {
+                  "description": "Signing key id."
+                },
+                "query_hash": {
+                  "description": "Hash of the recall query."
+                },
+                "receipt_id": {
+                  "description": "Receipt id (uuid)."
+                },
+                "revision": {
+                  "description": "Document revision at recall time."
+                },
+                "signature": {
+                  "description": "Ed25519 signature."
+                },
+                "v": {
+                  "description": "Receipt format version."
+                },
+                "workspace": {
+                  "description": "Store the receipt was issued by."
+                }
+              },
               "type": "object"
             },
             "receipt_id": {
@@ -1388,6 +1516,48 @@
             "receipts": {
               "description": "Batch: receipt objects.",
               "items": {
+                "description": "A receipt object exactly as recall() returned it; verify checks its shape (a malformed one is UNVERIFIED).",
+                "properties": {
+                  "block_id": {
+                    "description": "Block the receipt covers."
+                  },
+                  "chain_head_hash": {
+                    "description": "Chain head hash at recall time."
+                  },
+                  "chain_seq": {
+                    "description": "Chain seq of the block."
+                  },
+                  "content_hash": {
+                    "description": "Hash of the block text at recall time."
+                  },
+                  "doc_slug": {
+                    "description": "Document slug."
+                  },
+                  "issued_at": {
+                    "description": "Issue time (ISO 8601)."
+                  },
+                  "key_id": {
+                    "description": "Signing key id."
+                  },
+                  "query_hash": {
+                    "description": "Hash of the recall query."
+                  },
+                  "receipt_id": {
+                    "description": "Receipt id (uuid)."
+                  },
+                  "revision": {
+                    "description": "Document revision at recall time."
+                  },
+                  "signature": {
+                    "description": "Ed25519 signature."
+                  },
+                  "v": {
+                    "description": "Receipt format version."
+                  },
+                  "workspace": {
+                    "description": "Store the receipt was issued by."
+                  }
+                },
                 "type": "object"
               },
               "maxItems": 100,
@@ -1509,19 +1679,23 @@
       },
       {
         "annotations": {
+          "destructiveHint": false,
           "idempotentHint": true,
           "openWorldHint": false,
           "readOnlyHint": true
         },
-        "description": "Recompute every event hash and link in [from_seq, to_seq] and check stored checkpoints. Over the whole chain (the default) it also re-derives and re-hashes every stored document and block (projection). ok:false means the database was edited outside kronicle-lite or is corrupt.",
+        "description": "Recompute every event hash and link in [from_seq, to_seq] and check stored checkpoints. Over the whole chain (the default) it also re-derives and re-hashes every stored document and block (projection). ok:false means the database was edited outside kronicle-lite or is corrupt. Use this when you suspect tampering or corruption, or before sharing evidence.",
         "inputSchema": {
+          "additionalProperties": false,
           "properties": {
             "from_seq": {
               "default": 1,
+              "description": "First event seq of the range (default 1).",
               "minimum": 1,
               "type": "integer"
             },
             "to_seq": {
+              "description": "Last event seq of the range (default: the chain head).",
               "minimum": 1,
               "type": "integer"
             }
@@ -1585,5 +1759,5 @@
     "title": "kronicle-lite",
     "version": "0.11.2"
   },
-  "sha256": "d31f975b0c67426ee2586849b4195b08ead73b7f70ffca5762f5d81b88f8e439"
+  "sha256": "0b5ef071a0d63b2371a54cefe8d1f3ee3845e2d41069de17adf1b804be7bea88"
 }

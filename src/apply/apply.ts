@@ -74,6 +74,14 @@ export interface ApplyInput {
   project?: { key: string; root: string } | null | undefined;
   /** Refuse any commit without a confirm_token (remote-capable servers: HTTP). */
   require_confirm?: boolean | undefined;
+  /**
+   * Unreleased: batch-level precondition, the chain's compare-and-swap at the
+   * MCP surface. The head hash the caller read (get_system_state, or any
+   * write's `head`); if anything was appended since, the batch (commit or
+   * dry run) is refused with `head_conflict` and the current head. A replay
+   * under a used idempotency_key is answered before this check.
+   */
+  expected_head_hash?: string | undefined;
 }
 
 export type OpStatus = 'planned' | 'applied' | 'failed' | 'rolled_back' | 'not_run';
@@ -126,8 +134,11 @@ export class ApplyError extends Error {
       | 'idempotency_conflict'
       | 'stale_plan'
       | 'version_conflict'
+      | 'head_conflict'
       | 'forbidden',
     message: string,
+    /** Unreleased: machine-readable fields of the refusal (head_conflict: expected_head_hash, current_head). */
+    readonly details?: Record<string, unknown>,
   ) {
     super(message);
   }
@@ -203,7 +214,10 @@ export class ApplyEngine {
     const request_hash = sha256Hex(canonicalize({ mode, ops } as unknown as JsonValue));
     const key = input.idempotency_key ?? null;
 
-    if (input.dry_run) return this.preview(mode, ops, plan_hash, key, input);
+    if (input.dry_run) {
+      this.checkHead(input.expected_head_hash);
+      return this.preview(mode, ops, plan_hash, key, input);
+    }
 
     const nonce = input.confirm_token !== undefined ? this.parseToken(input.confirm_token) : null;
     const project = input.project ?? null;
@@ -227,6 +241,7 @@ export class ApplyEngine {
             return { ...(JSON.parse(prior.result_json) as ApplyResult), replayed: true };
           }
         }
+        this.checkHead(input.expected_head_hash);
         if (nonce !== null) this.revalidate(nonce, { plan_hash, actor_id: input.actor_id, key, ops, project }, () => (burnOnFailure = true));
         else if (input.require_confirm === true) throw new ApplyError('confirm_required', 'this server requires a confirm_token: dry_run first, then commit with it');
         else if (this.pendingConfirmation(plan_hash, input.actor_id)) {
@@ -300,6 +315,17 @@ export class ApplyEngine {
       }
       throw err;
     }
+  }
+
+  /** Unreleased: expected_head_hash (inside the commit transaction, so nothing can land between the check and the ops). */
+  private checkHead(expected: string | undefined): void {
+    if (expected === undefined) return;
+    const head = this.chain.head();
+    if (head.hash === expected) return;
+    throw new ApplyError('head_conflict', `the chain head moved since expected_head_hash (now seq ${head.seq}); nothing written. Re-orient and re-plan.`, {
+      expected_head_hash: expected,
+      current_head: { seq: head.seq, hash: head.hash },
+    });
   }
 
   /** The apply.committed append; a chain key held by another request (KL-1: the chain now refuses it) is idempotency_conflict, as a replay is. */

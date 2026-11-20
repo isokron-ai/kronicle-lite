@@ -233,7 +233,10 @@ Orient before the next write and re-check anything the delta touched.
   `failed`, `partial`) is a tool error with the full body; read
   `ops[].error`.
 - `supersede_block` / `tombstone_block`: refused on a block that is not
-  live; operate on the current head.
+  live (`block_not_live`; `current_block_id` names the live replacement);
+  operate on the current head. Pass `expect_version` (the revision you
+  read) to refuse a write over someone else's edit; `tombstone_block
+  {dry_run: true}` shows what would be retired.
 - `checkpoint_chain {push: true}` sends the signed root, range,
   signature and public key (never events) to the anchor service; the
   local checkpoint is stored either way.
