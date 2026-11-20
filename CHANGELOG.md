@@ -49,7 +49,14 @@ A minor release: new arguments, new error codes and strict input schemas. The ca
   batch, exposing the chain's existing compare-and-swap. If anything was
   appended since that head, the batch (commit or dry run) is refused with
   `head_conflict` and `current_head`; nothing is written. Per-op
-  `expect_version` covers only the documents a batch writes.
+  `expect_version` covers only the documents a batch writes. A confirm token
+  from a dry run with `expected_head_hash` binds it: the commit must pass the
+  same value (otherwise `confirm_mismatch`), and a moved head is
+  `head_conflict`; both burn the token.
+- **Structured per-op errors in `apply`**: `block_not_live` carries `state` and
+  `current_block_id`, and `version_conflict` carries `slug`,
+  `expected_version` and `current_version`, as the single-document tools do.
+  The `block_not_live` message no longer repeats the tombstone reason.
 - **`tombstone_block` `dry_run`** (optional, default `false`): checks
   everything (the block is live, `expect_version`) and returns the block that
   would be retired as `preview` (text through the read-time secret scrub),

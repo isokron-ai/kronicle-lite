@@ -108,6 +108,10 @@ inside the commit transaction, so a check and the writes can never be split:
    (`confirm_mismatch`) and does *not* burn the owner's token.
 4. **TOCTOU.** The previewed versions of every resource are compared with the
    current ones. Any change gives `stale_plan`; preview again.
+   **Head precondition (0.12.0).** If the dry run carried `expected_head_hash`,
+   the commit must pass the same value: a different or missing value is
+   `confirm_mismatch` and burns the token, and a head that moved since the
+   preview is `head_conflict` and burns it too. Preview again in either case.
 5. **Authorization, per op, again.** The token proves a preview happened; it
    authorizes nothing. A policy that denies at commit wins over a valid token
    (`forbidden`).
