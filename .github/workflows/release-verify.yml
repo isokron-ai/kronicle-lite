@@ -147,7 +147,7 @@ jobs:
         # No token: an NPM_TOKEN / NODE_AUTH_TOKEN here would bypass trusted publishing.
         env:
           PKG_FILE: ${{ needs.build.outputs.file }}
-        run: npm publish "release/$PKG_FILE" --provenance --access public
+        run: npm publish "./release/$PKG_FILE" --provenance --access public
       - name: The registry serves what was packed, with provenance
         env:
           PKG_NAME: ${{ needs.build.outputs.name }}

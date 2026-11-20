@@ -51,7 +51,7 @@ describe('release workflow (B11)', () => {
     const p = job('publish');
     expect(p).toMatch(/^ {4}environment: npm-publish$/m);
     expect(p).toMatch(/^ {4}needs: verify$/m);
-    expect(p).toMatch(/npm publish "release\/\$PKG_FILE" --provenance --access public --ignore-scripts/);
+    expect(p).toMatch(/npm publish "\.\/release\/\$PKG_FILE" --provenance --access public --ignore-scripts/);
   });
 
   it('publishes the tarball the verify job tested and packed, and installs nothing while holding the OIDC token', () => {

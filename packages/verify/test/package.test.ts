@@ -129,7 +129,7 @@ describe('release-verify.yml', () => {
     expect(p).toContain('id-token: write');
     expect(p).toMatch(/^ {4}environment: npm-publish-verify$/m);
     expect(p).toMatch(/^ {4}needs: build$/m);
-    expect(p).toMatch(/npm publish "release\/\$PKG_FILE" --provenance --access public/);
+    expect(p).toMatch(/npm publish "\.\/release\/\$PKG_FILE" --provenance --access public/);
     // no package code runs while the job holds the OIDC token: no install, no build, no test
     expect(p).not.toMatch(/npm (ci|install(?! -g --ignore-scripts npm@)|run|test)|build\.mjs/);
     expect(p).toMatch(/sha256sum -c -/);
