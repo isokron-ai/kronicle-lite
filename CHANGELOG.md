@@ -8,6 +8,10 @@ uses semantic versioning once past 0.x.
 
 ## [0.12.0] — 2026-11-20
 
+### Fixed (release tooling)
+
+- **Release workflow:** `npm publish` is given `./release/<tarball>`; without the `./` npm read `release/<file>` as a GitHub `owner/repo` shorthand and tried to clone it, so the first workflow publish attempt failed before reaching the registry; nothing was published.
+
 ### Fixed — an honest older pack verifies after an anchor-key rotation (keyListRegression)
 
 - **verify-audit rejected an honest older pack once it had seen a newer key
