@@ -10,7 +10,7 @@ uses semantic versioning once past 0.x.
 
 A patch to `verify-audit` (and `@isokron/verify`, built from the same source). Re-recording the
 sample-pack article on 0.12.0 found two claims that read PASS without the evidence behind them,
-and a VERIFY.md out of order. Honest, anchored packs give the same report as under 0.12.0.
+and a VERIFY.md out of order. Honest, anchored packs give the same text report as under 0.12.0. In `--json` output, the "auditor key" check now carries `"claim": "integrity"` (it was `null`) on every run with a pinned key.
 
 ### Fixed
 
