@@ -6,6 +6,42 @@ uses semantic versioning once past 0.x.
 
 ## [Unreleased]
 
+## [0.12.1] — 2026-11-21
+
+A patch to `verify-audit` (and `@isokron/verify`, built from the same source). Re-recording the
+sample-pack article on 0.12.0 found two claims that read PASS without the evidence behind them,
+and a VERIFY.md out of order. Honest, anchored packs give the same report as under 0.12.0.
+
+### Fixed
+
+- **`independent_timestamps` read PASS with nothing checked.** On a pack whose `anchors/` holds
+  no receipt, the receipts step returned before the tokens over `SHA256SUMS` were checked, and
+  the claim passed on the "no stamp pending" check alone: `PASS independent_timestamps 0 of 0
+  RFC 3161 token(s), each receipt stamped under ≥ 2 pinned TSA CAs ()`, `--require
+  independent_timestamps` included (0.10.1 failed it). The claim now passes only on a verified
+  token over an anchor receipt; without one it FAILs (`nothing in the pack backs this claim: no
+  anchor receipt, so no RFC 3161 token over one`, or the failing `SHA256SUMS` token check), and
+  the tokens over `SHA256SUMS` are checked whether or not there are receipts.
+- **`integrity` read PASS on a pack signed by a key other than the pinned one.** A forged pack is
+  consistent under the forger's own key; the `auditor key` check failed under Pack, but it
+  belonged to no claim, so the RESULT line named only `receipts` and
+  `harness_frozen_before_runs` (0.10.1 said "pack structure"). The check now belongs to
+  `integrity`, which FAILs with "the pack's auditor key has SHA-256(SPKI) …, not the pinned …"
+  and is named on the RESULT line. An unpinned run is unchanged (it already fails).
+- **`audit package` numbered VERIFY.md's sections 1, 4, 2, 5, 3** on a pack with a derived freeze
+  nonce and human sign-offs: each section took its number when it was built, not when it was
+  printed. They are numbered in print order now. Packs made by 0.12.0 keep their VERIFY.md (it
+  is in SHA256SUMS); only the numbering is wrong, every command in it is right.
+
+### Changed
+
+- Version 0.12.1 in package.json, the lockfile, server.json, `CATALOG_VERSION` and both catalog
+  snapshots (fingerprints unchanged); README and `docs/EVIDENCE-BUNDLE.md` pin
+  `npx -y kronicle-lite@0.12.1 verify-audit`.
+- Tests: `test/verify-audit-profile.test.ts` "0.12.1: a claim passes only on the evidence that
+  backs it" (an unanchored pack with and without tokens over SHA256SUMS, audit and legacy
+  profiles, `--require`; a pinned fingerprint that is not the pack's key; VERIFY.md numbering).
+
 ## [0.12.0] — 2026-11-20
 
 ### Fixed (release tooling)

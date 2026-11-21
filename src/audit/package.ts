@@ -639,9 +639,15 @@ function verifyMd(v: {
 }): string {
   const a0 = v.anchors[0];
   const stamped = v.anchors.filter((a) => a.timestamps.length > 0);
-  let n = 0;
-  const h3 = (title: string) => `### ${++n}. ${title}`;
-  // Sections are numbered in the order they print.
+  // The sections are built in one order and printed in another, so h3 leaves a marker and the
+  // headings are numbered once the text is assembled, in the order they print (0.12.1: they were
+  // numbered as built and printed 1, 4, 2, 5, 3).
+  const H3_MARK = '\u0000n\u0000';
+  const h3 = (title: string) => `### ${H3_MARK}${title}`;
+  const numbered = (text: string) => {
+    let n = 0;
+    return text.split(`### ${H3_MARK}`).map((part, i) => (i === 0 ? part : `### ${++n}. ${part}`)).join('');
+  };
   const filesSection = [
     h3('Files: SHA256SUMS and its signature'),
     '',
@@ -805,7 +811,7 @@ function verifyMd(v: {
     : !stamped.length
       ? ['This pack has no RFC 3161 timestamp tokens.', '']
       : [];
-  return [
+  return numbered([
     `# ${PACK_NAME}: ${v.audit_id}`,
     '',
     `${v.tagline} Every check below runs offline on`,
@@ -879,7 +885,7 @@ function verifyMd(v: {
           '',
         ]
       : []),
-  ].join('\n');
+  ].join('\n'));
 }
 
 /** The human-readable summary of `audit package`. */
