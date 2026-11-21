@@ -58,8 +58,8 @@ be reused as it is.
 `--json` prints the report as `kronicle-lite-verify-audit/3`. A consumer that must accept only a
 plain pass checks `.verdict == "verified"`.
 
-Pack formats: `kronicle-lite-evidence-bundle/3` (kronicle-lite 0.11.x) and `/4` (`/3` with the
-OAuth evidence kinds, kronicle-lite 0.12.0) under the default audit profile. Formats `/1` and `/2`
+Pack formats: `kronicle-lite-evidence-bundle/3` (kronicle-lite 0.11.0 and later) and `/4` (`/3` with the
+OAuth evidence kinds, kronicle-lite 0.13.0) under the default audit profile. Formats `/1` and `/2`
 (0.10.x) need `--profile legacy` and give PARTIAL at best.
 
 ## What it checks

@@ -1,5 +1,5 @@
 {
-  "capturedAt": "2026-11-20T20:51:35.752Z",
+  "capturedAt": "2026-11-21T02:20:05.099Z",
   "capturedWith": "mcp-catalog-snap/0.1.0",
   "catalog": {
     "prompts": [],
@@ -485,7 +485,12 @@
                 "report_issued",
                 "run_abandoned",
                 "reproduction_signed",
-                "audit_closed"
+                "audit_closed",
+                "auth_registered",
+                "auth_granted",
+                "auth_refreshed",
+                "auth_failed",
+                "auth_revoked"
               ],
               "type": "string"
             },
@@ -566,7 +571,12 @@
                       "report_issued",
                       "run_abandoned",
                       "reproduction_signed",
-                      "audit_closed"
+                      "audit_closed",
+                      "auth_registered",
+                      "auth_granted",
+                      "auth_refreshed",
+                      "auth_failed",
+                      "auth_revoked"
                     ],
                     "type": "string"
                   },
@@ -1757,7 +1767,7 @@
   "server": {
     "name": "kronicle-lite",
     "title": "kronicle-lite",
-    "version": "0.12.0"
+    "version": "0.13.0"
   },
-  "sha256": "0b5ef071a0d63b2371a54cefe8d1f3ee3845e2d41069de17adf1b804be7bea88"
+  "sha256": "b20f9ac35073bdcd1b046501ee0acd21d0634220665846354650426de3940fbf"
 }

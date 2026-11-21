@@ -391,7 +391,7 @@ timestamp authorities (Sectigo, DigiCert) on every receipt and on the pack's
 them. A client checks it offline with one command:
 
 ```sh
-npx -y kronicle-lite@0.12.0 verify-audit pack/ --key-fingerprint <SHA-256 of the auditor key, from the statement of work>
+npx -y kronicle-lite@0.13.0 verify-audit pack/ --key-fingerprint <SHA-256 of the auditor key, from the statement of work>
 ```
 
 (Packs made by 0.10.x fail the default audit profile; check them with `--profile legacy`, which
@@ -507,7 +507,7 @@ kronicle-lite audit package --audit-id A --out pack/ --timestamps stamps/ --allo
   The OAuth kinds `auth_registered`, `auth_granted`, `auth_refreshed`,
   `auth_failed` and `auth_revoked` (login, refresh, failure and revocation
   of an audit identity, credentials only as keyed commitments) make it
-  format `/4`: `/3` plus those kinds, read the same way (unreleased).
+  format `/4`: `/3` plus those kinds, read the same way (0.13.0).
 
 Details: [EVIDENCE-BUNDLE.md](docs/EVIDENCE-BUNDLE.md#evidence-packs-0100).
 

@@ -6,6 +6,11 @@ uses semantic versioning once past 0.x.
 
 ## [Unreleased]
 
+## [0.13.0] (unreleased)
+
+A new bundle format and five new audit kinds, so a minor release. Packs and
+stores without an OAuth event are read and written exactly as by 0.12.0.
+
 ### Added — OAuth evidence kinds and bundle format `/4`
 
 - **Five audit kinds for OAuth logins**, so mcp-audit can record the
@@ -38,7 +43,7 @@ uses semantic versioning once past 0.x.
   OAuth event exports exactly as 0.11.x did: the format chosen for every set
   of the older kinds is unchanged (tested over all 4,096 sets), so existing
   packs, and re-exports of existing stores, verify byte for byte as before.
-  0.11.x refuses a `/4` pack by its format. An anchor over an OAuth event is
+  0.11.x and 0.12.0 refuse a `/4` pack by its format. An anchor over an OAuth event is
   an audit milestone anchor (`checkpoint --push` fails loudly), as for the
   `/3` kinds.
 - `audit` API: `AUTH_KINDS`, `AUTH_COMMITMENT_LABELS`, `BUNDLE_FORMAT_V4`,
@@ -46,13 +51,29 @@ uses semantic versioning once past 0.x.
   the five kinds.
 - **MCP catalog drift (deliberate):** the `kind` enum of `audit_record` and
   `audit_query` gains the five kinds, so `CATALOG_FINGERPRINT` is now
-  `37977b2b…0189` (`.mcp-catalog/kronicle-lite.json` regenerated). The
-  `serve --core` catalog is unchanged.
+  `b20f9ac3…0fbf` (`.mcp-catalog/kronicle-lite.json` regenerated on 0.13.0;
+  the only drift from 0.12.0 is those five enum values). The `serve --core`
+  catalog is unchanged.
 - Tests: `test/audit-auth-kinds.test.ts` (recording, every refusal, the
   format rule, relabelling), a golden `/4` pack in
   `test/verify-audit-profile.test.ts`, a `/4` pack in the standalone
   verifier's differential tests (identical output), and the OAuth schemas in
   the zod-shim parity corpus.
+
+### Changed
+
+- Version 0.13.0 in package.json, the lockfile, server.json,
+  `CATALOG_VERSION` and both catalog snapshots; README and
+  `docs/EVIDENCE-BUNDLE.md` pin `npx -y kronicle-lite@0.13.0 verify-audit`
+  (a `/4` pack needs it; `/1`, `/2` and `/3` packs give the same report as
+  under 0.12.0).
+- `docs/EVIDENCE-BUNDLE.md` "Which versions read which packs": the
+  late-anchor mode shipped in 0.12.0 (the page still said "the next
+  release"), and `/4` is read by 0.13.0 and later.
+- The OAuth work (#54) was written against 0.11.2 and rebased onto 0.12.0
+  (#58, #59) with no change to its schemas or checks; every 0.12.0 behaviour
+  (strict tool schemas, `expect_version`, `expected_head_hash` in the confirm
+  token, `tombstone_block` `dry_run`, explicit hints) is unchanged.
 
 ## [0.12.0] — 2026-11-20
 

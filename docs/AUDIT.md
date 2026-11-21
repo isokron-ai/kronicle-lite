@@ -99,11 +99,11 @@ is `{sha256, size, media_type?, redacted?: true}`.
 | `run_abandoned` (0.11.0) | `run_id` (a planned run), `reason` | `fingerprint`, `detail` (ref), `evidence[]` |
 | `reproduction_signed` (0.11.0) | `finding_id`, `signer` (allowed-signers principal), `reproduced_at`, `commands` (ref), `output` (ref), `signature` (ref: armored SSH signature) | `evidence[]` |
 | `audit_closed` (0.11.0) | `report_id`, `run_count`, `findings_digest` | — |
-| `auth_registered` (0.12.0) | `commitment_key`, `registration_id`, `issuer`, `mode` (static \| cimd \| dcr), `client_id`, `token_endpoint_auth_method`, `redirect_uris[]` | `client_id_issued_at`, `client_secret_expires_at`, `client_secret` / `registration_access_token` (commitments), `client_metadata_sha256`, `journal` (ref), `evidence[]` |
-| `auth_granted` (0.12.0) | `commitment_key`, `profile`, `registration_mode`, `resource`, `issuer`, `client_id`, `token_type`, `refreshable`, `access_token` (commitment), `whoami` (passed \| not_configured) | `identity`, `tenant`, `registration_id`, `requested_scope`, `granted_scope`, `expires_in`, `expires_at`, `generation`, `access_token_jwt`, `refresh_token` / `id_token` / `login_hint` (commitments), `prm_sha256`, `as_metadata_sha256`, `attachment` (ref), `journal` (ref), `evidence[]` |
-| `auth_refreshed` (0.12.0) | `commitment_key`, `profile`, `generation`, `rotated`, `access_token` (commitment) | `issuer`, `trigger`, `previous_access_token` / `refresh_token` / `previous_refresh_token` (commitments), `scope`, `expires_in`, `expires_at`, `journal` (ref), `evidence[]` |
-| `auth_failed` (0.12.0) | `commitment_key`, `profile`, `stage`, `error` (codes) | `issuer`, `status`, `generation`, `journal` (ref), `evidence[]` |
-| `auth_revoked` (0.12.0) | `commitment_key`, `profile`, `issuer`, `refresh{sent, status, replay, claim}`, `access{probes[], first_rejected_ms, still_valid_at_cap, remaining_lifetime_s, revoked_explicitly, inconclusive, claim}` | `access_token` / `refresh_token` (commitments), `registration{registration_id?, deleted, status}`, `receipt` (ref), `journal` (ref), `evidence[]` |
+| `auth_registered` (0.13.0) | `commitment_key`, `registration_id`, `issuer`, `mode` (static \| cimd \| dcr), `client_id`, `token_endpoint_auth_method`, `redirect_uris[]` | `client_id_issued_at`, `client_secret_expires_at`, `client_secret` / `registration_access_token` (commitments), `client_metadata_sha256`, `journal` (ref), `evidence[]` |
+| `auth_granted` (0.13.0) | `commitment_key`, `profile`, `registration_mode`, `resource`, `issuer`, `client_id`, `token_type`, `refreshable`, `access_token` (commitment), `whoami` (passed \| not_configured) | `identity`, `tenant`, `registration_id`, `requested_scope`, `granted_scope`, `expires_in`, `expires_at`, `generation`, `access_token_jwt`, `refresh_token` / `id_token` / `login_hint` (commitments), `prm_sha256`, `as_metadata_sha256`, `attachment` (ref), `journal` (ref), `evidence[]` |
+| `auth_refreshed` (0.13.0) | `commitment_key`, `profile`, `generation`, `rotated`, `access_token` (commitment) | `issuer`, `trigger`, `previous_access_token` / `refresh_token` / `previous_refresh_token` (commitments), `scope`, `expires_in`, `expires_at`, `journal` (ref), `evidence[]` |
+| `auth_failed` (0.13.0) | `commitment_key`, `profile`, `stage`, `error` (codes) | `issuer`, `status`, `generation`, `journal` (ref), `evidence[]` |
+| `auth_revoked` (0.13.0) | `commitment_key`, `profile`, `issuer`, `refresh{sent, status, replay, claim}`, `access{probes[], first_rejected_ms, still_valid_at_cap, remaining_lifetime_s, revoked_explicitly, inconclusive, claim}` | `access_token` / `refresh_token` (commitments), `registration{registration_id?, deleted, status}`, `receipt` (ref), `journal` (ref), `evidence[]` |
 
 The full JSON Schemas are served at `kronicle://schemas/audit`.
 
@@ -170,7 +170,7 @@ A bundle holding a milestone kind is exported as
 
 Use one store per audit: the audit profile refuses a bundle with stubs.
 
-**OAuth evidence (0.12.0).** An audit of a hosted MCP server logs in as one or
+**OAuth evidence (0.13.0).** An audit of a hosted MCP server logs in as one or
 more test identities. mcp-audit's auth helper records each step on the audit
 chain: `auth_registered` (the OAuth client registration, which several
 profiles may share), `auth_granted` (a login), `auth_refreshed` (a refresh
@@ -181,7 +181,7 @@ bundle `kronicle-lite-evidence-bundle/4`, which is `/3` plus these kinds: every
 profile exactly as `/3`. A store without them is still exported as before
 (the format choice for every set of the older kinds is unchanged), so an
 existing pack and a re-export of an existing store are byte for byte what
-0.11.x made. 0.11.x readers refuse a `/4` pack by its format.
+0.11.x and 0.12.0 made. 0.11.x and 0.12.0 readers refuse a `/4` pack by its format.
 
 An OAuth payload has no field for a credential. The schemas are strict at
 every level, so a field named `code`, `code_verifier`, `state`,

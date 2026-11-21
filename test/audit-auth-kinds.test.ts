@@ -1,5 +1,5 @@
 /**
- * OAuth evidence kinds (0.12.0): mcp-audit records the login, refresh, failure and revocation of each audit
+ * OAuth evidence kinds (0.13.0): mcp-audit records the login, refresh, failure and revocation of each audit
  * identity, and the client registration they use, on the audit chain. 0.11.2 refused any such kind (the
  * toolkit's OAuth phase 0, spike B). These tests define done:
  *

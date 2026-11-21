@@ -371,7 +371,7 @@ export class AuditLog {
 
   /**
    * 0.11.1: the audits with an event in [from_seq, to_seq] whose bundle is `/3` (a freeze with a
-   * `plan`, or a run_abandoned / reproduction_signed / audit_closed) or, 0.12.0, `/4` (an OAuth
+   * `plan`, or a run_abandoned / reproduction_signed / audit_closed) or, 0.13.0, `/4` (an OAuth
    * kind): an anchor over such a range is an audit milestone anchor, so a push that fails must fail
    * loudly (audit mode).
    */

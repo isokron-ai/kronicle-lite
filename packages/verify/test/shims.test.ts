@@ -43,7 +43,7 @@ const BASES: Record<string, Record<string, unknown>> = {
   reproduction_signed: { ...COMMON, finding_id: 'F1', signer: 'a@b.test', reproduced_at: '2026-12-01T10:00:00Z', commands: BLOB, output: BLOB, signature: BLOB, evidence: [UUID] },
   audit_closed: { ...COMMON, report_id: 'R1', run_count: 2, findings_digest: SHA },
   regression_result: { ...COMMON, finding_id: 'F1', fingerprint_before: SHA, fingerprint_after: SHA, verdict: 'improved', deltas: { a: 1.5 }, report: BLOB, evidence: [UUID] },
-  // 0.12.0: the OAuth kinds (format /4)
+  // 0.13.0: the OAuth kinds (format /4)
   auth_registered: { ...COMMON, ...AUTH_COMMON, registration_id: 'reg-1', issuer: ISS, mode: 'dcr', client_id: 'c-1', token_endpoint_auth_method: 'none', redirect_uris: ['http://127.0.0.1:33418/callback'], client_id_issued_at: 1, client_secret_expires_at: 0, client_secret: commit('client-secret'), registration_access_token: commit('registration-access-token'), client_metadata_sha256: SHA },
   auth_granted: {
     ...COMMON, ...AUTH_COMMON, profile: 'owner-a', identity: 'owner-a', tenant: 't-a', registration_id: 'reg-1', registration_mode: 'cimd', resource: 'https://mcp.example.test/mcp', issuer: ISS, client_id: 'https://isokron.test/oauth/client.json', requested_scope: 'read write', granted_scope: 'read',
@@ -78,7 +78,7 @@ const VALUES: unknown[] = [
   '2026-11-09T14:07:20Z', '2026-11-09T14:07:20.123456Z', '2026-11-09T14:07Z', '2026-11-09T14:07:20+01:00', '2026-02-29T00:00:00Z', '2028-02-29T00:00:00Z', '2026-13-01T00:00:00Z', '2026-11-09',
   'discovered', 'accepted', 'S2', 'info', 'upheld', 'refuted', 'improved', 'complete', 'interrupted',
   'isokron-evidence-pack-claims/1', 'integrity', 'chain',
-  // 0.12.0 (OAuth kinds): URLs, token shapes, commitments, scopes, codes, HTTP statuses
+  // 0.13.0 (OAuth kinds): URLs, token shapes, commitments, scopes, codes, HTTP statuses
   ISS, `${ISS}/p?code=x`, `${ISS}#f`, 'https://u:p@as.example.test', 'http://as.example.test', 'http://127.0.0.1:8080/cb', 'http://localhost.evil.test', JWT, `x${JWT}`, 'eyJ.', '0123456789abcdef', '0123456789ABCDEF', '0123456789abcde',
   'read write', 'read  write', ' read', 'read "x"', 'invalid_grant', 'http_401', 'http_4011', 'Bearer', 'Bearer1', 'dcr', 'passed', 'rejection_observed', 'access-token', 'subject',
   commit('access-token'), commit('refresh-token'), { commit: '0123456789abcdef', len: 1 }, { ...commit('subject'), value: 'x' }, 599, 600, 3600,

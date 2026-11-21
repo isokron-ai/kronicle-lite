@@ -20,9 +20,9 @@ export const MILESTONE_KINDS = ['harness_frozen', 'run_completed', 'report_issue
 /** Audit-profile kinds (0.11.0): a bundle holding any of these, or a planned freeze, is written as format /3. */
 export const V3_KINDS = ['run_abandoned', 'reproduction_signed', 'audit_closed'] as const;
 /**
- * OAuth evidence kinds (0.12.0): the login, refresh, failure and revocation of an audit identity, and the
+ * OAuth evidence kinds (0.13.0): the login, refresh, failure and revocation of an audit identity, and the
  * client registration they use. A bundle holding any of these is written as format /4, which carries every /3
- * rule; 0.11.x readers refuse it by format. Their payloads hold no credential: tokens, codes, verifiers and
+ * rule; 0.11.x and 0.12.0 readers refuse it by format. Their payloads hold no credential: tokens, codes, verifiers and
  * secrets appear only as keyed commitments (AUTH_COMMITMENT_LABELS).
  */
 export const AUTH_KINDS = ['auth_registered', 'auth_granted', 'auth_refreshed', 'auth_failed', 'auth_revoked'] as const;
@@ -34,7 +34,7 @@ export const BUNDLE_FORMAT_V1 = 'kronicle-lite-evidence-bundle/1';
 export const BUNDLE_FORMAT_V2 = 'kronicle-lite-evidence-bundle/2';
 /** 0.11.0: the run plan is required on the freeze, runs carry the derived nonce, the report its run count (V3_REQUIRED). */
 export const BUNDLE_FORMAT_V3 = 'kronicle-lite-evidence-bundle/3';
-/** 0.12.0: /3 plus the OAuth evidence kinds (AUTH_KINDS); every /3 rule applies unchanged. */
+/** 0.13.0: /3 plus the OAuth evidence kinds (AUTH_KINDS); every /3 rule applies unchanged. */
 export const BUNDLE_FORMAT_V4 = 'kronicle-lite-evidence-bundle/4';
 export const BUNDLE_FORMATS = [BUNDLE_FORMAT_V1, BUNDLE_FORMAT_V2, BUNDLE_FORMAT_V3, BUNDLE_FORMAT_V4] as const;
 export type BundleFormat = (typeof BUNDLE_FORMATS)[number];
@@ -54,7 +54,7 @@ export function kindsOfFormat(format: BundleFormat): readonly AuditKind[] {
 /**
  * The oldest format that can carry every kind in `kinds` (older readers keep working when they can).
  * `planned`: a harness_frozen carries a run plan, which makes the bundle /3 (its rules then apply).
- * An OAuth kind makes it /4. A bundle without one is written exactly as 0.11.x wrote it.
+ * An OAuth kind makes it /4. A bundle without one is written exactly as 0.11.x and 0.12.0 wrote it.
  */
 export function formatForKinds(kinds: Iterable<AuditKind>, planned = false): BundleFormat {
   let level = planned ? 3 : 1;
@@ -111,7 +111,7 @@ const Common = {
   measured_at: z.iso.datetime().optional(),
 };
 
-// ── OAuth evidence (0.12.0) ──
+// ── OAuth evidence (0.13.0) ──
 //
 // What an auth event may hold follows the toolkit's field policy (mcp-audit SYNTHESIS Q9 and Q10): protocol
 // structure, issuer, resource, audience, times, scope and client id in clear; every token, code, verifier,

@@ -130,8 +130,15 @@ describe('scripts/release-check.mjs', () => {
     return d;
   }
 
+  /**
+   * Between the version bump and the release commit the entry reads `## [X.Y.Z] (unreleased)`; the
+   * release commit dates it, and release.yml's verify job refuses a tag until it does. These tests
+   * check the script, so they date a copy.
+   */
+  const dateEntry = (s: string) => s.replace(`## [${pkg.version}] (unreleased)`, `## [${pkg.version}] — 2026-01-01`);
+
   it('tag: accepts v<package.json version> with a dated CHANGELOG entry', () => {
-    const r = check(['tag', `v${pkg.version}`]);
+    const r = check(['tag', `v${pkg.version}`], { RELEASE_CHECK_ROOT: fixture('dated', { log: dateEntry }) });
     expect(r.err).toBe('');
     expect(r.status).toBe(0);
   });
@@ -139,9 +146,9 @@ describe('scripts/release-check.mjs', () => {
   it('tag: refuses another version, a malformed tag, an undated entry and another repository', () => {
     expect(check(['tag', 'v0.0.1']).err).toMatch(/does not match package.json version/);
     expect(check(['tag', pkg.version]).err).toMatch(/is not vX\.Y\.Z/);
-    const undated = fixture('undated', { log: (s) => s.replace(`## [${pkg.version}] — `, `## [${pkg.version}] - `) });
+    const undated = fixture('undated', { log: (s) => dateEntry(s).replace(`## [${pkg.version}] — `, `## [${pkg.version}] - `) });
     expect(check(['tag', `v${pkg.version}`], { RELEASE_CHECK_ROOT: undated }).err).toMatch(/no dated/);
-    const other = fixture('other-repo', { pkg: (p) => (p['repository'] = { type: 'git', url: 'git+https://github.com/someone/kronicle-lite.git' }) });
+    const other = fixture('other-repo', { log: dateEntry, pkg: (p) => (p['repository'] = { type: 'git', url: 'git+https://github.com/someone/kronicle-lite.git' }) });
     expect(check(['tag', `v${pkg.version}`], { RELEASE_CHECK_ROOT: other }).err).toMatch(/trusted publishing from isokron-ai\/kronicle-lite/);
   });
 

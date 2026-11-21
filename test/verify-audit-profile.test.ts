@@ -75,7 +75,7 @@ type Tamper =
   | 'tampered_signoff'
   | 'allow_pending'
   | 'legacy'
-  /** not a tamper: the golden audit with an OAuth identity (0.12.0, format /4) */
+  /** not a tamper: the golden audit with an OAuth identity (0.13.0, format /4) */
   | 'oauth';
 
 interface Golden {
@@ -124,7 +124,7 @@ async function build(tamper?: Tamper, withOauth = false): Promise<Golden> {
     await anchor();
   } else {
     const plan = tamper === 'missing_planned_run' ? ['run-1', 'run-2', 'run-3', 'run-4', 'run-5'] : ['run-1', 'run-2', 'run-3', 'run-4'];
-    // 0.12.0: an OAuth identity registered and logged in before the freeze (its profile is a harness file),
+    // 0.13.0: an OAuth identity registered and logged in before the freeze (its profile is a harness file),
     // refreshed during the runs, revoked with its receipt before the findings. Commitments only.
     const oauth = tamper === 'oauth' || withOauth;
     const KEY = 'ee'.repeat(32);
@@ -662,7 +662,7 @@ describe('openssl differential', () => {
   });
 });
 
-describe('an audit with OAuth events (0.12.0): format /4, every /3 rule', () => {
+describe('an audit with OAuth events (0.13.0): format /4, every /3 rule', () => {
   let g: Golden;
   beforeAll(async () => {
     g = await build('oauth');

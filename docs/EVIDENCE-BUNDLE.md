@@ -42,7 +42,7 @@ audit was right, complete, or honest.
 
 | File | Content |
 |---|---|
-| `manifest.json` | Canonical JSON ([RFC 8785](https://www.rfc-editor.org/rfc/rfc8785)) plus `\n`: format (`kronicle-lite-evidence-bundle/1`, `/2` when a milestone kind is present, `/3` with a run plan or a 0.11.0 kind, `/4` with a 0.12.0 OAuth kind), audit_id, range, index, blob lists, signed root |
+| `manifest.json` | Canonical JSON ([RFC 8785](https://www.rfc-editor.org/rfc/rfc8785)) plus `\n`: format (`kronicle-lite-evidence-bundle/1`, `/2` when a milestone kind is present, `/3` with a run plan or a 0.11.0 kind, `/4` with a 0.13.0 OAuth kind), audit_id, range, index, blob lists, signed root |
 | `manifest.json` signature | `signature: {key_id, signature}`: the store key over the canonical manifest (step 2) |
 | `events.jsonl` | One canonical JSON line per chain event in `[from_seq, to_seq]`. Audit events are in full (the stored chain event). Every other event in the range is a **stub**: `{seq, prev_hash, this_hash, stub: true}`, with no payload; `manifest.stubs` lists each stub's `{seq, this_hash}` |
 | `blobs/<sha256>` | Each referenced artifact the store holds, named by the sha256 of its bytes. Blobs pass the write-time secret guard when they are stored (AUDIT.md) |
@@ -209,7 +209,7 @@ kronicle-lite audit stamp --out stamps/               # RFC 3161 over sha256(rec
 # at delivery
 kronicle-lite audit package --audit-id A --out pack/ --timestamps stamps/
 # client
-npx -y kronicle-lite@0.12.0 verify-audit pack/ --key-fingerprint <SHA-256 of the auditor key, from the statement of work>
+npx -y kronicle-lite@0.13.0 verify-audit pack/ --key-fingerprint <SHA-256 of the auditor key, from the statement of work>
 ```
 
 Use one store per audit, so the bundle starts at seq 1 and every anchor's range
@@ -347,9 +347,9 @@ makes since 0.11.0) is read by kronicle-lite 0.11.0 and later. 0.10.0–0.10.2
 accept only `/1` and `/2`, and fail a `/3` pack on its manifest ("unknown format
 kronicle-lite-evidence-bundle/3"). 0.9.0 and earlier have no `verify-audit`.
 0.11.0–0.11.2 read a late-anchored `/3` pack but report it `FAILED` on the two
-checks above; the late-anchor mode comes with the next release. Bundle format
-`/4` (a pack with OAuth events, the next release) is read by that release and
-later; 0.11.x fails it on its manifest ("unknown format
+checks above; the late-anchor mode came in 0.12.0. Bundle format `/4` (a
+pack with OAuth events) is read by 0.13.0 and later; 0.11.x and 0.12.0 fail it
+on its manifest ("unknown format
 kronicle-lite-evidence-bundle/4"), and never by skipping events it does not
 know. A pack without OAuth events stays `/3`, readable by 0.11.0 and later.
 
