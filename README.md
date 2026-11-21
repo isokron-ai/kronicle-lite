@@ -391,7 +391,7 @@ timestamp authorities (Sectigo, DigiCert) on every receipt and on the pack's
 them. A client checks it offline with one command:
 
 ```sh
-npx -y kronicle-lite@0.12.0 verify-audit pack/ --key-fingerprint <SHA-256 of the auditor key, from the statement of work>
+npx -y kronicle-lite@0.13.0 verify-audit pack/ --key-fingerprint <SHA-256 of the auditor key, from the statement of work>
 ```
 
 (Packs made by 0.10.x fail the default audit profile; check them with `--profile legacy`, which
@@ -427,14 +427,14 @@ kronicle-lite audit package --audit-id A --out pack/ --timestamps stamps/ --allo
 - **Profiles.** `verify-audit` checks a pack against the **audit profile** by
   default: every claim below is checked whatever `claims.json` says
   (`claims.json` can add claims, never remove one). The pack must also be
-  bundle format `/3` with only this audit's events (no stubs); verified
-  anchors must close the freeze (before any run), the last run (before the
-  report) and the report (the whole bundle), each stamped by two different
-  pinned TSA CAs; `SHA256SUMS` must be stamped by two TSA CAs too; and no
-  stamp may be pending (a `*.pending` marker that `audit stamp --allow-pending`
-  leaves when a TSA fails). `--profile legacy` applies the 0.10.0 rules to packs made
-  before 0.11.0: `claims.json` picks the claims, and the best result is
-  `PARTIAL`.
+  bundle format `/3` (or `/4`, with OAuth events) with only this audit's
+  events (no stubs); verified anchors must close the freeze (before any run),
+  the last run (before the report) and the report (the whole bundle), each
+  stamped by two different pinned TSA CAs; `SHA256SUMS` must be stamped by two
+  TSA CAs too; and no stamp may be pending (a `*.pending` marker that `audit
+  stamp --allow-pending` leaves when a TSA fails). `--profile legacy` applies
+  the 0.10.0 rules to packs made before 0.11.0: `claims.json` picks the
+  claims, and the best result is `PARTIAL`.
 - **Claims.** `integrity`, `chain`, `receipts`, `independent_timestamps`,
   `harness_frozen_before_runs` (every run carries the freeze nonce
   `sha256(freeze receipt digest ‖ its TSA tokens)`, which nobody can know
@@ -504,6 +504,10 @@ kronicle-lite audit package --audit-id A --out pack/ --timestamps stamps/ --allo
   a bundle that uses them is format `/2`, which needs kronicle-lite 0.10.0 to
   verify. A freeze with a `plan`, or the 0.11.0 kinds `run_abandoned`,
   `reproduction_signed` and `audit_closed`, makes it format `/3` (0.11.0).
+  The OAuth kinds `auth_registered`, `auth_granted`, `auth_refreshed`,
+  `auth_failed` and `auth_revoked` (login, refresh, failure and revocation
+  of an audit identity, credentials only as keyed commitments) make it
+  format `/4`: `/3` plus those kinds, read the same way (0.13.0).
 
 Details: [EVIDENCE-BUNDLE.md](docs/EVIDENCE-BUNDLE.md#evidence-packs-0100).
 

@@ -24,6 +24,10 @@ const SHA = 'ab'.repeat(32);
 const BLOB = { sha256: SHA, size: 10, media_type: 'text/plain' };
 const UUID = '01a1c0a2-8192-7f52-b0ac-e43c4d3a6e58';
 const COMMON = { audit_id: 'acme-2026', event_key: 'k1', measured_at: '2026-11-09T14:07:20.000Z' };
+const ISS = 'https://as.example.test';
+const commit = (label: string) => ({ commit: '0123456789abcdef', len: 43, label });
+const AUTH_COMMON = { commitment_key: SHA, journal: BLOB, evidence: [UUID] };
+const JWT = 'eyJhbGciOiJub25lIn0.eyJzdWIiOiJ1In0.c2ln';
 
 /** A valid payload of every kind, with every optional field present. */
 const BASES: Record<string, Record<string, unknown>> = {
@@ -39,7 +43,30 @@ const BASES: Record<string, Record<string, unknown>> = {
   reproduction_signed: { ...COMMON, finding_id: 'F1', signer: 'a@b.test', reproduced_at: '2026-12-01T10:00:00Z', commands: BLOB, output: BLOB, signature: BLOB, evidence: [UUID] },
   audit_closed: { ...COMMON, report_id: 'R1', run_count: 2, findings_digest: SHA },
   regression_result: { ...COMMON, finding_id: 'F1', fingerprint_before: SHA, fingerprint_after: SHA, verdict: 'improved', deltas: { a: 1.5 }, report: BLOB, evidence: [UUID] },
+  // 0.13.0: the OAuth kinds (format /4)
+  auth_registered: { ...COMMON, ...AUTH_COMMON, registration_id: 'reg-1', issuer: ISS, mode: 'dcr', client_id: 'c-1', token_endpoint_auth_method: 'none', redirect_uris: ['http://127.0.0.1:33418/callback'], client_id_issued_at: 1, client_secret_expires_at: 0, client_secret: commit('client-secret'), registration_access_token: commit('registration-access-token'), client_metadata_sha256: SHA },
+  auth_granted: {
+    ...COMMON, ...AUTH_COMMON, profile: 'owner-a', identity: 'owner-a', tenant: 't-a', registration_id: 'reg-1', registration_mode: 'cimd', resource: 'https://mcp.example.test/mcp', issuer: ISS, client_id: 'https://isokron.test/oauth/client.json', requested_scope: 'read write', granted_scope: 'read',
+    token_type: 'Bearer', expires_in: 3600, expires_at: '2026-11-09T15:07:20Z', refreshable: true, generation: 1, access_token: commit('access-token'),
+    access_token_jwt: { claims_verified: false, header: { alg: 'EdDSA', kid: 'k1', typ: 'at+jwt' }, claims: { iss: ISS, aud: ['mcp'], exp: 2, iat: 1, nbf: 1, scope: 'read', scp: ['read'], client_id: 'c-1', azp: 'c-1', sub: commit('subject'), jti: commit('jti') }, other_claims: ['tid'] },
+    refresh_token: commit('refresh-token'), id_token: commit('id-token'), login_hint: commit('login-hint'), prm_sha256: SHA, as_metadata_sha256: SHA, whoami: 'passed', attachment: BLOB,
+  },
+  auth_refreshed: { ...COMMON, ...AUTH_COMMON, profile: 'owner-a', issuer: ISS, generation: 2, trigger: 'forced', rotated: true, access_token: commit('access-token'), previous_access_token: commit('access-token'), refresh_token: commit('refresh-token'), previous_refresh_token: commit('refresh-token'), scope: 'read', expires_in: 60, expires_at: '2026-11-09T15:07:20Z' },
+  auth_failed: { ...COMMON, ...AUTH_COMMON, profile: 'owner-a', issuer: ISS, stage: 'refresh', error: 'invalid_grant', status: 400, generation: 2 },
+  auth_revoked: {
+    ...COMMON, ...AUTH_COMMON, profile: 'owner-a', issuer: ISS, access_token: commit('access-token'), refresh_token: commit('refresh-token'),
+    refresh: { sent: true, status: 200, replay: 'invalid_grant', revocation_ineffective: false, claim: 'rejection_observed' },
+    access: { probes: [{ after_ms: 0, elapsed_ms: 2, status: 401 }], first_rejected_ms: 0, still_valid_at_cap: false, remaining_lifetime_s: -5, revoked_explicitly: false, inconclusive: 0, claim: 'rejection_observed' },
+    registration: { registration_id: 'reg-1', deleted: true, status: 204 }, receipt: BLOB,
+  },
 };
+/** Objects nested deeper than one level in the OAuth payloads, mutated in place (path from the payload root). */
+const NESTED: [string, string[]][] = [
+  ['auth_granted', ['access_token_jwt', 'claims']],
+  ['auth_granted', ['access_token_jwt', 'header']],
+  ['auth_granted', ['access_token_jwt', 'claims', 'sub']],
+  ['auth_revoked', ['access', 'probes', '0']],
+];
 
 /** JSON values that hit every check: types, bounds, formats, safe-integer edges, surrogate pairs. */
 const VALUES: unknown[] = [
@@ -51,6 +78,11 @@ const VALUES: unknown[] = [
   '2026-11-09T14:07:20Z', '2026-11-09T14:07:20.123456Z', '2026-11-09T14:07Z', '2026-11-09T14:07:20+01:00', '2026-02-29T00:00:00Z', '2028-02-29T00:00:00Z', '2026-13-01T00:00:00Z', '2026-11-09',
   'discovered', 'accepted', 'S2', 'info', 'upheld', 'refuted', 'improved', 'complete', 'interrupted',
   'isokron-evidence-pack-claims/1', 'integrity', 'chain',
+  // 0.13.0 (OAuth kinds): URLs, token shapes, commitments, scopes, codes, HTTP statuses
+  ISS, `${ISS}/p?code=x`, `${ISS}#f`, 'https://u:p@as.example.test', 'http://as.example.test', 'http://127.0.0.1:8080/cb', 'http://localhost.evil.test', JWT, `x${JWT}`, 'eyJ.', '0123456789abcdef', '0123456789ABCDEF', '0123456789abcde',
+  'read write', 'read  write', ' read', 'read "x"', 'invalid_grant', 'http_401', 'http_4011', 'Bearer', 'Bearer1', 'dcr', 'passed', 'rejection_observed', 'access-token', 'subject',
+  commit('access-token'), commit('refresh-token'), { commit: '0123456789abcdef', len: 1 }, { ...commit('subject'), value: 'x' }, 599, 600, 3600,
+  'text/plain', 'text/plain; code=x', 'application/vnd.a+json', 'https://example.com/roles', 'N_A', 1794703600.5,
   [], [1], ['x'], [UUID, UUID], ['run-1', 'run-1'], [null],
   {}, { a: 1 }, { sha256: SHA, size: 1 }, { sha256: SHA, size: 1, redacted: false }, { sha256: SHA, size: -1, extra: 1 }, { name: 'x' }, { '': 1 }, { ['k'.repeat(65)]: 1 }, { ['1'.repeat(65)]: 1 }, { a: 'x' },
   Object.fromEntries(Array.from({ length: 17 }, (_, i) => [`t${i}`, i])), Object.fromEntries(Array.from({ length: 65 }, (_, i) => [`d${i}`, i])),
@@ -108,13 +140,32 @@ describe('the zod shim gives zod 4 results for every schema the verifier parses 
         const b = issues(shimSchema.safeParse(input) as never);
         expect(b, JSON.stringify(input)?.slice(0, 300)).toStrictEqual(a);
         if (!a.ok) failures++;
-        for (const format of ['kronicle-lite-evidence-bundle/1', 'kronicle-lite-evidence-bundle/2', 'kronicle-lite-evidence-bundle/3'] as const) {
+        for (const format of ['kronicle-lite-evidence-bundle/1', 'kronicle-lite-evidence-bundle/2', 'kronicle-lite-evidence-bundle/3', 'kronicle-lite-evidence-bundle/4'] as const) {
           expect(shim.parseAuditPayloadIn(format, kind as never, input)).toStrictEqual(real.parseAuditPayloadIn(format, kind as never, input));
         }
       }
       expect(failures).toBeGreaterThan(inputs.length / 2);
     });
   }
+
+  it('the OAuth payloads two and three levels down (JWT claims and header, a commitment inside them, a probe)', () => {
+    const at = (o: unknown, path: string[]) => path.reduce<unknown>((cur, k) => (cur as Record<string, unknown>)[k], o);
+    const put = (o: Record<string, unknown>, path: string[], v: unknown) => {
+      const copy = structuredClone(o);
+      const parent = at(copy, path.slice(0, -1)) as Record<string, unknown>;
+      parent[path[path.length - 1]!] = v;
+      return copy;
+    };
+    for (const [kind, path] of NESTED) {
+      const base = BASES[kind]!;
+      const realSchema = real.PAYLOAD_SCHEMAS[kind as keyof typeof real.PAYLOAD_SCHEMAS];
+      const shimSchema = shim.PAYLOAD_SCHEMAS[kind as keyof typeof shim.PAYLOAD_SCHEMAS];
+      for (const inner of mutations(at(base, path) as Record<string, unknown>)) {
+        const input = put(base, path, inner);
+        expect(issues(shimSchema.safeParse(input) as never), JSON.stringify(inner)?.slice(0, 300)).toStrictEqual(issues(realSchema.safeParse(input)));
+      }
+    }
+  });
 
   it('blob refs and claims.json', () => {
     for (const input of mutations(BLOB)) expect(issues(shim.BlobRefSchema.safeParse(input) as never)).toStrictEqual(issues(real.BlobRefSchema.safeParse(input)));

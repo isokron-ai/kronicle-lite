@@ -6,6 +6,75 @@ uses semantic versioning once past 0.x.
 
 ## [Unreleased]
 
+## [0.13.0] (unreleased)
+
+A new bundle format and five new audit kinds, so a minor release. Packs and
+stores without an OAuth event are read and written exactly as by 0.12.0.
+
+### Added — OAuth evidence kinds and bundle format `/4`
+
+- **Five audit kinds for OAuth logins**, so mcp-audit can record the
+  identities it logs in as on the audit chain (its OAuth phase 0, spike B,
+  found that 0.11.2 refuses any new kind): `auth_registered` (a client
+  registration: static, CIMD or DCR), `auth_granted` (a login),
+  `auth_refreshed` (a refresh outside a run), `auth_failed` (a login or
+  refresh that failed for good) and `auth_revoked` (the close-out revocation
+  receipt: what was revoked, whether the revoked refresh token was refused,
+  the timed reads with the last access token, the registration's deletion,
+  and a claim level per part). Schemas in `docs/AUDIT.md`.
+- **No field for a credential.** Every object is strict, so a `code`,
+  `code_verifier`, `state`, `client_secret`, raw `token` or any unlisted
+  field is refused at any level. Tokens, codes, verifiers, secrets, subjects
+  and login hints are only keyed commitments `{commit, len, label}` (16 hex
+  digits, a fixed credential label per field); each event names the sha256
+  of the audit's commitment key, never the key. URLs are `https` (or `http`
+  to a loopback host) with no userinfo, query, fragment or
+  percent-encoding. Stages, error codes and replay outcomes are lowercase
+  letters and underscores, with no free-text description. Blob refs name one
+  of nine media types. Every free string, the event key included, refuses a
+  token-shaped (JWT) value, and the write-time secret guard scans every
+  payload, as before. Identifier fields (profile, client id, scope, URL path …)
+  cannot tell an opaque credential from an identifier; that stays the
+  recorder's field policy (docs/AUDIT.md).
+- **Bundle format `kronicle-lite-evidence-bundle/4`**: `/3` plus the OAuth
+  kinds, with every `/3` rule. `verify-audit` (and `@isokron/verify`, built
+  from the same source) reads `/4` under the audit profile exactly as `/3`; a
+  `/4` bundle relabelled `/3` or older fails `events`. A store without an
+  OAuth event exports exactly as 0.11.x did: the format chosen for every set
+  of the older kinds is unchanged (tested over all 4,096 sets), so existing
+  packs, and re-exports of existing stores, verify byte for byte as before.
+  0.11.x and 0.12.0 refuse a `/4` pack by its format. An anchor over an OAuth event is
+  an audit milestone anchor (`checkpoint --push` fails loudly), as for the
+  `/3` kinds.
+- `audit` API: `AUTH_KINDS`, `AUTH_COMMITMENT_LABELS`, `BUNDLE_FORMAT_V4`,
+  `isProfileFormat`. The schema resource `kronicle://schemas/audit` lists
+  the five kinds.
+- **MCP catalog drift (deliberate):** the `kind` enum of `audit_record` and
+  `audit_query` gains the five kinds, so `CATALOG_FINGERPRINT` is now
+  `b20f9ac3…0fbf` (`.mcp-catalog/kronicle-lite.json` regenerated on 0.13.0;
+  the only drift from 0.12.0 is those five enum values). The `serve --core`
+  catalog is unchanged.
+- Tests: `test/audit-auth-kinds.test.ts` (recording, every refusal, the
+  format rule, relabelling), a golden `/4` pack in
+  `test/verify-audit-profile.test.ts`, a `/4` pack in the standalone
+  verifier's differential tests (identical output), and the OAuth schemas in
+  the zod-shim parity corpus.
+
+### Changed
+
+- Version 0.13.0 in package.json, the lockfile, server.json,
+  `CATALOG_VERSION` and both catalog snapshots; README and
+  `docs/EVIDENCE-BUNDLE.md` pin `npx -y kronicle-lite@0.13.0 verify-audit`
+  (a `/4` pack needs it; `/1`, `/2` and `/3` packs give the same report as
+  under 0.12.0).
+- `docs/EVIDENCE-BUNDLE.md` "Which versions read which packs": the
+  late-anchor mode shipped in 0.12.0 (the page still said "the next
+  release"), and `/4` is read by 0.13.0 and later.
+- The OAuth work (#54) was written against 0.11.2 and rebased onto 0.12.0
+  (#58, #59) with no change to its schemas or checks; every 0.12.0 behaviour
+  (strict tool schemas, `expect_version`, `expected_head_hash` in the confirm
+  token, `tombstone_block` `dry_run`, explicit hints) is unchanged.
+
 ## [0.12.0] — 2026-11-20
 
 ### Fixed (release tooling)

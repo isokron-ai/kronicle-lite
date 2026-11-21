@@ -8,6 +8,7 @@
  *   v2       0.10 milestones: harness_frozen, run_completed, report     kronicle-lite-evidence-bundle/2
  *   v3       0.11 audit profile: plan, nonce, sign-off, close, stamped SHA256SUMS   /3
  *   v3-late  /3 with the freeze anchored late (freeze-pending record)   /3
+ *   v4       /3's audit plus the OAuth events (login, refresh, failure, revocation)   /4
  *
  * No network: the stub and the TSAs listen on 127.0.0.1.
  */
@@ -31,7 +32,7 @@ import { STUB_LICENSE, type AnchorBackend } from '../../../test/helpers/anchor-s
 import { tempDir } from '../../../test/helpers/fs.js';
 import type { TestTsa } from '../../../test/helpers/tsa.js';
 
-export type Format = 'v1' | 'v2' | 'v3' | 'v3-late';
+export type Format = 'v1' | 'v2' | 'v3' | 'v3-late' | 'v4';
 
 export interface Pack {
   format: Format;
@@ -94,7 +95,20 @@ export async function buildPack(format: Format, env: Env): Promise<Pack> {
     await anchor();
     rec([{ kind: 'report_issued', event_key: 'report', payload: { report_id: 'R1', report: blob('# Report'), run_count: 3 } }]);
     await anchor();
-  } else if (format === 'v3') {
+  } else if (format === 'v3' || format === 'v4') {
+    // v4: the same audit with an OAuth identity: registered and logged in before the freeze, refreshed and
+    // failing once during the runs, revoked (with its receipt) before the report.
+    const oauth = format === 'v4';
+    const KEY = 'cd'.repeat(32);
+    const ISS = 'https://as.example.test';
+    const cm = (label: string, n: number) => ({ commit: n.toString(16).padStart(16, '0'), len: 43, label });
+    if (oauth) {
+      const journal = blob('{"format":"mcp-audit/auth-journal@1","seq":1}\n', 'application/x-ndjson');
+      rec([
+        { kind: 'auth_registered', event_key: 'auth:reg', payload: { commitment_key: KEY, registration_id: 'reg-1', issuer: ISS, mode: 'dcr', client_id: 'c-1', token_endpoint_auth_method: 'none', redirect_uris: ['http://127.0.0.1:33418/callback'], registration_access_token: cm('registration-access-token', 1), journal } },
+        { kind: 'auth_granted', event_key: 'auth:grant', payload: { commitment_key: KEY, profile: 'owner-a', registration_id: 'reg-1', registration_mode: 'dcr', resource: 'https://mcp.example.test/mcp', issuer: ISS, client_id: 'c-1', granted_scope: 'read', token_type: 'Bearer', expires_in: 3600, refreshable: true, generation: 1, access_token: cm('access-token', 2), refresh_token: cm('refresh-token', 3), whoami: 'passed', journal } },
+      ]);
+    }
     const { privateKey, publicKey } = generateKeyPairSync('ed25519');
     const raw = (publicKey.export({ type: 'spki', format: 'der' }) as Buffer).subarray(12);
     const SIGNER = 'reproducer@isokron.test';
@@ -105,8 +119,18 @@ export async function buildPack(format: Format, env: Env): Promise<Pack> {
     rec([
       ...['run-1', 'run-2', 'run-3'].map((run_id, i) => ({ kind: 'run_completed' as const, event_key: `run:${i + 1}`, payload: { run_id, run_seq: i + 1, fingerprint: H, status: 'pass', nonce: f.nonce, result: blob(`run ${i + 1}`) } })),
       { kind: 'run_abandoned' as const, event_key: 'run:4', payload: { run_id: 'run-4', reason: 'harness refused: API key not exported', fingerprint: H } },
+      ...(oauth
+        ? [
+            { kind: 'auth_refreshed' as const, event_key: 'auth:refresh:2', payload: { commitment_key: KEY, profile: 'owner-a', issuer: ISS, generation: 2, trigger: 'proactive', rotated: true, access_token: cm('access-token', 4), previous_access_token: cm('access-token', 2), refresh_token: cm('refresh-token', 5), previous_refresh_token: cm('refresh-token', 3), expires_in: 3600 } },
+            { kind: 'auth_failed' as const, event_key: 'auth:fail:1', payload: { commitment_key: KEY, profile: 'owner-a', issuer: ISS, stage: 'refresh', error: 'temporarily_unavailable', status: 503, generation: 2 } },
+          ]
+        : []),
     ], 'proxy');
     await anchor();
+    if (oauth) {
+      const receipt = blob('{"profile":"owner-a","refresh":{"claim":"rejection_observed"}}', 'application/json');
+      rec([{ kind: 'auth_revoked', event_key: 'auth:revoke', payload: { commitment_key: KEY, profile: 'owner-a', issuer: ISS, access_token: cm('access-token', 4), refresh_token: cm('refresh-token', 5), refresh: { sent: true, status: 200, replay: 'invalid_grant', claim: 'rejection_observed' }, access: { probes: [{ after_ms: 0, elapsed_ms: 2, status: 401 }], first_rejected_ms: 0, still_valid_at_cap: false, remaining_lifetime_s: 3500, revoked_explicitly: false, inconclusive: 0, claim: 'rejection_observed' }, registration: { registration_id: 'reg-1', deleted: true, status: 204 }, receipt } }]);
+    }
     rec([
       { kind: 'finding', event_key: 'f1', payload: { finding_id: 'F1', status: 'discovered', title: 'lost update', severity: 'S2' } },
       { kind: 'gate_result', event_key: 'f1-gate', payload: { finding_id: 'F1', gate: 'refuter', verdict: 'upheld' } },
@@ -161,7 +185,7 @@ export async function buildPack(format: Format, env: Env): Promise<Pack> {
   const doc = (await (await fetch(`${backend.url}/.well-known/anchor-keys.json`)).json()) as { keys: { public_key_pem: string; valid_from: string }[] };
   const genesis = `${chainIdFromPublicKeyPem(doc.keys[0]!.public_key_pem)}@${doc.keys[0]!.valid_from}`;
   const dir = join(work, 'pack');
-  const v3 = format === 'v3' || format === 'v3-late';
+  const v3 = format === 'v3' || format === 'v3-late' || format === 'v4';
   await buildAuditPackage(store, {
     audit_id: AUDIT,
     out: dir,

@@ -21,7 +21,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { pushCheckpoint } from '../src/anchor/anchor.js';
 import { buildAuditPackage, stampAnchor } from '../src/audit/package.js';
 import { findingsDigest, freezeNonce, REPRODUCTION_NAMESPACE, reproductionStatement } from '../src/audit/profile.js';
-import { BUNDLE_FORMAT_V2, BUNDLE_FORMAT_V3, type AuditEventInput } from '../src/audit/schemas.js';
+import { BUNDLE_FORMAT_V2, BUNDLE_FORMAT_V3, BUNDLE_FORMAT_V4, type AuditEventInput } from '../src/audit/schemas.js';
 import { allowedSignerLine, parseAllowedSigners, sshSign, verifySshSignature } from '../src/audit/sshsig.js';
 import { isSumsFile, listPackFiles, renderVerifyAudit, sha256sums, verifyAudit, VerifyAuditJsonSchema, type VerifyAuditOptions, type VerifyAuditResult } from '../src/audit/verify-audit.js';
 import { verifyBundle } from '../src/audit/verify-bundle.js';
@@ -74,7 +74,9 @@ type Tamper =
   | 'wrong_run_count'
   | 'tampered_signoff'
   | 'allow_pending'
-  | 'legacy';
+  | 'legacy'
+  /** not a tamper: the golden audit with an OAuth identity (0.13.0, format /4) */
+  | 'oauth';
 
 interface Golden {
   dataDir: string;
@@ -93,7 +95,7 @@ interface Golden {
  * TSA tokens → runs with the derived nonce (and one abandoned) → anchor → finding, refuter, human
  * sign-off, acceptance → report → close → anchor; then package and stamp SHA256SUMS.
  */
-async function build(tamper?: Tamper): Promise<Golden> {
+async function build(tamper?: Tamper, withOauth = false): Promise<Golden> {
   const dataDir = tempDir('kl-vp-store-');
   const work = tempDir('kl-vp-work-');
   const tsDir = join(work, 'timestamps');
@@ -122,6 +124,19 @@ async function build(tamper?: Tamper): Promise<Golden> {
     await anchor();
   } else {
     const plan = tamper === 'missing_planned_run' ? ['run-1', 'run-2', 'run-3', 'run-4', 'run-5'] : ['run-1', 'run-2', 'run-3', 'run-4'];
+    // 0.13.0: an OAuth identity registered and logged in before the freeze (its profile is a harness file),
+    // refreshed during the runs, revoked with its receipt before the findings. Commitments only.
+    const oauth = tamper === 'oauth' || withOauth;
+    const KEY = 'ee'.repeat(32);
+    const ISS = 'https://as.example.test';
+    const cm = (label: string, n: number) => ({ commit: n.toString(16).padStart(16, '0'), len: 43, label });
+    if (oauth) {
+      const journal = blob('{"format":"mcp-audit/auth-journal@1","seq":1}\n', 'application/x-ndjson');
+      rec([
+        { kind: 'auth_registered', event_key: 'auth:reg', payload: { commitment_key: KEY, registration_id: 'reg-1', issuer: ISS, mode: 'dcr', client_id: 'c-1', token_endpoint_auth_method: 'none', redirect_uris: ['http://127.0.0.1:33418/callback'], registration_access_token: cm('registration-access-token', 1), journal } },
+        { kind: 'auth_granted', event_key: 'auth:grant', payload: { commitment_key: KEY, profile: 'owner-a', registration_id: 'reg-1', registration_mode: 'dcr', resource: 'https://mcp.example.test/mcp', issuer: ISS, client_id: 'c-1', granted_scope: 'read', token_type: 'Bearer', expires_in: 3600, refreshable: true, generation: 1, access_token: cm('access-token', 2), refresh_token: cm('refresh-token', 3), whoami: 'passed', journal } },
+      ]);
+    }
     rec([{ kind: 'harness_frozen', event_key: 'freeze', payload: { harness_id: 'harness-v1', fingerprint: H, manifest: blob('harness files'), hypotheses: blob('H1'), plan, plan_detail: blob(JSON.stringify(plan.map((run_id) => ({ run_id, command: 'bench', criterion: 'pass', write_cap: 5 }))), 'application/json') } }]);
     const early = tamper === 'run_before_freeze_anchor';
     const runEvents = (nonce: string): AuditEventInput[] => {
@@ -137,8 +152,13 @@ async function build(tamper?: Tamper): Promise<Golden> {
     if (!early) {
       if (tamper === 'foreign_stub') store.docs.putDocument({ slug: 'notes', title: 'notes', markdown: '# another project\n', actor_id: 'a' });
       rec(runEvents(tamper === 'nonce_mismatch' ? f.digest : f.nonce), 'proxy');
+      if (oauth) rec([{ kind: 'auth_refreshed', event_key: 'auth:refresh:2', payload: { commitment_key: KEY, profile: 'owner-a', issuer: ISS, generation: 2, trigger: 'proactive', rotated: true, access_token: cm('access-token', 4), previous_access_token: cm('access-token', 2), refresh_token: cm('refresh-token', 5), previous_refresh_token: cm('refresh-token', 3), expires_in: 3600 } }], 'proxy');
     }
     await anchor();
+    if (oauth) {
+      const receipt = blob('{"profile":"owner-a","refresh":{"claim":"rejection_observed"}}', 'application/json');
+      rec([{ kind: 'auth_revoked', event_key: 'auth:revoke', payload: { commitment_key: KEY, profile: 'owner-a', issuer: ISS, access_token: cm('access-token', 4), refresh_token: cm('refresh-token', 5), refresh: { sent: true, status: 200, replay: 'invalid_grant', claim: 'rejection_observed' }, access: { probes: [{ after_ms: 0, elapsed_ms: 2, status: 401 }], first_rejected_ms: 0, still_valid_at_cap: false, remaining_lifetime_s: 3500, revoked_explicitly: false, inconclusive: 0, claim: 'rejection_observed' }, registration: { registration_id: 'reg-1', deleted: true, status: 204 }, receipt } }]);
+    }
     // F1: found, upheld by the refuter, reproduced and signed off by a human, accepted. F2: refuted.
     rec([
       { kind: 'finding', event_key: 'f1', payload: { finding_id: 'F1', status: 'discovered', title: 'lost update', severity: 'S2' } },
@@ -641,3 +661,73 @@ describe('openssl differential', () => {
     expect(all.match(new RegExp(g.freezeNonce, 'g'))?.length).toBeGreaterThanOrEqual(2);
   });
 });
+
+describe('an audit with OAuth events (0.13.0): format /4, every /3 rule', () => {
+  let g: Golden;
+  beforeAll(async () => {
+    g = await build('oauth');
+  });
+
+  it('packages as /4 with every claim declared and VERIFIED, as the /3 golden pack', () => {
+    expect(g.pack.bundle_format).toBe(BUNDLE_FORMAT_V4);
+    expect(g.pack.profile).toBe('audit');
+    expect((JSON.parse(readFileSync(join(g.pkg, 'claims.json'), 'utf8')) as { claims: string[] }).claims).toEqual(['integrity', 'chain', 'receipts', 'independent_timestamps', 'harness_frozen_before_runs', 'run_sequence', 'plan_complete', 'reproductions_signed', 'closed']);
+    expect(g.pack.check.verdict).toBe('verified');
+  });
+
+  it('passes verify-audit: exit 0, VERIFIED, the bundle format named /4', () => {
+    const c = cli(['verify-audit', g.pkg, ...args(g)]);
+    expect(c.err).toBe('');
+    expect(c.code, c.out).toBe(0);
+    expect(c.out).toContain('RESULT: VERIFIED  integrity, chain, receipts, independent_timestamps, harness_frozen_before_runs, run_sequence, plan_complete, reproductions_signed, closed');
+    expect(c.out).toMatch(/PASS {2}bundle format +kronicle-lite-evidence-bundle\/4 \(audit profile\)/);
+    expect(c.out).not.toMatch(/FAIL|not checked|not declared/);
+    const r = verifyAudit(g.pkg, trust(g));
+    expect(r.verdict).toBe('verified');
+    expect(r.bundle_format).toBe(BUNDLE_FORMAT_V4);
+    expect(r.plan.status).toBe('pass');
+    expect(VerifyAuditJsonSchema.safeParse(JSON.parse(JSON.stringify(r))).success).toBe(true);
+  });
+
+  it('--profile legacy: PARTIAL (exit 2), as for a /3 pack', () => {
+    const c = cli(['verify-audit', g.pkg, ...args(g), '--profile', 'legacy']);
+    expect(c.code, c.out).toBe(2);
+    expect(c.out).toMatch(/^RESULT: PARTIAL /m);
+  });
+
+  it('an auth event payload edited in the pack: FAILED (integrity), as any event', () => {
+    const d = copy(g);
+    const ev = join(d, 'bundle', 'events.jsonl');
+    const text = readFileSync(ev, 'utf8').replace('"profile":"owner-a"', '"profile":"owner-b"');
+    writeFileSync(ev, text);
+    reseal(d, g);
+    expectCaught(d, g, 'integrity', /events/);
+  });
+});
+
+/** Every /3 rule holds in /4: the golden tampers again, on the audit with OAuth events. */
+describe('a /4 pack is held to every /3 rule (the tampers again, with OAuth events)', () => {
+  it('unplanned run: FAILED, plan_complete', async () => {
+    const t = await build('unplanned_run', true);
+    expect(t.pack.bundle_format).toBe(BUNDLE_FORMAT_V4);
+    expectCaught(t.pkg, t, 'plan_complete', /run\(s\) not in the plan frozen at seq \d+: run-9 \(seq \d+\)/);
+  });
+  it('missing planned run: FAILED, plan_complete', async () => {
+    const t = await build('missing_planned_run', true);
+    expectCaught(t.pkg, t, 'plan_complete', 'planned run(s) with neither run_completed nor run_abandoned: run-5');
+  });
+  it('a run with the receipt digest, not the derived nonce: FAILED, harness_frozen_before_runs', async () => {
+    const t = await build('nonce_mismatch', true);
+    expectCaught(t.pkg, t, 'harness_frozen_before_runs', /carries a nonce that is not the derived freeze nonce sha256\(01-harness-frozen receipt digest ‖ its 2 TSA token\(s\)\)/);
+  });
+  it("report run_count off by one: FAILED, plan_complete", async () => {
+    const t = await build('wrong_run_count', true);
+    expectCaught(t.pkg, t, 'plan_complete', "the report's run_count is 2; the bundle records 3 run_completed event(s)");
+  });
+  it('an accepted finding without a sign-off: FAILED, reproductions_signed', async () => {
+    const t = await build('unsigned_accepted_finding', true);
+    expect(t.pack.bundle_format).toBe(BUNDLE_FORMAT_V4);
+    expectCaught(t.pkg, t, 'reproductions_signed', /F1/);
+  });
+});
+

@@ -36,7 +36,7 @@ import { AuditError } from './log.js';
 import { checkTimestampReply, inspectTimestamp, MAX_TSR_BYTES, timestampRequest, verifyTimestamp } from './rfc3161.js';
 import { findFreezePending, FREEZE_PENDING_DIR, FREEZE_PENDING_RECORD, isFreezePendingFile, parseFreezePending, REPORT_ARCHIVE_PREFIX } from './freeze-pending.js';
 import { freezeNonce } from './profile.js';
-import { BUNDLE_FORMAT_V3, kindOfEventType } from './schemas.js';
+import { BUNDLE_FORMAT_V3, isProfileFormat, kindOfEventType } from './schemas.js';
 import { pemFileNames, pemsFromText } from './pem-files.js';
 import { parseAllowedSigners } from './sshsig.js';
 import { SHIPPED_TSA_ROOTS } from './tsa-roots.js';
@@ -412,7 +412,7 @@ export async function buildAuditPackage(
     mkdirSync(join(out, FREEZE_PENDING_DIR), { mode: 0o755 });
     for (const [f, b] of got) writeNew(join(out, FREEZE_PENDING_DIR, f), b);
   }
-  const v3 = m.format === BUNDLE_FORMAT_V3;
+  const v3 = isProfileFormat(m.format);
   const profile: Profile = v3 ? 'audit' : 'legacy';
   const sumsTsas = opts.stamp_sums ? (opts.stamp_sums.tsas ?? DEFAULT_TSAS) : [];
 

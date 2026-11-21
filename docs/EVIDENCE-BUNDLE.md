@@ -42,7 +42,7 @@ audit was right, complete, or honest.
 
 | File | Content |
 |---|---|
-| `manifest.json` | Canonical JSON ([RFC 8785](https://www.rfc-editor.org/rfc/rfc8785)) plus `\n`: format (`kronicle-lite-evidence-bundle/1`, `/2` when a milestone kind is present, `/3` with a run plan or a 0.11.0 kind), audit_id, range, index, blob lists, signed root |
+| `manifest.json` | Canonical JSON ([RFC 8785](https://www.rfc-editor.org/rfc/rfc8785)) plus `\n`: format (`kronicle-lite-evidence-bundle/1`, `/2` when a milestone kind is present, `/3` with a run plan or a 0.11.0 kind, `/4` with a 0.13.0 OAuth kind), audit_id, range, index, blob lists, signed root |
 | `manifest.json` signature | `signature: {key_id, signature}`: the store key over the canonical manifest (step 2) |
 | `events.jsonl` | One canonical JSON line per chain event in `[from_seq, to_seq]`. Audit events are in full (the stored chain event). Every other event in the range is a **stub**: `{seq, prev_hash, this_hash, stub: true}`, with no payload; `manifest.stubs` lists each stub's `{seq, this_hash}` |
 | `blobs/<sha256>` | Each referenced artifact the store holds, named by the sha256 of its bytes. Blobs pass the write-time secret guard when they are stored (AUDIT.md) |
@@ -124,9 +124,11 @@ For every full line (not a stub):
    `sha256(JCS({event_id, event_type, actor_id, occurred_at, payload}) | seq | prev_hash | nonce)`.
 2. `event_type` must be `audit.<kind>`, a kind the bundle's format allows:
    `/1` the six 0.9.0 kinds, `/2` also the milestone kinds, `/3` also
-   `run_abandoned`, `reproduction_signed` and `audit_closed` (AUDIT.md).
+   `run_abandoned`, `reproduction_signed` and `audit_closed`, `/4` also the
+   OAuth kinds `auth_registered`, `auth_granted`, `auth_refreshed`,
+   `auth_failed` and `auth_revoked` (AUDIT.md).
 3. `payload.audit_id` must equal the manifest's `audit_id`.
-4. The payload must validate against that kind's schema (AUDIT.md); in `/3`,
+4. The payload must validate against that kind's schema (AUDIT.md); in `/3` and `/4`,
    `harness_frozen.plan`, `run_completed.nonce` and `report_issued.run_count`
    are required, and a `harness_frozen` with a plan in an older format fails.
 
@@ -207,7 +209,7 @@ kronicle-lite audit stamp --out stamps/               # RFC 3161 over sha256(rec
 # at delivery
 kronicle-lite audit package --audit-id A --out pack/ --timestamps stamps/
 # client
-npx -y kronicle-lite@0.12.0 verify-audit pack/ --key-fingerprint <SHA-256 of the auditor key, from the statement of work>
+npx -y kronicle-lite@0.13.0 verify-audit pack/ --key-fingerprint <SHA-256 of the auditor key, from the statement of work>
 ```
 
 Use one store per audit, so the bundle starts at seq 1 and every anchor's range
@@ -243,7 +245,7 @@ stamp carries a later time.
 
 - **`audit`** (the default). Every claim in the table below is checked,
   whatever `claims.json` says: it can add claims, never remove one. On top of
-  the claims' own checks: the bundle is format `/3` (`integrity`); it holds
+  the claims' own checks: the bundle is format `/3` or `/4` (`integrity`); it holds
   only this audit's events, no stubs (`integrity`); verified anchors close the
   freeze (an anchor that commits the freeze and no run), the last run (one
   that commits the last `run_completed` / `run_abandoned` and not yet the
@@ -345,11 +347,15 @@ makes since 0.11.0) is read by kronicle-lite 0.11.0 and later. 0.10.0–0.10.2
 accept only `/1` and `/2`, and fail a `/3` pack on its manifest ("unknown format
 kronicle-lite-evidence-bundle/3"). 0.9.0 and earlier have no `verify-audit`.
 0.11.0–0.11.2 read a late-anchored `/3` pack but report it `FAILED` on the two
-checks above; the late-anchor mode comes with the next release.
+checks above; the late-anchor mode came in 0.12.0. Bundle format `/4` (a
+pack with OAuth events) is read by 0.13.0 and later; 0.11.x and 0.12.0 fail it
+on its manifest ("unknown format
+kronicle-lite-evidence-bundle/4"), and never by skipping events it does not
+know. A pack without OAuth events stays `/3`, readable by 0.11.0 and later.
 
 | Claim (0.11.0) | Checks |
 |---|---|
-| `plan_complete` | the bundle is `/3` and holds one `harness_frozen` with a `plan`; every `run_completed` and `run_abandoned` names a planned run; no planned run ends twice (duplicate), none is left without an end (missing), none is recorded before the freeze; `planned_runs`, when present, is the plan's length; the last `report_issued` has `run_count` equal to the number of `run_completed` events |
+| `plan_complete` | the bundle is `/3` or `/4` and holds one `harness_frozen` with a `plan`; every `run_completed` and `run_abandoned` names a planned run; no planned run ends twice (duplicate), none is left without an end (missing), none is recorded before the freeze; `planned_runs`, when present, is the plan's length; the last `report_issued` has `run_count` equal to the number of `run_completed` events |
 | `reproductions_signed` | every `reproduction_signed` verifies: its SSH signature (`SSHSIG`, namespace `kronicle-lite-reproduction`, Ed25519 or a FIDO `sk-ssh-ed25519` key with user presence) over the statement rebuilt from the event, by a key the allowed signers list for its `signer` (namespace and validity options honoured; `cert-authority` entries are refused), and not the auditor key; every finding whose final status is `accepted` has one |
 | `closed` | exactly one `audit_closed`; it is the bundle's last event; an earlier `report_issued` has its `report_id`; its `run_count` equals the `run_completed` events; its `findings_digest` equals the digest of every finding's final status |
 
@@ -360,11 +366,11 @@ makes. `audit package` declares what the store's contents support:
 `integrity` and `chain` always, `receipts` with at least one anchor,
 `independent_timestamps` when every anchor has a token,
 `harness_frozen_before_runs` only when that check passes, and `run_sequence`
-when the runs carry `run_seq`; for a `/3` bundle also `plan_complete`,
+when the runs carry `run_seq`; for a `/3` or `/4` bundle also `plan_complete`,
 `reproductions_signed` and `closed` when they pass. It prints why a claim is
 not declared. It stamps `SHA256SUMS` (Sectigo and DigiCert, or `--tsa`;
 `--no-stamp-sums` skips it) and checks the pack under the audit profile for a
-`/3` bundle, the legacy profile otherwise (exit 0 VERIFIED, 2 PARTIAL, 1
+`/3` or `/4` bundle, the legacy profile otherwise (exit 0 VERIFIED, 2 PARTIAL, 1
 otherwise).
 
 Under the legacy profile, `verify-audit` fails closed, in this order (the

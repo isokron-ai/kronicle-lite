@@ -30,6 +30,7 @@ import {
   statusEffect,
   transitionAllowed,
   V3_KINDS,
+  AUTH_KINDS,
   type AuditEventInput,
   type AuditKind,
   type FindingStatus,
@@ -370,8 +371,9 @@ export class AuditLog {
 
   /**
    * 0.11.1: the audits with an event in [from_seq, to_seq] whose bundle is `/3` (a freeze with a
-   * `plan`, or a run_abandoned / reproduction_signed / audit_closed): an anchor over such a range
-   * is an audit milestone anchor, so a push that fails must fail loudly (audit mode).
+   * `plan`, or a run_abandoned / reproduction_signed / audit_closed) or, 0.13.0, `/4` (an OAuth
+   * kind): an anchor over such a range is an audit milestone anchor, so a push that fails must fail
+   * loudly (audit mode).
    */
   profileAuditsIn(from_seq: number, to_seq: number): string[] {
     if (!this.tables()) return [];
@@ -381,11 +383,11 @@ export class AuditLog {
           WHERE a.seq BETWEEN ? AND ?
             AND a.audit_id IN (
               SELECT b.audit_id FROM audit_events b JOIN events e ON e.seq = b.seq
-               WHERE b.kind IN (${V3_KINDS.map(() => '?').join(', ')})
+               WHERE b.kind IN (${[...V3_KINDS, ...AUTH_KINDS].map(() => '?').join(', ')})
                   OR (b.kind = 'harness_frozen' AND json_type(e.payload_canonical, '$.plan') = 'array'))
           ORDER BY a.audit_id`,
       )
-      .all(from_seq, to_seq, ...V3_KINDS) as { audit_id: string }[];
+      .all(from_seq, to_seq, ...V3_KINDS, ...AUTH_KINDS) as { audit_id: string }[];
     return rows.map((r) => r.audit_id);
   }
 

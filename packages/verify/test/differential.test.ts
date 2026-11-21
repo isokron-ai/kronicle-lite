@@ -3,7 +3,7 @@
  * with the same arguments and the same data dir give the same stdout (text and --json), the same
  * exit code, the same stderr (up to the program name) and leave the same rollback cache.
  *
- * Packs: one of each bundle format (/1, /2, /3, /3 with a late-anchored freeze) made by kronicle-lite
+ * Packs: one of each bundle format (/1, /2, /3, /3 with a late-anchored freeze, /4 with OAuth events) made by kronicle-lite
  * itself, the published sample pack (packages/verify/test/fixtures, real Sectigo and DigiCert tokens),
  * a tampered copy of each, the usage errors, the rollback cache, and the key-rotation case.
  *
@@ -147,7 +147,7 @@ beforeAll(async () => {
   tsas = [makeTsa({ name: 'Alpha' }), makeTsa({ name: 'Beta' })];
   servers = await Promise.all(tsas.map((t) => serveTsa(t)));
   const env = { backend, tsas, servers };
-  const built = await Promise.all((['v1', 'v2', 'v3', 'v3-late'] as const).map((f) => buildPack(f, env)));
+  const built = await Promise.all((['v1', 'v2', 'v3', 'v3-late', 'v4'] as const).map((f) => buildPack(f, env)));
   for (const p of built) packs.set(p.format, p);
 });
 
@@ -171,12 +171,12 @@ const ARGSETS: [string, string[]][] = [
   ['--tsa-at-gentime', ['--tsa-at-gentime']],
 ];
 
-describe.each(['v1', 'v2', 'v3', 'v3-late'] as const)('format %s: the same report and exit code', (format) => {
+describe.each(['v1', 'v2', 'v3', 'v3-late', 'v4'] as const)('format %s: the same report and exit code', (format) => {
   it('every option set', async () => {
     const p = packs.get(format)!;
     const first = await expectSame(format, ARGSETS[0]![0], [p.dir, ...trust(p)]);
     // what each format is expected to give (the reference, not the comparison)
-    expect(first.code).toBe(format === 'v3' || format === 'v3-late' ? 0 : 1);
+    expect(first.code).toBe(format === 'v3' || format === 'v3-late' || format === 'v4' ? 0 : 1);
     const legacy = await expectSame(format, ARGSETS[1]![0], [p.dir, ...trust(p), '--profile', 'legacy']);
     // PARTIAL is the best the legacy profile gives; a late-anchored freeze is an audit-profile reading (FAILED under legacy)
     expect(legacy.code).toBe(format === 'v3-late' ? 1 : 2);

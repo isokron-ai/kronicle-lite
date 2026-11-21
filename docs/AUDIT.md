@@ -99,6 +99,11 @@ is `{sha256, size, media_type?, redacted?: true}`.
 | `run_abandoned` (0.11.0) | `run_id` (a planned run), `reason` | `fingerprint`, `detail` (ref), `evidence[]` |
 | `reproduction_signed` (0.11.0) | `finding_id`, `signer` (allowed-signers principal), `reproduced_at`, `commands` (ref), `output` (ref), `signature` (ref: armored SSH signature) | `evidence[]` |
 | `audit_closed` (0.11.0) | `report_id`, `run_count`, `findings_digest` | — |
+| `auth_registered` (0.13.0) | `commitment_key`, `registration_id`, `issuer`, `mode` (static \| cimd \| dcr), `client_id`, `token_endpoint_auth_method`, `redirect_uris[]` | `client_id_issued_at`, `client_secret_expires_at`, `client_secret` / `registration_access_token` (commitments), `client_metadata_sha256`, `journal` (ref), `evidence[]` |
+| `auth_granted` (0.13.0) | `commitment_key`, `profile`, `registration_mode`, `resource`, `issuer`, `client_id`, `token_type`, `refreshable`, `access_token` (commitment), `whoami` (passed \| not_configured) | `identity`, `tenant`, `registration_id`, `requested_scope`, `granted_scope`, `expires_in`, `expires_at`, `generation`, `access_token_jwt`, `refresh_token` / `id_token` / `login_hint` (commitments), `prm_sha256`, `as_metadata_sha256`, `attachment` (ref), `journal` (ref), `evidence[]` |
+| `auth_refreshed` (0.13.0) | `commitment_key`, `profile`, `generation`, `rotated`, `access_token` (commitment) | `issuer`, `trigger`, `previous_access_token` / `refresh_token` / `previous_refresh_token` (commitments), `scope`, `expires_in`, `expires_at`, `journal` (ref), `evidence[]` |
+| `auth_failed` (0.13.0) | `commitment_key`, `profile`, `stage`, `error` (codes) | `issuer`, `status`, `generation`, `journal` (ref), `evidence[]` |
+| `auth_revoked` (0.13.0) | `commitment_key`, `profile`, `issuer`, `refresh{sent, status, replay, claim}`, `access{probes[], first_rejected_ms, still_valid_at_cap, remaining_lifetime_s, revoked_explicitly, inconclusive, claim}` | `access_token` / `refresh_token` (commitments), `registration{registration_id?, deleted, status}`, `receipt` (ref), `journal` (ref), `evidence[]` |
 
 The full JSON Schemas are served at `kronicle://schemas/audit`.
 
@@ -164,6 +169,92 @@ A bundle holding a milestone kind is exported as
    finding ends with). Nothing is recorded after it. Anchor and stamp.
 
 Use one store per audit: the audit profile refuses a bundle with stubs.
+
+**OAuth evidence (0.13.0).** An audit of a hosted MCP server logs in as one or
+more test identities. mcp-audit's auth helper records each step on the audit
+chain: `auth_registered` (the OAuth client registration, which several
+profiles may share), `auth_granted` (a login), `auth_refreshed` (a refresh
+outside a run), `auth_failed` (a login or refresh that failed for good) and
+`auth_revoked` (the close-out revocation receipt). Any of them makes the
+bundle `kronicle-lite-evidence-bundle/4`, which is `/3` plus these kinds: every
+`/3` rule applies unchanged, and `verify-audit` reads `/4` under the audit
+profile exactly as `/3`. A store without them is still exported as before
+(the format choice for every set of the older kinds is unchanged), so an
+existing pack and a re-export of an existing store are byte for byte what
+0.11.x and 0.12.0 made. 0.11.x and 0.12.0 readers refuse a `/4` pack by its format.
+
+An OAuth payload has no field for a credential. The schemas are strict at
+every level, so a field named `code`, `code_verifier`, `state`,
+`client_secret`, `token` or any other name not listed is refused. What is
+kept:
+
+- **Commitments, never values.** Every token, code, verifier, secret, subject
+  and login hint is `{commit, len, label}`: `commit` is the first 16 hex
+  digits of `HMAC-SHA256(audit key, label "\n" value)`, `len` the value's
+  length, `label` the kind of credential (`access-token`, `refresh-token`,
+  `id-token`, `authorization-code`, `pkce-verifier`, `code-challenge`,
+  `state`, `client-secret`, `registration-access-token`, `subject`, `jti`,
+  `login-hint`), fixed per field. The key is one per audit and stays with the
+  auditor; each event names its `commitment_key` (the key's sha256) so a
+  revealed key can be checked. The commitment shows that two events saw the
+  same value (the auditor attests to it); nobody without the key can test a
+  guess, and a third party cannot recompute one. Revealing the key opens
+  every commitment of the audit, and lets its holder confirm guesses of the
+  low-entropy ones (a `subject` or `login-hint` that is an email address):
+  reveal it only to whoever must check a commitment.
+- **Issuer, resource, audience, times, scope, client id** in clear. URLs are
+  `https` (or `http` to `127.0.0.1`, `localhost` or `[::1]`) with no
+  userinfo, query, fragment or percent-encoding, so a code or token carried
+  in a query string cannot be recorded (an issuer whose path needs
+  percent-encoding cannot be recorded either). A JWT access token's structure is
+  kept as `access_token_jwt`: header (`alg`, `kid`, `typ`), the claims
+  `iss`, `aud`, `exp`, `iat`, `nbf`, `scope`, `scp`, `client_id`, `azp`,
+  `sub` and `jti` as commitments, the names of the other claims (a
+  namespaced name may be a URL), and `claims_verified` (false unless the
+  signature was checked). The recorder normalises what tokens vary in: a
+  single `aud` string is recorded as a one-element list, and a
+  space-separated `scp` string as the list of its tokens (both lossless);
+  times are NumericDates (a fraction is allowed). An empty scope is left
+  out, not recorded as `""`.
+- **Codes, not text.** `stage`, `error` and the revocation `replay` outcome are
+  lowercase letters and underscores (and `http_<status>` for a replay); there
+  is no field for a server's error description. A server's error string that
+  is not such a code is recorded as `server_error_other` (the recorder maps
+  it; the schema refuses it).
+- **Known media types.** A blob ref in an OAuth event (`journal`,
+  `attachment`, `receipt`) names one of `application/json`,
+  `application/x-ndjson`, `application/octet-stream`, `application/pdf`,
+  `image/png`, `image/jpeg`, `image/webp`, `text/plain` or `text/markdown`,
+  with no parameters.
+- **Event keys from the recorder.** An OAuth event's `event_key` is built from
+  the profile, the kind and the generation, never from a credential such as
+  `state` or `jti`; it refuses a token-shaped value.
+- **No token-shaped value.** Every free string (names, client ids,
+  audiences, issuer claims, key ids, claim names, scopes, URLs, media types,
+  the event key) refuses anything shaped like a JSON Web Token. The
+  write-time secret guard then scans the payload, as for every kind.
+
+What the schemas cannot do: an identifier field (`profile`, `identity`,
+`tenant`, `registration_id`, `client_id`, a scope, `event_key`, a claim
+name, a URL's host or path segment) cannot tell an opaque random credential
+from an identifier. Keeping credentials out of
+those fields is the recorder's field policy (mcp-audit's auth journal
+applies it before anything is recorded), with the secret guard as the
+backstop for the shapes it knows.
+
+The revocation receipt (`auth_revoked`) states one claim level per part:
+`rejection_observed` (the revoked token was tried and refused),
+`request_accepted` (the revocation endpoint answered 200, which RFC 7009 also
+answers for an unknown token, so it proves nothing alone) or
+`not_confirmed`. `access.probes` are the timed reads with the last access
+token (`after_ms`, `elapsed_ms`, `status`), `first_rejected_ms` the measured
+revocation latency, and `still_valid_at_cap` with `remaining_lifetime_s` a
+token that outlived its revocation. The full receipt can be attached as
+`receipt`.
+
+`verify-audit` checks these events as it checks every event (chain,
+signature, schema, blob refs); it does not judge them. Whether every grant
+was revoked before the close is mcp-audit's close-out precondition.
 
 **The 0.9.0 convention.** Before these kinds, a harness freeze was recorded as
 `finding` with `class: "protocol_freeze"` and `fingerprint`, and runs as
