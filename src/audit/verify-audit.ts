@@ -850,6 +850,13 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
   }
 
   // ── claim results ──
+  /**
+   * 0.12.1: which passing checks can carry a claim. independent_timestamps says each anchor receipt is
+   * stamped under two pinned TSA CAs, so only a verified token over a receipt backs it: "no stamp
+   * pending" and the tokens over SHA256SUMS are checked with it but cannot make it pass alone (a pack
+   * with no receipts read PASS "0 of 0 RFC 3161 token(s)").
+   */
+  const backs = (c: Claim, k: AuditCheck): boolean => k.status === 'pass' && (c !== 'independent_timestamps' || (k.subject !== null && k.subject !== 'SHA256SUMS'));
   const summary = claimSummaries();
   for (const c of CLAIMS) {
     const mine = checks.filter((k) => k.claim === c);
@@ -876,13 +883,13 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     } else if (mine.some((k) => k.status === 'fail')) {
       status = 'fail';
       evidence = mine.filter((k) => k.status === 'fail').map((k) => `${k.subject ? `${k.subject} ` : ''}${k.check}: ${k.evidence}`)[0]!;
-    } else if (mine.some((k) => k.status === 'pass')) {
+    } else if (mine.some((k) => backs(c, k))) {
       status = 'pass';
       evidence = summary[c] ?? '';
       if (c === 'independent_timestamps' && !isDeclared && tsaForKeys !== null) evidence = `checked for receipts (${tsaForKeys}): ${evidence}`;
     } else {
       status = 'fail';
-      evidence = 'nothing in the pack backs this claim';
+      evidence = c === 'independent_timestamps' && result.anchors.length === 0 ? 'nothing in the pack backs this claim: no anchor receipt, so no RFC 3161 token over one' : 'nothing in the pack backs this claim';
     }
     result.claims.push({ claim: c, status, declared: isDeclared, required: isRequired, evidence });
   }
@@ -953,9 +960,11 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     result.auditor.spki_sha256 = chainId;
     if (opts.key_fingerprint !== undefined) {
       const want = normFp(opts.key_fingerprint);
-      add('pack', null, null, 'auditor key', want === chainId, want === chainId ? `${keyId}, SHA-256(SPKI) ${chainId} = --key-fingerprint` : `the pack's auditor key has SHA-256(SPKI) ${chainId}, not the pinned ${want}`);
+      // 0.12.1: integrity owns "signed by the pinned key": a pack whose own key verifies its own
+      // signatures but is not the pinned one is a forgery, and integrity fails with it.
+      add('pack', 'integrity', null, 'auditor key', want === chainId, want === chainId ? `${keyId}, SHA-256(SPKI) ${chainId} = --key-fingerprint` : `the pack's auditor key has SHA-256(SPKI) ${chainId}, not the pinned ${want}`);
     } else if (opts.key_pem !== undefined) {
-      add('pack', null, null, 'auditor key', filePem === null || spki(filePem) === chainId, filePem === null || spki(filePem) === chainId ? `${keyId}, SHA-256(SPKI) ${chainId} (--key)` : `auditor-key.pem (${short(spki(filePem))}) is not the pinned key ${keyId}`);
+      add('pack', 'integrity', null, 'auditor key', filePem === null || spki(filePem) === chainId, filePem === null || spki(filePem) === chainId ? `${keyId}, SHA-256(SPKI) ${chainId} (--key)` : `auditor-key.pem (${short(spki(filePem))}) is not the pinned key ${keyId}`);
     } else {
       add('pack', null, null, 'auditor key', false, `not pinned: pass --key-fingerprint with the auditor key fingerprint from the statement of work (the pack's own key is ${keyId}, SHA-256(SPKI) ${chainId})`);
     }
@@ -1108,8 +1117,10 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     // ── 6. receipts and their tokens ──
     const anchorsDir = join(dir, 'anchors');
     const ast = lstatSync(anchorsDir, { throwIfNoEntry: false });
+    // 0.12.1: with no receipt to check, SHA256SUMS's tokens are still checked (they returned early before).
     if (!ast || ast.isSymbolicLink() || !ast.isDirectory()) {
       add('anchor', 'receipts', null, 'anchors', false, !ast ? 'anchors/ is missing' : 'anchors/ is not a directory');
+      if (on('independent_timestamps') && !noTsa) checkSumsTokens(roots, groupOf);
       timeline([], full, events !== null, to, vb.root, vb.manifest_sha256, null);
       return;
     }
@@ -1117,6 +1128,7 @@ export function verifyAudit(packageDir: string, opts: VerifyAuditOptions = {}): 
     const receipts = names.filter((f) => f.endsWith('.receipt.json'));
     if (receipts.length === 0) {
       add('anchor', 'receipts', null, 'anchors', false, 'anchors/ holds no receipts');
+      if (on('independent_timestamps') && !noTsa) checkSumsTokens(roots, groupOf);
       timeline([], full, events !== null, to, vb.root, vb.manifest_sha256, null);
       return;
     }

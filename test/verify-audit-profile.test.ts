@@ -419,6 +419,69 @@ describe('the audit profile: a golden pack', () => {
   });
 });
 
+describe('0.12.1: a claim passes only on the evidence that backs it', () => {
+  let g: Golden;
+  beforeAll(async () => {
+    g = await build();
+  });
+  /** The golden pack with anchors/ emptied and SHA256SUMS re-sealed (and re-stamped) by the key holder. */
+  const unanchored = (): string => {
+    const d = copy(g);
+    rmSync(join(d, 'anchors'), { recursive: true });
+    mkdirSync(join(d, 'anchors'));
+    reseal(d, g);
+    return d;
+  };
+
+  it('independent_timestamps with no anchor receipt: FAIL, not "PASS 0 of 0", and the tokens over SHA256SUMS are still checked', () => {
+    const d = unanchored();
+    for (const opts of [{}, { require: ['independent_timestamps' as const] }]) {
+      const r = verifyAudit(d, trust(g, opts));
+      expect(claimOf(r, 'independent_timestamps'), failed(r).join('\n')).toBe('fail');
+      expect(r.claims.find((x) => x.claim === 'independent_timestamps')!.evidence).toBe('nothing in the pack backs this claim: no anchor receipt, so no RFC 3161 token over one');
+      // 0.12.0 returned before checkSumsTokens: the two tokens over SHA256SUMS went unchecked
+      expect(r.sums_timestamps.map((t) => t.ok)).toEqual([true, true]);
+      expect(r.checks.some((c) => c.claim === 'independent_timestamps' && c.subject === 'SHA256SUMS' && c.check === 'independent TSAs' && c.status === 'pass')).toBe(true);
+    }
+    const c = cli(['verify-audit', d, ...args(g), '--require', 'independent_timestamps']);
+    expect(c.code).toBe(1);
+    expect(c.out).toMatch(/^ {2}FAIL {10}independent_timestamps {6}nothing in the pack backs this claim/m);
+    expect(c.out).not.toContain('0 of 0 RFC 3161 token(s)');
+    expect(c.out).toMatch(/^RESULT: FAILED {2}receipts, independent_timestamps, /m);
+    // no token over SHA256SUMS either: that failure is the evidence
+    rmSync(join(d, 'SHA256SUMS.alpha.tsr'));
+    rmSync(join(d, 'SHA256SUMS.beta.tsr'));
+    const r = verifyAudit(d, trust(g));
+    expect(claimOf(r, 'independent_timestamps')).toBe('fail');
+    expect(r.claims.find((x) => x.claim === 'independent_timestamps')!.evidence).toMatch(/^SHA256SUMS RFC 3161: no timestamp token over SHA256SUMS/);
+    // the legacy profile, which does not require tokens over SHA256SUMS: still FAIL, nothing backs it
+    const l = verifyAudit(d, trust(g, { profile: 'legacy', require: ['independent_timestamps'] }));
+    expect(claimOf(l, 'independent_timestamps')).toBe('fail');
+    expect(l.claims.find((x) => x.claim === 'independent_timestamps')!.evidence).toMatch(/^nothing in the pack backs this claim/);
+  });
+
+  it('a pack signed by a key other than the pinned one: integrity FAILs and the RESULT line names it', () => {
+    // A forger's pack is consistent under the forger's own key; only the pin tells it apart.
+    const other = createHash('sha256').update('another auditor key').digest('hex');
+    const r = verifyAudit(g.pkg, { ...trust(g), key_fingerprint: other });
+    expect(claimOf(r, 'integrity'), failed(r).join('\n')).toBe('fail');
+    expect(r.claims.find((x) => x.claim === 'integrity')!.evidence).toBe(`auditor key: the pack's auditor key has SHA-256(SPKI) ${g.fp}, not the pinned ${other}`);
+    expect(r.verdict).toBe('failed');
+    const c = cli(['verify-audit', g.pkg, '--key-fingerprint', other, '--genesis', g.genesis, '--tsa-roots', g.rootsDir]);
+    expect(c.code).toBe(1);
+    expect(c.out).toMatch(/^RESULT: FAILED {2}integrity \(1 failed check\(s\)\)$/m);
+    // the right pin: integrity passes as before
+    expect(claimOf(verifyAudit(g.pkg, trust(g)), 'integrity')).toBe('pass');
+  });
+
+  it("VERIFY.md numbers its sections in the order they print", () => {
+    const md = readFileSync(join(g.pkg, 'VERIFY.md'), 'utf8');
+    const heads = [...md.matchAll(/^### (\d+)\. (.*)$/gm)].map((m) => [Number(m[1]), m[2]]);
+    expect(heads.map((h) => h[1])).toEqual(['Files: SHA256SUMS and its signature', 'Independent time: each RFC 3161 token', 'The freeze nonce every run carries', 'Anchor receipts: Ed25519 signatures', 'Human sign-offs']);
+    expect(heads.map((h) => h[0])).toEqual([1, 2, 3, 4, 5]); // 0.12.0: 1, 4, 2, 5, 3
+  });
+});
+
 describe('legacy packs (made before 0.11.0)', () => {
   let l: Golden;
   beforeAll(async () => {
